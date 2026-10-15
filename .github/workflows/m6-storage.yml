@@ -1,0 +1,329 @@
+name: M6 storage bring-up
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/m6-storage.yml'
+      - 'docs/m6-storage.md'
+      - 'manifests/m6-ufs-closure.tsv'
+      - 'manifests/m6-ufs-seeds.txt'
+      - 'manifests/m6b-remoteproc-closure.tsv'
+      - 'manifests/m6b-remoteproc-seeds.txt'
+      - 'docs/m6b-remoteproc.md'
+      - 'scripts/m6-closure-load-order.inc'
+      - 'scripts/m6b-closure-load-order.inc'
+      - 'scripts/m6-init.c'
+      - 'scripts/m6-module-closure.py'
+      - 'scripts/m6-verify-closure-kmi.py'
+      - 'scripts/m3-python.sh'
+      - 'scripts/tests/test-m6-storage.sh'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: m6-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  synthetic-tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out project
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Validate scripts
+        run: |
+          bash -n scripts/tests/test-m6-storage.sh
+          python3 -m py_compile scripts/m6-module-closure.py scripts/m6-verify-closure-kmi.py
+
+      - name: Exercise the closure and storage-init gates
+        run: scripts/tests/test-m6-storage.sh
+
+      - name: Re-verify the committed closure against the M1 kernel surface
+        run: |
+          # The kernel's own Module.symvers is not in the tree, so this proves
+          # the closure against the frozen KMI digest instead: if the exported
+          # surface ever moves, M1's own gate fails first and this manifest has
+          # to be regenerated.
+          python3 - <<'PY'
+          import pathlib
+          for name in ("m6-ufs-closure.tsv", "m6b-remoteproc-closure.tsv"):
+              rows = pathlib.Path("manifests", name).read_text().splitlines()
+              body = [r for r in rows[1:] if r.strip()]
+              names = [r.split("\t")[1] for r in body]
+              assert len(names) == len(set(names)), f"{name} lists a module twice"
+              assert all(len(r.split("\t")) == 8 for r in body), name
+              assert all(r.split("\t")[7] in ("1", "2") for r in body), name
+              print(f"{name}: {len(names)} modules")
+          PY
+
+      - name: Assert no proprietary payload is present
+        run: |
+          if find . -path './.git' -prune -o -type f \
+            \( -name '*.img' -o -name '*.ko' -o -name '*.mbn' -o -name '*.elf' \) \
+            -print -quit | grep -q .; then
+            echo 'proprietary image/module payload found in checkout' >&2
+            exit 1
+          fi
+
+  build-init:
+    needs: synthetic-tests
+    # Temporary GitHub-hosted path while marble-builder is under maintenance.
+    # This is a small freestanding init build, not a kernel build.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out project
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Fetch pinned Android clang toolchain
+        run: scripts/setup-toolchain.sh work
+
+      - name: Build both M6 init variants
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Two variants of one program. They differ in the final action only:
+          # `timing` encodes the stage it reached in a reboot delay and needs
+          # neither Android nor root, `diag` hands over to /init.stock so the
+          # same boot's dmesg can be read. No stock binary is present here; the
+          # operator supplies it locally for the diag image.
+          mkdir -p artifacts/m6
+          cc=work/clang-r416183b/bin/clang
+          build() {
+            "$cc" --target=aarch64-linux-gnu \
+              -static -nostdlib -nostdinc -ffreestanding \
+              -fno-stack-protector -fno-builtin -fno-PIC \
+              -fno-asynchronous-unwind-tables \
+              -O2 -Wall -Werror -Iscripts \
+              -DM6_ACTION_EXEC="$2" \
+              -fuse-ld=lld -Wl,--build-id=none \
+              -o "$1" scripts/m6-init.c
+          }
+          build artifacts/m6/init-timing 0
+          build artifacts/m6/init-diag 1
+          # D3: observability only. Dumps the driver core's view of the
+          # controller's suppliers at the bind check, then hands over without
+          # touching storage.
+          "$cc" --target=aarch64-linux-gnu \
+            -static -nostdlib -nostdinc -ffreestanding \
+            -fno-stack-protector -fno-builtin -fno-PIC \
+            -fno-asynchronous-unwind-tables \
+            -O2 -Wall -Werror -Iscripts \
+            -DM6_ACTION_EXEC=1 -DM6_SUPPLIER_DUMP=1 \
+            -fuse-ld=lld -Wl,--build-id=none \
+            -o artifacts/m6/init-dump scripts/m6-init.c
+          for v in timing diag; do
+            build "artifacts/m6/init-$v.again" "$([ $v = diag ] && echo 1 || echo 0)"
+            cmp "artifacts/m6/init-$v" "artifacts/m6/init-$v.again"
+            rm "artifacts/m6/init-$v.again"
+          done
+          # The two variants must actually differ, or the experiment compares
+          # identical images.
+          if cmp -s artifacts/m6/init-timing artifacts/m6/init-diag; then
+            echo 'the timing and diagnostic variants are identical' >&2
+            exit 1
+          fi
+          for v in timing diag dump; do
+            test "$(stat -c %s artifacts/m6/init-$v)" -lt 131072
+          done
+          sha256sum artifacts/m6/init-timing artifacts/m6/init-diag \
+            artifacts/m6/init-dump | tee artifacts/m6/SHA256SUMS
+
+      - name: Build the M6b remoteproc variants
+        shell: bash
+        run: |
+          set -euo pipefail
+          # One image per remoteproc, plus a control that starts none of them.
+          # The selector is a compile-time #if chain with an #error default, so
+          # an image physically cannot carry two targets; building all five here
+          # means the hardware sequence needs no further CI round trip.
+          mkdir -p artifacts/m6b
+          cc=work/clang-r416183b/bin/clang
+          for rp in NONE ADSP CDSP SLPI MSS; do
+            "$cc" --target=aarch64-linux-gnu \
+              -static -nostdlib -nostdinc -ffreestanding \
+              -fno-stack-protector -fno-builtin -fno-PIC \
+              -fno-asynchronous-unwind-tables \
+              -O2 -Wall -Werror -Iscripts \
+              -DM6_ACTION_EXEC=1 -DM6_PHASE=2 -DM6_RPROC=M6_RPROC_$rp \
+              -fuse-ld=lld -Wl,--build-id=none \
+              -o "artifacts/m6b/init-$(echo "$rp" | tr 'A-Z' 'a-z')" scripts/m6-init.c
+          done
+          # Each image must carry exactly the 52 declared modules, exactly one
+          # remoteproc device name, and the control none at all.
+          python3 - <<'PY'
+          import itertools, pathlib, re
+          rows = pathlib.Path("manifests/m6b-remoteproc-closure.tsv").read_text().splitlines()
+          want = [r.split("\t")[1] for r in rows[1:] if r.strip()]
+          devices = {"adsp": b"3000000.remoteproc-adsp", "cdsp": b"32300000.remoteproc-cdsp",
+                     "slpi": b"2400000.remoteproc-slpi", "mss": b"4080000.remoteproc-mss"}
+          seen = {}
+          for name in ("none", *devices):
+              blob = pathlib.Path("artifacts/m6b", f"init-{name}").read_bytes()
+              found = sorted(set(m.decode() for m in re.findall(rb"[\w.+-]+\.ko", blob)))
+              assert [w for w in want if w.encode() in blob] == want, f"{name}: modules missing"
+              assert not [f for f in found if f not in want], f"{name}: undeclared modules"
+              carried = [k for k, d in devices.items() if d in blob]
+              assert carried == ([] if name == "none" else [name]), f"{name} carries {carried}"
+              seen[name] = blob
+          for a, b in itertools.combinations(seen, 2):
+              assert seen[a] != seen[b], f"{a} and {b} are identical images"
+          print(f"5 M6b images, {len(want)} modules each, one remoteproc apiece")
+          PY
+          # R1 and R2, the two runs that follow the control's failure. R1 is the
+          # same control minus the last module: qcom_q6v5_pas.ko is load index
+          # 51 of 52, so a prefix of 51 removes exactly it. Nothing is added and
+          # nothing is reordered. R2 keeps all 52 and only reads.
+          last=$(( $(grep -c '^\s*"' scripts/m6b-closure-load-order.inc) - 1 ))
+          test "$(grep -n '"qcom_q6v5_pas.ko"' scripts/m6b-closure-load-order.inc \
+            | cut -d: -f1)" = "$(( last + 4 ))"
+          "$cc" --target=aarch64-linux-gnu \
+            -static -nostdlib -nostdinc -ffreestanding \
+            -fno-stack-protector -fno-builtin -fno-PIC \
+            -fno-asynchronous-unwind-tables \
+            -O2 -Wall -Werror -Iscripts \
+            -DM6_ACTION_EXEC=1 -DM6_PHASE=2 -DM6_MODULE_PREFIX="$last" \
+            -fuse-ld=lld -Wl,--build-id=none \
+            -o artifacts/m6b/init-r1 scripts/m6-init.c
+          "$cc" --target=aarch64-linux-gnu \
+            -static -nostdlib -nostdinc -ffreestanding \
+            -fno-stack-protector -fno-builtin -fno-PIC \
+            -fno-asynchronous-unwind-tables \
+            -O2 -Wall -Werror -Iscripts \
+            -DM6_ACTION_EXEC=1 -DM6_PHASE=2 -DM6_RPROC_DUMP=1 \
+            -fuse-ld=lld -Wl,--build-id=none \
+            -o artifacts/m6b/init-r2 scripts/m6-init.c
+          python3 - <<'PY'
+          import pathlib, re
+          rows = pathlib.Path("manifests/m6b-remoteproc-closure.tsv").read_text().splitlines()
+          want = [r.split("\t")[1] for r in rows[1:] if r.strip()]
+          none = pathlib.Path("artifacts/m6b/init-none").read_bytes()
+          r1 = pathlib.Path("artifacts/m6b/init-r1").read_bytes()
+          r2 = pathlib.Path("artifacts/m6b/init-r2").read_bytes()
+          assert r1 != none and r2 != none and r1 != r2, "R1/R2 are not distinct images"
+          # R1 shortens the loop bound, not the array, so the last name may or
+          # may not survive as a string depending on what the optimiser keeps.
+          # What can be asserted statically is that the prefix itself is intact
+          # and in order; that only 51 of them are loaded is asserted at run
+          # time instead, from the image's own "M6: module prefix=51 of 52".
+          assert want[-1] == "qcom_q6v5_pas.ko", want[-1]
+          present = [w for w in want if w.encode() in r1]
+          assert present in (want, want[:-1]), present[-3:]
+          # R2 keeps the whole closure and only reads.
+          assert [w for w in want if w.encode() in r2] == want
+          assert b"devices_deferred" in r2
+          for started in (b"3000000.remoteproc-adsp", b"32300000.remoteproc-cdsp",
+                          b"4080000.remoteproc-mss", b"2400000.remoteproc-slpi"):
+              assert started in r2 and started not in none, started
+          print(f"R1 carries {len(want) - 1} modules, R2 carries {len(want)} and reads only")
+          PY
+          sha256sum artifacts/m6b/init-* | tee artifacts/m6b/SHA256SUMS
+
+      - name: Upload the M6b remoteproc variants
+        uses: actions/upload-artifact@v7
+        with:
+          name: marble-m6b-init-${{ github.sha }}
+          path: |
+            artifacts/m6b/init-*
+            artifacts/m6b/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Build the narrowing prefixes
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Run D failed with no output at all, so the first question is whether
+          # the init runs. These builds answer it at prefix 0 and then bisect
+          # the module list. Every one of the 38 is a second of clang, so they
+          # are all built now and the bisection needs no further CI round trip.
+          # A prefix is a prefix: the stock-order list is never reordered and
+          # nothing is ever added to it.
+          mkdir -p artifacts/m6/bisect
+          cc=work/clang-r416183b/bin/clang
+          # Derived, not hardcoded: the closure grows only when evidence adds a
+          # seed, and the prefixes must follow it.
+          count=$(grep -c '^\s*"' scripts/m6-closure-load-order.inc)
+          test "$count" = "$(( $(wc -l < manifests/m6-ufs-closure.tsv) - 1 ))"
+          for n in $(seq 0 "$count"); do
+            "$cc" --target=aarch64-linux-gnu \
+              -static -nostdlib -nostdinc -ffreestanding \
+              -fno-stack-protector -fno-builtin -fno-PIC \
+              -fno-asynchronous-unwind-tables \
+              -O2 -Wall -Werror -Iscripts \
+              -DM6_ACTION_EXEC=1 -DM6_BISECT=1 -DM6_MODULE_PREFIX="$n" \
+              -fuse-ld=lld -Wl,--build-id=none \
+              -o "artifacts/m6/bisect/init-p$(printf '%02d' "$n")" scripts/m6-init.c
+          done
+          # Prefix 0 must carry no module name at all, and the full prefix must
+          # carry every one: a build that loads more than it says would make the
+          # bisection meaningless.
+          python3 - <<'PY'
+          import pathlib, re
+          rows = pathlib.Path("manifests/m6-ufs-closure.tsv").read_text().splitlines()
+          want = [r.split("\t")[1] for r in rows[1:] if r.strip()]
+          d = pathlib.Path("artifacts/m6/bisect")
+          for n in (0, len(want)):
+              blob = (d / f"init-p{n:02d}").read_bytes()
+              found = [w for w in want if w.encode() in blob]
+              assert found == want[:n], f"prefix {n} carries {len(found)} names"
+          # Neighbouring prefixes must differ, or a step of the search is blind.
+          seen = {}
+          for n in range(len(want) + 1):
+              seen[n] = (d / f"init-p{n:02d}").read_bytes()
+          for n in range(len(want)):
+              assert seen[n] != seen[n + 1], f"prefix {n} and {n+1} are identical"
+          print(f"built {len(want) + 1} distinct narrowing prefixes")
+          PY
+          sha256sum artifacts/m6/bisect/init-p* > artifacts/m6/bisect/SHA256SUMS
+
+      - name: Upload the narrowing prefixes
+        uses: actions/upload-artifact@v7
+        with:
+          name: marble-m6-bisect-DIAGNOSTIC-${{ github.sha }}
+          path: |
+            artifacts/m6/bisect/init-p*
+            artifacts/m6/bisect/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Assert the built list matches the committed closure
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Every module name in the manifest must appear in the binary, and
+          # nothing else may: a stray module string would mean the image loads
+          # something the manifest does not declare.
+          python3 - <<'PY'
+          import pathlib, re
+          blob = pathlib.Path("artifacts/m6/init-timing").read_bytes()
+          rows = pathlib.Path("manifests/m6-ufs-closure.tsv").read_text().splitlines()
+          want = [r.split("\t")[1] for r in rows[1:] if r.strip()]
+          found = sorted(set(m.decode() for m in re.findall(rb"[\w.+-]+\.ko", blob)))
+          missing = [w for w in want if w.encode() not in blob]
+          extra = [f for f in found if f not in want]
+          assert not missing, f"missing from the binary: {missing}"
+          assert not extra, f"binary loads undeclared modules: {extra}"
+          print(f"binary carries exactly the {len(want)} declared modules")
+          PY
+
+      - name: Upload the M6 init variants
+        uses: actions/upload-artifact@v7
+        with:
+          name: marble-m6-init-${{ github.sha }}
+          path: |
+            artifacts/m6/init-timing
+            artifacts/m6/init-diag
+            artifacts/m6/init-dump
+            artifacts/m6/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14

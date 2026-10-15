@@ -1,0 +1,47 @@
+# M6b seed set: the M6a storage closure, frozen, plus what the remoteprocs add.
+#
+# The first block is copied verbatim from m6-ufs-seeds.txt and must stay that
+# way. M6a is a hardware-proven baseline; M6b is a superset of it, never a
+# revision of it. The suite asserts every module in m6-ufs-closure.tsv is still
+# present here.
+#
+# The second block is read off the stock device the same way M6a's was: the
+# four remoteproc devices and the transitive suppliers the driver core records
+# for them. All four are driven by one module and all four suppliers except
+# smp2p are already in the storage closure.
+#
+#   /sys/class/remoteproc/remoteproc0  3000000.remoteproc-adsp   qcom,cape-adsp-pas
+#   /sys/class/remoteproc/remoteproc1  32300000.remoteproc-cdsp  qcom,cape-cdsp-pas
+#   /sys/class/remoteproc/remoteproc2  4080000.remoteproc-mss    qcom,cape-modem-pas
+#   /sys/class/remoteproc/remoteproc3  2400000.remoteproc-slpi   qcom,waipio-slpi-pas
+#
+# Each one's supplier list is qnoc_waipio, clk_rpmh, rpmh_regulator, its own
+# smp2p node, and for adsp and slpi also qcom_pdc. Only smp2p is new.
+
+# ---- frozen M6a storage baseline ----
+ufs_qcom                    # 1d84000.ufshc, driver ufshcd-qcom, compatible qcom,ufshc
+phy_qcom_ufs_qmp_v4_cape    # 1d80000.ufsphy_mem, compatible qcom,ufs-phy-qmp-v4-cape
+gcc_waipio                  # 100000.clock-controller
+clk_rpmh                    # 17a00000.rsc:qcom,rpmhclk
+rpmh_regulator              # 17a00000.rsc:rpmh-regulator-ldob7 and -ldob9
+gdsc_regulator              # 187004.qcom,gdsc
+qnoc_waipio                 # 1500000/16e0000/19100000.interconnect and soc:interconnect@1
+arm_smmu                    # 15000000.apps-smmu
+pinctrl_cape                # f000000.pinctrl
+qcom_pdc                    # b220000.interrupt-controller, supplier of pinctrl
+dispcc_waipio               # af00000.clock-controller, via af20000.rsc:bcm_voter
+
+# ---- M6b remoteproc ----
+qcom_q6v5_pas               # the driver bound to all four remoteproc devices
+smp2p                       # soc:qcom,smp2p-{adsp,cdsp,modem,dsps}, one per remoteproc
+
+# Added after the R2 hardware run named it, and nothing else was added with it.
+#
+# The stock supplier dump could not have found this one. On stock, every
+# remoteproc's direct suppliers are already bound, so the graph reads as
+# satisfied; what R2 showed on our own kernel is that all four remoteprocs and
+# all four smp2p devices sit in devices_deferred, and that the single supplier
+# still dormant and unbound underneath every one of them is ed18000.qcom,ipcc.
+# smp2p reaches it through an `mboxes` phandle, which is a driver-core edge and
+# leaves no trace in modules.dep - exactly the gap this seed file exists for.
+qcom_ipcc                   # ed18000.qcom,ipcc, the mailbox every smp2p needs

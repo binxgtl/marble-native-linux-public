@@ -1,0 +1,46 @@
+name: M3 boot v4 integration
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/m3-boot-integration.yml'
+      - 'docs/m3-boot-integration.md'
+      - 'scripts/m3-build-test-image.sh'
+      - 'scripts/m3-python.sh'
+      - 'scripts/m3-repack-boot.py'
+      - 'scripts/tests/test-m3-boot-repack.sh'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: m3-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  synthetic-repack-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out project
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Validate scripts
+        run: |
+          bash -n scripts/*.sh scripts/tests/*.sh
+          python3 -m py_compile scripts/m3-repack-boot.py
+
+      - name: Exercise strict boot v4 repack and failure gates
+        run: scripts/tests/test-m3-boot-repack.sh
+
+      - name: Assert no proprietary boot inputs are present
+        run: |
+          if find . -path './.git' -prune -o -type f \
+            \( -name '*.img' -o -name '*.ko' \) -print -quit | grep -q .; then
+            echo 'proprietary image/module payload found in checkout' >&2
+            exit 1
+          fi

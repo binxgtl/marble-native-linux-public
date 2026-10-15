@@ -1,0 +1,72 @@
+name: M2 stock module KMI compatibility
+
+# M2 no longer builds a kernel. It used to run its own full build of the M1
+# interface, which was a byte-for-byte duplicate of what M1 had just produced
+# from the same pinned inputs: two ten-minute self-hosted builds, serialised on
+# one VPS, for one result. The gate that needs a kernel now runs inside the M1
+# workflow against the canonical artifact, which is the only place a kernel is
+# built.
+#
+# What remains here is the part that genuinely belongs to M2: the self-test of
+# the sanitised extraction and comparison tooling, which needs no kernel.
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/m2-kmi.yml'
+      - 'manifests/stock-module-providers.json'
+      - 'manifests/stock-module-versions.json'
+      - 'scripts/m2-extract-stock-module-manifest.sh'
+      - 'scripts/m2-module-manifest.py'
+      - 'scripts/m2-verify-kmi.py'
+      - 'scripts/tests/test-m2-tools.sh'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: m2-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tooling-self-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out project
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install extractor dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends binutils gcc kmod python3
+
+      - name: Validate repository shell scripts
+        run: bash -n scripts/*.sh scripts/tests/*.sh
+
+      - name: Validate provider-aware extractor and verifier
+        run: scripts/tests/test-m2-tools.sh
+
+      - name: Require sanitized provider-aware inputs
+        run: |
+          set -euo pipefail
+          test -s manifests/stock-module-versions.json
+          test -s manifests/stock-module-providers.json
+          python3 - <<'PY'
+          import json
+          manifest = json.load(open('manifests/stock-module-versions.json'))
+          providers = json.load(open('manifests/stock-module-providers.json'))
+          assert manifest['schema'] == 'marble-stock-module-versions-v1'
+          assert providers['schema'] == 'marble-stock-module-providers-v1'
+          assert manifest['status'] == 'NOT BOOT-PROVEN'
+          assert providers['status'] == 'NOT BOOT-PROVEN'
+          PY
+
+      - name: State where the kernel-backed gate runs
+        run: |
+          echo "The provider-aware comparison against a real Module.symvers runs in"
+          echo "the M1 workflow, against the canonical kernel artifact. It is not"
+          echo "skipped; it moved next to the only place a kernel is built."

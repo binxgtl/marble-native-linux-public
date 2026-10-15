@@ -1,0 +1,45 @@
+# M6 phase 1 seed set: the modules the stock kernel actually binds in the UFS
+# supplier graph. Not a guess — every line is a device that appears in
+# /sys/devices/platform/soc/1d84000.ufshc when walking supplier: device links
+# transitively on the stock ROM, with the module read from that device's
+# driver/module symlink. The walk is recorded in the M6 evidence.
+#
+# The symbol closure over modules.dep is computed from these; it does not
+# capture clock, regulator, interconnect or pinctrl providers, because those
+# are resolved by the driver core from device-tree phandles rather than by the
+# linker. Seeding from the runtime graph is what closes that gap.
+#
+# Two of these correct an assumption that reading modules.load alone would have
+# got wrong: this device binds the *cape* PHY and pinctrl, not the waipio ones,
+# even though its clock and interconnect drivers are waipio.
+#
+# format: module-name  # device it is bound to
+ufs_qcom                    # 1d84000.ufshc, driver ufshcd-qcom, compatible qcom,ufshc
+phy_qcom_ufs_qmp_v4_cape    # 1d80000.ufsphy_mem, compatible qcom,ufs-phy-qmp-v4-cape
+gcc_waipio                  # 100000.clock-controller
+clk_rpmh                    # 17a00000.rsc:qcom,rpmhclk
+rpmh_regulator              # 17a00000.rsc:rpmh-regulator-ldob7 and -ldob9
+gdsc_regulator              # 187004.qcom,gdsc
+qnoc_waipio                 # 1500000/16e0000/19100000.interconnect and soc:interconnect@1
+arm_smmu                    # 15000000.apps-smmu
+pinctrl_cape                # f000000.pinctrl
+qcom_pdc                    # b220000.interrupt-controller, supplier of pinctrl
+
+# Added after M6a run D3, from evidence and not from the 26 modules Android
+# happened to load next. The controller's two dormant suppliers were named by
+# the driver core itself, and the chain from there is entirely read off the
+# device:
+#
+#   1d84000.ufshc
+#     supplier 19100000.interconnect (qcom,waipio-gem_noc)  status=dormant
+#     supplier soc:interconnect@1    (qcom,waipio-mc_virt)  status=dormant
+#       both list TWO qcom,bcm-voters; the two providers that DO register list one
+#       the second voter is af20000.rsc:bcm_voter
+#         its parent af20000.rsc (qcom,rpmh-rsc) has one supplier:
+#           af00000.clock-controller, driver disp_cc-waipio, module dispcc_waipio
+#
+# So UFS cannot probe until the display clock controller is bound, because the
+# memory-noc and mc_virt providers vote through a BCM voter that hangs off the
+# display RSC. The same boot shows Android loading dispcc-waipio.ko at 15.677 s
+# and ufshcd-qcom binding at 15.687 s.
+dispcc_waipio               # af00000.clock-controller, per the chain above

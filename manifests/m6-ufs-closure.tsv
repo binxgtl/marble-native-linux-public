@@ -1,0 +1,39 @@
+load	module	stock_index	size	sha256	reason	deps	stock_stage
+0	cmd-db.ko	19	20648	81f2401f0b8ec7f08d638f10f3f8e34dcc78ea2a6959fdabaf19ab94058180cc	dep of qnoc-waipio.ko	-	1
+1	debug-regulator.ko	24	53824	9382ae597daef272f2734233eba02459bae6bf4e2c396ce2deed4d84765e5f70	dep of dispcc-waipio.ko	-	1
+2	icc-debug.ko	37	20104	ae3ba572675d93bd2ba1a9188ea8731f5d547eae724767ef093d55552c7fa8a0	dep of qnoc-waipio.ko	-	1
+3	iommu-logger.ko	38	13264	5d84175bd7b2981f5210b7a55e64aeb9532b611b0bcf5e90a33185bb77a857a0	dep of arm_smmu.ko	-	1
+4	miev.ko	47	38992	a864a31355cc536fa3eecbc07290e20cfb51d56853a1036be1e866f7b05c24bd	dep of ufs_qcom.ko	-	1
+5	phy-qcom-ufs.ko	56	40120	36dc124427e4a5df14d0afddf65bd246fc76f6422be10416272a1c16c49d5330	dep of phy-qcom-ufs-qmp-v4-cape.ko	-	1
+6	phy-qcom-ufs-qmp-v4-cape.ko	59	27144	787268e4214a62ce7bb09d953a65ea2834c2afc0c08ae08377894f5b3243e5ec	runtime-supplier	phy-qcom-ufs.ko	1
+7	proxy-consumer.ko	63	22472	1c5398246227bdc96c6abddc0f9e833b6ed73cc83bf34e2de040b6ede02304d2	dep of dispcc-waipio.ko	-	1
+8	gdsc-regulator.ko	28	35384	d86b9087a185e7c13fdcdd8d260a27e183eaf8f5c8786a626c5b26e364246b00	runtime-supplier	proxy-consumer.ko,debug-regulator.ko	1
+9	clk-qcom.ko	18	368144	2ee0aca646c4696d4f56da9580ab1b58ca469b677515f923dc1eb175e5b4c805	dep of dispcc-waipio.ko	gdsc-regulator.ko,proxy-consumer.ko,debug-regulator.ko	1
+10	clk-dummy.ko	17	17112	cdd8776667293f82a708ed7e978cb2b81a78d6b4893ffa04aab3b293e59aaee2	dep of gcc-waipio.ko	clk-qcom.ko,gdsc-regulator.ko,proxy-consumer.ko,debug-regulator.ko	1
+11	gcc-waipio.ko	4	191608	2610b7de8467265b088088b4ae983334c23def8eba35728097267938d6a78507	runtime-supplier	clk-dummy.ko,clk-qcom.ko,gdsc-regulator.ko,proxy-consumer.ko,debug-regulator.ko	1
+12	dispcc-waipio.ko	26	115448	fc44f2fa8108905a69ab42ec01b00e510ee020293ea5684476e346a06514653b	runtime-supplier	clk-qcom.ko,gdsc-regulator.ko,proxy-consumer.ko,debug-regulator.ko	1
+13	qcom_hwspinlock.ko	68	15880	09926def15b6d041caf04004344786ba0aa42c5a22beb25cc4e31abb91c38c58	softdep pre of smem.ko	-	1
+14	qcom_iommu_util.ko	69	116544	5c50090280e82bd1fe76e01923cfe93e734973eb426fc974c1ff6143794cdfcb	dep of arm_smmu.ko	-	1
+15	qcom-reboot-reason.ko	76	16208	2e601c06f6defe108beea65d825484e69dd69d83b3a209ad9b5a247171727e44	dep of ufs_qcom.ko	-	1
+16	qcom-scm.ko	78	210440	56d20fc07864dd1350be3796b4334c81e71db9e3c4db14fdc86918dda3c7a836	dep of qcom-pdc.ko	-	1
+17	qnoc-qos.ko	81	10528	344cf9c3616f18c08820813d4e2f19c778671b274d30c452d38fab5638ab2a12	dep of qnoc-waipio.ko	-	1
+18	secure_buffer.ko	86	56928	4cdc7b5180cef0c15abf6096272daaaa82a3f42ecf0230c649684c97363619e7	dep of arm_smmu.ko	qcom-scm.ko	1
+19	smem.ko	87	25264	4ddf05aeb9016a32e61819dc309d08d93a929aefb8e9c02d8bfdf7ac2378d84f	dep of qcom-pdc.ko	-	1
+20	minidump.ko	46	151064	df4ded2ef4fbb860b332da2f2e80b9501a5bea6b9b98f1ff230a8da30bca0c4e	dep of qcom-pdc.ko	smem.ko	1
+21	qcom_ipc_logging.ko	7	55296	5351a24627ea0ace864ac06dc88c6b78ccd99e677b6059217d8a9e23fb560765	dep of qcom-pdc.ko	minidump.ko,smem.ko	1
+22	qcom-pdc.ko	8	32752	bf33dae83a93715c615c40f87f137c25cef087150ead863e4b39a09238499515	runtime-supplier	qcom-scm.ko,qcom_ipc_logging.ko,minidump.ko,smem.ko	1
+23	pinctrl-msm.ko	62	85392	e13d69558c6a9e39e4c559d37c5acf50dc31ec2566b26d8573b748656f46f16f	dep of pinctrl-cape.ko	qcom-scm.ko	1
+24	pinctrl-cape.ko	60	172664	37e9aa8894d8de03da545aeb39a7c2e9af0d2231c5715a7a5bb45c00c9c2fcaa	runtime-supplier	pinctrl-msm.ko,qcom-scm.ko	1
+25	qcom_rpmh.ko	77	93616	d8a63ac3240fb2367429894c44626eca9c73390d9011e10b180ab74bfa4f2ecf	dep of qnoc-waipio.ko	cmd-db.ko,qcom_ipc_logging.ko,minidump.ko,smem.ko	1
+26	clk-rpmh.ko	3	109728	a94987f005738a3317f1fd498b07d13c3187fde725d04a29d74178501ac8cd51	runtime-supplier	qcom_rpmh.ko,cmd-db.ko,qcom_ipc_logging.ko,minidump.ko,smem.ko	1
+27	rpmh-regulator.ko	10	48208	370423431877e953602ff615a59fde941405bb0df51c5b212ac67855e07c2ace	runtime-supplier	qcom_rpmh.ko,cmd-db.ko,qcom_ipc_logging.ko,minidump.ko,smem.ko,proxy-consumer.ko,debug-regulator.ko	1
+28	icc-bcm-voter.ko	36	22624	1b42e9570473a693af4bc17e3cc44f945f9f12a6ebbd99e4ca1bb2e5a95acfc4	dep of qnoc-waipio.ko	qcom_rpmh.ko,cmd-db.ko,qcom_ipc_logging.ko,minidump.ko,smem.ko	1
+29	icc-rpmh.ko	5	27424	db434b6b1a209c63ac6e27ace1a15023249ebf2b53784aa290741e669c9107da	dep of qnoc-waipio.ko	icc-debug.ko,icc-bcm-voter.ko,qcom_rpmh.ko,cmd-db.ko,qcom_ipc_logging.ko,minidump.ko,smem.ko	1
+30	qnoc-waipio.ko	50	196584	29be07aa7902c7eb107b16689875972895cfb0d6b9188257c94b7343e5dc6a39	runtime-supplier	qnoc-qos.ko,icc-rpmh.ko,icc-debug.ko,icc-bcm-voter.ko,qcom_rpmh.ko,cmd-db.ko,qcom_ipc_logging.ko,minidump.ko,smem.ko	1
+31	tmecom-intf.ko	90	35600	327807a08798028ab60077e604d0ab0b38c909fc6112e748f7721cd483003bca	dep of ufs_qcom.ko	-	1
+32	hwkm.ko	35	24376	20d65c7e44cfd75b9028f1a807de087936e0068f9c5daeb0e51f067cb68e651a	dep of ufs_qcom.ko	tmecom-intf.ko	1
+33	crypto-qti-hwkm.ko	22	17696	05373ec9032d8477f891af921033b3efcf3724ca902afca2c853c14238336bf2	dep of ufs_qcom.ko	hwkm.ko,tmecom-intf.ko,qcom-scm.ko	1
+34	crypto-qti-common.ko	21	54768	505cfc5164e66a02b7eaa3060788ff0862a333094ca45918fd960537089164cb	dep of ufs_qcom.ko	crypto-qti-hwkm.ko,hwkm.ko,tmecom-intf.ko,qcom-scm.ko	1
+35	ufshcd-crypto-qti.ko	91	18136	6c3bd675be9983137621f0fbdcf14aacd30eb8867728c89f4ad5ccaf690fb781	dep of ufs_qcom.ko	crypto-qti-common.ko,crypto-qti-hwkm.ko,hwkm.ko,tmecom-intf.ko,qcom-scm.ko	1
+36	ufs_qcom.ko	92	16658368	24695d623129ec99c7694574e6452cabce980ed1b8c8cd7852979e52c4aab5a6	runtime-supplier	qcom-reboot-reason.ko,ufshcd-crypto-qti.ko,crypto-qti-common.ko,crypto-qti-hwkm.ko,hwkm.ko,tmecom-intf.ko,miev.ko,qcom-scm.ko,qcom_ipc_logging.ko,minidump.ko,smem.ko,clk-qcom.ko,gdsc-regulator.ko,proxy-consumer.ko,phy-qcom-ufs.ko,debug-regulator.ko	1
+37	arm_smmu.ko	93	379328	4b04724667c609d96a4fe31192f08da7977ba2b5112a3ec77fddf35dca4c5022	runtime-supplier	iommu-logger.ko,secure_buffer.ko,qcom_iommu_util.ko,qcom-scm.ko	1
