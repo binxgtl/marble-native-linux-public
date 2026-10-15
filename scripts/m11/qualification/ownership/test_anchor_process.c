@@ -58,7 +58,10 @@ static void end_scenario(m11_pid1_anchor *a) {
     a->anchor_fd=a->guard_fd=-1;
 }
 static int send_q(int fd, void *arg) { (void)arg; return write(fd,"Q",1)==1 ? 0 : 1; }
-static int stall(int fd, void *arg) { (void)fd; (void)arg; for (;;) pause(); }
+static int stall(int fd, void *arg) {
+    (void)fd; (void)arg;
+    for (;;) if (pause()<0 && errno!=EINTR) return 1; /* SIGKILL ends it */
+}
 static int no_second_open(int fd, void *arg) {
     int other=open((const char *)arg,O_RDONLY|O_CLOEXEC);
     if (other>=0 || errno!=EACCES) return 1; /* permission is checked at open(2), not at use */
