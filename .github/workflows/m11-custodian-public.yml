@@ -35,6 +35,12 @@ jobs:
         env:
           M11_ACK_SRC: ${{ runner.temp }}/ack
         run: bash scripts/m11/qualification/ownership/run_tests.sh artifacts/m11/custodian
+      # R1: PID1 endpoint anchor adapter. Model cases, real fork/exec/SIGKILL on a stand-in
+      # character device (/dev/ptmx; the real endpoint path is refused), fuzz with mutant
+      # detection, compile gate. Not wired to the native runner.
+      - name: PID1 anchor adapter suite
+        if: always()
+        run: bash scripts/m11/qualification/ownership/run_anchor_tests.sh artifacts/m11/anchor
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -43,3 +49,6 @@ jobs:
             artifacts/m11/custodian/*.log
             artifacts/m11/custodian/*.txt
             artifacts/m11/custodian/*.sha256
+            artifacts/m11/anchor/*.log
+            artifacts/m11/anchor/*.txt
+            artifacts/m11/anchor/*.sha256
