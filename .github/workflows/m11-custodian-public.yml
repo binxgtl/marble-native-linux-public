@@ -1,0 +1,45 @@
+name: M11 custodian offline qualification
+# Runs the offline custodian suite (directed tests, process-lifetime counterexamples,
+# before/after witnesses, adversarial W1/W2 matrices, the W3 differential against the
+# pinned-ACK next_arg/parameq, fuzz with coverage and detection-power gates, compile
+# gate) under gcc, clang and gcc ASan+UBSan on x64 and native ARM64. Mock and model
+# only: no device, firmware or DSP quiescence claim. Needs no repository history.
+on:
+  workflow_dispatch:
+  push:
+    branches: [m11/custodian-terminal-boundary]
+    paths:
+      - 'scripts/m11/qualification/ownership/**'
+      - 'scripts/m11/qualification/runtime-repair/**'
+      - '.github/workflows/m11-custodian-public.yml'
+permissions:
+  contents: read
+jobs:
+  custodian:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang
+          gcc --version | head -1; clang --version | head -1; uname -m
+      - name: Pinned ACK reference sources for W3 (sha256-checked, not committed)
+        run: bash scripts/m11/qualification/ownership/fetch_ack_ref_sources.sh "$RUNNER_TEMP/ack"
+      - name: Offline custodian suite
+        env:
+          M11_ACK_SRC: ${{ runner.temp }}/ack
+        run: bash scripts/m11/qualification/ownership/run_tests.sh artifacts/m11/custodian
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: m11-custodian-${{ runner.arch }}-${{ github.sha }}
+          path: |
+            artifacts/m11/custodian/*.log
+            artifacts/m11/custodian/*.txt
+            artifacts/m11/custodian/*.sha256
