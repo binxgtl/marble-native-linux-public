@@ -31,6 +31,7 @@ int m11_anchor_linux_fd_table_shared(void);
 /* Worker steps, exposed for tests: close every fd except stdio, `borrowed` and `keep`; set
  * NO_NEW_PRIVS and install the seccomp denylist. 0 on success. */
 int m11_anchor_linux_close_unlisted(int borrowed, const int *keep, unsigned nkeep);
+int m11_anchor_linux_worker_hygiene(int borrowed, int guard, const int *keep, unsigned nkeep);
 int m11_anchor_linux_confine(void);
 /* Worker exit codes, for tests. */
 enum { M11_WORKER_EXIT_ACCEPT = 90, M11_WORKER_EXIT_PRIVILEGE = 91, M11_WORKER_EXIT_WORK = 92,

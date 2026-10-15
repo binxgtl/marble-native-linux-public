@@ -184,6 +184,15 @@ int m11_anchor_linux_close_unlisted(int borrowed, const int *keep, unsigned nkee
     for (unsigned i=0;i<n;i++) if (close(fds[i])) rc=-1;
     return rc;
 }
+/* The worker keeps stdio, the borrowed fd, its guard copy when a sealed owner's inherited
+ * filter refused to close it, and at most 16 explicitly kept fds. */
+int m11_anchor_linux_worker_hygiene(int borrowed, int guard, const int *keep, unsigned nkeep) {
+    int kept_fds[17]; unsigned nk=0;
+    if (nkeep>16 || (nkeep && !keep)) return -1;
+    for (unsigned i=0;i<nkeep;i++) kept_fds[nk++]=keep[i];
+    kept_fds[nk++]=guard;
+    return m11_anchor_linux_close_unlisted(borrowed,kept_fds,nk);
+}
 #if defined(__x86_64__)
 #define M11_AUDIT_ARCH AUDIT_ARCH_X86_64
 #elif defined(__aarch64__)
@@ -244,12 +253,7 @@ int m11_anchor_linux_lend(m11_pid1_anchor *a, m11_anchor_work work, void *arg, c
     if (pid<0) { rc=-errno; (void)m11_anchor_lend_abort(a); return rc; }
     if (!pid) {
         if (m11_anchor_worker_accept(a,fd)) _exit(M11_WORKER_EXIT_ACCEPT);
-        /* A sealed owner's inherited filter refuses close(guard): that copy stays. */
-        int kept_fds[17]; unsigned nk=0;
-        if (nkeep>16) _exit(M11_WORKER_EXIT_HYGIENE);
-        for (unsigned i=0;i<nkeep;i++) kept_fds[nk++]=keep[i];
-        kept_fds[nk++]=a->guard_fd;
-        if (m11_anchor_linux_close_unlisted(fd,kept_fds,nk)) _exit(M11_WORKER_EXIT_HYGIENE); /* worker fd hygiene */
+        if (m11_anchor_linux_worker_hygiene(fd,a->guard_fd,keep,nkeep)) _exit(M11_WORKER_EXIT_HYGIENE); /* worker fd hygiene */
         if (geteuid()==0 && drop_privileges()) _exit(M11_WORKER_EXIT_PRIVILEGE);
         if (m11_anchor_linux_confine()) _exit(M11_WORKER_EXIT_CONFINE); /* worker seccomp confinement */
         _exit(work(fd,arg) ? M11_WORKER_EXIT_WORK : 0);
