@@ -172,8 +172,7 @@ int main(int argc, char **argv) {
     char node[128]; snprintf(node,sizeof(node),"%s/standin",dir);
     make_node(node);
     int probe=open(node,O_RDWR|O_NOCTTY|O_CLOEXEC);
-    if (probe<0) printf("stand-in open failed: %s
-",strerror(errno));
+    if (probe<0) printf("stand-in open failed: %s\n",strerror(errno));
     assert(probe>=0); close(probe);
     pass("private stand-in node c 5:2 on a private tmpfs; the backend admits it by device number");
 
