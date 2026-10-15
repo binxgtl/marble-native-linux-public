@@ -180,5 +180,5 @@ static int ops_oracle(void *v) {
 }
 m11_anchor_ops km_ops(km_kernel *k) {
     return (m11_anchor_ops){k,ops_self,ops_open,ops_identify,ops_dup,ops_fd_flags,ops_status,ops_close,ops_holders,
-                            ops_same_ofd,ops_table_shared,ops_oracle};
+                            ops_same_ofd,ops_table_shared,ops_oracle,NULL};
 }

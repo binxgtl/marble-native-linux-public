@@ -16,6 +16,7 @@
 #include <string.h>
 #include <sys/prctl.h>
 #include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -79,6 +80,13 @@ static int in_scope(int pid, int root) {
     }
     return 0;
 }
+/* A character device is one driver object whatever node reaches it: every node with the same
+ * device number is a holder (a second node made with mknod opens a second OFD of the driver). */
+static int same_node(const struct stat *st, const m11_anchor_id *want) {
+    if ((uint32_t)(st->st_mode & S_IFMT)!=want->type) return 0;
+    if (want->type==S_IFCHR) return (uint64_t)st->st_rdev==want->rdev; /* census by device number */
+    return (uint64_t)st->st_dev==want->dev && (uint64_t)st->st_ino==want->ino && (uint64_t)st->st_rdev==want->rdev;
+}
 static int lx_holders(void *v, const m11_anchor_id *want, m11_anchor_holder *out, unsigned cap, unsigned *n) {
     const m11_anchor_linux *l=v; *n=0;
     DIR *proc=opendir("/proc"); if (!proc) return -errno;
@@ -106,8 +114,7 @@ static int lx_holders(void *v, const m11_anchor_id *want, m11_anchor_holder *out
             snprintf(item,sizeof(item),"%s/%s",path,f->d_name);
             /* A racing close is inconclusive: reject, never skip (as the native census does). */
             if (stat(item,&st)) { rc=errno==ENOENT ? -EAGAIN : -errno; break; }
-            if ((uint64_t)st.st_dev!=want->dev || (uint64_t)st.st_ino!=want->ino ||
-                (uint64_t)st.st_rdev!=want->rdev || (uint32_t)(st.st_mode & S_IFMT)!=want->type) continue;
+            if (!same_node(&st,want)) continue;
             if (*n==cap) { rc=-E2BIG; break; }
             out[(*n)++]=(m11_anchor_holder){pid,atoi(f->d_name)};
         }
@@ -117,15 +124,23 @@ static int lx_holders(void *v, const m11_anchor_id *want, m11_anchor_holder *out
     closedir(proc);
     return rc;
 }
+/* A stand-in is one of the fixed paths, or a private node (e.g. made by a root test with
+ * mknod) whose device number is the pty multiplexer (5:2) or null (1:3). Never a path that
+ * names the real endpoint, the ION node or an ALSA node, whatever it points at. */
+static int standin(const char *path) {
+    if (strstr(path,"aud_pasthru") || strstr(path,"msm_audio_ion") || strstr(path,"/snd/")) return 0;
+    for (unsigned i=0;i<sizeof(stand_ins)/sizeof(*stand_ins);i++) if (!strcmp(path,stand_ins[i])) return 1;
+    struct stat st;
+    return !lstat(path,&st) && S_ISCHR(st.st_mode) &&
+           (st.st_rdev==makedev(5,2) || st.st_rdev==makedev(1,3));
+}
 int m11_anchor_linux_ops(m11_anchor_linux *l, const char *path, int census_root, m11_anchor_ops *out) {
     if (!l || !path || !out || census_root<0) return -EINVAL;
-    int allowed=0;
-    for (unsigned i=0;i<sizeof(stand_ins)/sizeof(*stand_ins);i++) if (!strcmp(path,stand_ins[i])) allowed=1;
-    if (!allowed) return -EPERM; /* in particular never /dev/aud_pasthru_adsp */
+    if (!standin(path)) return -EPERM; /* in particular never /dev/aud_pasthru_adsp */
     *l=(m11_anchor_linux){path,census_root};
     /* No release oracle: the backend cannot observe a driver release. */
     *out=(m11_anchor_ops){l,lx_self,lx_open,lx_identify,lx_dup,lx_fd_flags,lx_status,lx_close,lx_holders,
-                          lx_same_ofd,lx_table_shared,NULL};
+                          lx_same_ofd,lx_table_shared,NULL,NULL};
     return 0;
 }
 
@@ -229,7 +244,12 @@ int m11_anchor_linux_lend(m11_pid1_anchor *a, m11_anchor_work work, void *arg, c
     if (pid<0) { rc=-errno; (void)m11_anchor_lend_abort(a); return rc; }
     if (!pid) {
         if (m11_anchor_worker_accept(a,fd)) _exit(M11_WORKER_EXIT_ACCEPT);
-        if (m11_anchor_linux_close_unlisted(fd,keep,nkeep)) _exit(M11_WORKER_EXIT_HYGIENE); /* worker fd hygiene */
+        /* A sealed owner's inherited filter refuses close(guard): that copy stays. */
+        int kept_fds[17]; unsigned nk=0;
+        if (nkeep>16) _exit(M11_WORKER_EXIT_HYGIENE);
+        for (unsigned i=0;i<nkeep;i++) kept_fds[nk++]=keep[i];
+        kept_fds[nk++]=a->guard_fd;
+        if (m11_anchor_linux_close_unlisted(fd,kept_fds,nk)) _exit(M11_WORKER_EXIT_HYGIENE); /* worker fd hygiene */
         if (geteuid()==0 && drop_privileges()) _exit(M11_WORKER_EXIT_PRIVILEGE);
         if (m11_anchor_linux_confine()) _exit(M11_WORKER_EXIT_CONFINE); /* worker seccomp confinement */
         _exit(work(fd,arg) ? M11_WORKER_EXIT_WORK : 0);

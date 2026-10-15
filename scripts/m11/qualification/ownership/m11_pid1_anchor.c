@@ -152,11 +152,15 @@ int m11_anchor_worker_accept(const m11_pid1_anchor *a, int fd) {
     /* A CLONE_FILES child shares PID1's table: closing "its" guard would close PID1's. */
     int shared=-ENOSYS; /* without kcmp only the guard-close tripwire remains */
     if (a->ops.fd_table_shared) shared=a->ops.fd_table_shared(a->ops.ctx); /* kcmp(KCMP_FILES) */
-    if (shared==1 || (shared<0 && shared!=-ENOSYS)) return -EPERM;
+    /* Unknown fails closed, except for a sealed owner whose filter already refuses CLONE_FILES
+     * (its non-dumpable state can deny an unprivileged worker's kcmp). */
+    if (shared==1 || (shared<0 && shared!=-ENOSYS && !a->ops.close_pair)) return -EPERM;
     if (fd!=a->anchor_fd || !fd_ok(a,fd) || !fd_ok(a,a->guard_fd)) return -ENODEV;
     if (!ofd_cmp(a,self,fd,self,a->guard_fd)) return -ENODEV;
-    /* Non-final close of the worker's guard copy; PID1 still holds anchor and guard. */
-    return a->ops.close_fd(a->ops.ctx,a->guard_fd);
+    /* Non-final close of the worker's guard copy; PID1 still holds anchor and guard. A sealed
+     * owner's filter, inherited by the worker, refuses it: then the copy stays (also non-final). */
+    int rc=a->ops.close_fd(a->ops.ctx,a->guard_fd);
+    return rc==-EPERM && a->ops.close_pair ? 0 : rc;
 }
 int m11_anchor_final_close(m11_pid1_anchor *a) {
     if (!owner(a)) return -EPERM;
@@ -164,15 +168,22 @@ int m11_anchor_final_close(m11_pid1_anchor *a) {
     if (a->latches & M11_ANCHOR_LATCH_REFUSE) return -EOWNERDEAD;
     int rc=0;
     if ((rc=m11_anchor_check(a))) return rc; /* sole holder: the second close is the last fput */
-    rc=a->ops.close_fd(a->ops.ctx,a->guard_fd);
-    a->guard_fd=-1;
-    if (rc) {
-        /* Unexplained error: never let the anchor's close become the last one now. */
-        latch(a,M11_ANCHOR_LATCH_CLOSE_ERROR); a->state=M11_ANCHOR_RETAINED; return rc;
+    if (a->ops.close_pair) {
+        /* Sealed owner: the one close the seal permits drops both references at once. */
+        a->final_closes++;
+        rc=a->ops.close_pair(a->ops.ctx,a->anchor_fd,a->guard_fd);
+        a->anchor_fd=a->guard_fd=-1; a->state=M11_ANCHOR_OWNER_FDS_DROPPED;
+    } else {
+        rc=a->ops.close_fd(a->ops.ctx,a->guard_fd);
+        a->guard_fd=-1;
+        if (rc) {
+            /* Unexplained error: never let the anchor's close become the last one now. */
+            latch(a,M11_ANCHOR_LATCH_CLOSE_ERROR); a->state=M11_ANCHOR_RETAINED; return rc;
+        }
+        a->final_closes++;
+        rc=a->ops.close_fd(a->ops.ctx,a->anchor_fd); /* last VISIBLE reference */
+        a->anchor_fd=-1; a->state=M11_ANCHOR_OWNER_FDS_DROPPED;
     }
-    a->final_closes++;
-    rc=a->ops.close_fd(a->ops.ctx,a->anchor_fd); /* last VISIBLE reference */
-    a->anchor_fd=-1; a->state=M11_ANCHOR_OWNER_FDS_DROPPED;
     if (rc) latch(a,M11_ANCHOR_LATCH_CLOSE_ERROR);
     /* Only an oracle can tell a dropped reference from an observed release. */
     int seen=a->ops.release_oracle ? a->ops.release_oracle(a->ops.ctx) : -ENOSYS;

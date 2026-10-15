@@ -38,8 +38,9 @@
 
 /* 1: one open, anchor + guard, loans by fork, census, sole-holder final close.
  * 2: OWNER_FDS_DROPPED replaces RELEASED, release oracle and HIDDEN_REFERENCE latch, kcmp
- *    OFD comparison in the census, shared-fd-table refusal in the worker, END_RETAIN. */
-#define M11_ANCHOR_API_REVISION 2
+ *    OFD comparison in the census, shared-fd-table refusal in the worker, END_RETAIN.
+ * 3: close_pair for a sealed owner; a worker keeps its guard copy when the seal refuses it. */
+#define M11_ANCHOR_API_REVISION 3
 #define M11_ANCHOR_RESERVED_FD 512
 #define M11_ANCHOR_MAX_HOLDERS 16u
 
@@ -65,6 +66,9 @@ typedef struct {
     int (*same_ofd)(void *ctx, int pid_a, int fd_a, int pid_b, int fd_b);
     int (*fd_table_shared)(void *ctx);
     int (*release_oracle)(void *ctx);
+    /* Optional: a sealed owner may close the reserved numbers only together, in this one call
+     * (close_range(anchor, guard, 0)); every other close/dup/close_range over them is refused. */
+    int (*close_pair)(void *ctx, int anchor_fd, int guard_fd);
 } m11_anchor_ops;
 
 /* Static facts the adapter cannot observe at run time; each must cite recorded evidence. */

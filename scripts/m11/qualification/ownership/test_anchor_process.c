@@ -6,7 +6,7 @@
  * are integration rules (no CLONE_FILES, no close_range/dup2 over the reserved numbers, no PID1
  * self-exec, no SCM_RIGHTS of the endpoint), not adapter behaviour. */
 #define _GNU_SOURCE
-#include "m11_anchor_linux.h"
+#include "m11_anchor_owner.h"
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -16,9 +16,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/prctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/sysmacros.h>
 #include <sys/wait.h>
 #include <termios.h>
 #include <unistd.h>
@@ -43,12 +45,18 @@ static char from_slave(void) {
     assert(rc==1 && (p.revents & POLLIN));
     char c; assert(read(slave,&c,1)==1); return c;
 }
+static int raw_slave(int s) {
+    struct termios t; assert(!tcgetattr(s,&t)); cfmakeraw(&t); assert(!tcsetattr(s,TCSANOW,&t));
+    return s;
+}
+static int open_slave_by_name(const char *name) {
+    int s=open(name,O_RDWR|O_NOCTTY|O_NONBLOCK|O_CLOEXEC); assert(s>=0);
+    return raw_slave(s);
+}
 static int open_slave(int master) {
     assert(!grantpt(master) && !unlockpt(master));
     const char *name=ptsname(master); assert(name);
-    int s=open(name,O_RDWR|O_NOCTTY|O_NONBLOCK|O_CLOEXEC); assert(s>=0);
-    struct termios t; assert(!tcgetattr(s,&t)); cfmakeraw(&t); assert(!tcsetattr(s,TCSANOW,&t));
-    return s;
+    return open_slave_by_name(name);
 }
 /* Oracle for the stand-in only: the slave is hung up once the master OFD was released. */
 static int slave_oracle(void *v) { (void)v; return hung_up() ? 1 : 0; }
@@ -133,6 +141,92 @@ static int confined(int fd, void *arg) {
     if (!denied(syscall(SYS_ptrace,0,0,0,0),EPERM)) return 11;
     if (!denied(syscall(SYS_reboot,0,0,0,NULL),EPERM)) return 12;         /* KernelSU fd install path */
     return write(fd,"S",1)==1 ? 0 : 13;
+}
+
+/* --------------------------- sealed owner (P1-P4, P5 owner part) --------------------------- */
+static int sendmsg_rights(int fd) {
+    int sv[2];
+    if (socketpair(AF_UNIX,SOCK_DGRAM|SOCK_CLOEXEC,0,sv)) return -1;
+    char byte='x'; struct iovec io={&byte,1};
+    union { char buf[CMSG_SPACE(sizeof(int))]; struct cmsghdr align; } u;
+    struct msghdr m={.msg_iov=&io,.msg_iovlen=1,.msg_control=u.buf,.msg_controllen=sizeof(u.buf)};
+    struct cmsghdr *c=CMSG_FIRSTHDR(&m);
+    c->cmsg_level=SOL_SOCKET; c->cmsg_type=SCM_RIGHTS; c->cmsg_len=CMSG_LEN(sizeof(int));
+    memcpy(CMSG_DATA(c),&fd,sizeof(int));
+    long rc=sendmsg(sv[0],&m,0); int e=errno;
+    close(sv[0]); close(sv[1]); errno=e;
+    return (int)rc;
+}
+/* Run inside the sealed owner. Returns 0 or the number of the first unexpected result. */
+static int seal_battery(const m11_pid1_anchor *a) {
+    int A=a->anchor_fd, G=a->guard_fd, null=open("/dev/null",O_RDONLY|O_CLOEXEC);
+    if (null<0) return 20;
+    if (!denied(close(A),EPERM) || !denied(close(G),EPERM)) return 21;              /* P3 */
+    if (!denied(dup3(null,A,O_CLOEXEC),EPERM) || !denied(dup3(null,G,0),EPERM) || !denied(dup(A),EPERM)) return 22;
+    if (!denied(fcntl(A,F_SETFD,0),EPERM) || !denied(fcntl(G,F_DUPFD_CLOEXEC,700),EPERM) ||
+        !denied(fcntl(A,F_DUPFD,700),EPERM) || !denied(fcntl(G,F_SETFL,0),EPERM)) return 23;
+    if (fcntl(A,F_GETFD)<0 || fcntl(G,F_GETFL)<0 || dup3(null,700,O_CLOEXEC)!=700 || close(700)) return 24;
+    if (!denied(syscall(SYS_close_range,3u,~0u,0u),EPERM) ||
+        !denied(syscall(SYS_close_range,(unsigned)A,(unsigned)G,4u),EPERM) ||      /* CLOSE_RANGE_CLOEXEC */
+        !denied(syscall(SYS_close_range,(unsigned)G,(unsigned)G,0u),EPERM)) return 25;
+    char *const argv[]={(char *)"true",NULL};
+    if (!denied(execve("/bin/true",argv,environ),EPERM)) return 26;                 /* P2 */
+    if (!denied(syscall(SYS_clone,CLONE_FILES|SIGCHLD,0,0,0,0),EPERM)) return 27;   /* P1 */
+    if (!denied(syscall(SYS_clone3,NULL,0),ENOSYS)) return 28;
+    pid_t f=fork();                                                                 /* plain fork stays */
+    if (f<0) return 29;
+    if (!f) _exit(0);
+    if (exit_code(f)) return 29;
+    if (!denied(sendmsg_rights(A),EPERM)) return 30;                                /* P4 */
+    if (!denied(syscall(SYS_io_uring_setup,1,NULL),EPERM)) return 31;
+    if (!denied(syscall(SYS_ptrace,0,0,0,0),EPERM)) return 32;
+    if (!denied(mknodat(AT_FDCWD,"/tmp/m11-seal-must-not-exist",S_IFCHR|0600,makedev(1,3)),EPERM)) return 33; /* P5 */
+    if (prctl(PR_GET_DUMPABLE,0,0,0,0)!=0) return 34;
+    close(null);
+    return 0;
+}
+static const char *const job_true[]={"/bin/true",NULL};
+static const char *const job_false[]={"/bin/false",NULL};
+static const char *const *const owner_jobs[]={job_true,job_false};
+static void sealed_owner_scenario(void) {
+    int name_pipe[2], go[2]; assert(!pipe2(name_pipe,O_CLOEXEC) && !pipe2(go,O_CLOEXEC));
+    pid_t o=fork(); assert(o>=0);
+    if (!o) {
+        close(name_pipe[0]); close(go[1]);
+        m11_spawner sp; /* forked BEFORE the bind: it never holds the endpoint */
+        if (m11_spawner_start(&sp,owner_jobs,2,false)) _exit(40);
+        m11_pid1_anchor own; m11_anchor_linux ol; m11_anchor_ops oops; struct stat st;
+        if (m11_anchor_linux_ops(&ol,standin,getpid(),&oops) || stat(standin,&st)) _exit(41);
+        memset(&own,0,sizeof(own));
+        if (m11_anchor_bind(&own,&oops,NULL,&evidence,getpid(),(uint64_t)st.st_rdev)) _exit(42);
+        if (grantpt(own.anchor_fd) || unlockpt(own.anchor_fd) || !ptsname(own.anchor_fd)) _exit(43);
+        char name[128]; snprintf(name,sizeof(name),"%s",ptsname(own.anchor_fd));
+        char g;
+        if (write(name_pipe[1],name,sizeof(name))!=(ssize_t)sizeof(name) || read(go[0],&g,1)!=1) _exit(44);
+        if (m11_anchor_owner_seal(&own,NULL)) _exit(45);
+        int rc=seal_battery(&own);
+        if (rc) _exit(rc);
+        int status=-1;
+        if (m11_spawner_run(&sp,0,NULL,3000,&status) || status) _exit(46);    /* jobs still exec */
+        if (m11_spawner_run(&sp,1,NULL,3000,&status) || status!=1) _exit(47);
+        m11_worker_end end;
+        if (m11_anchor_linux_lend(&own,send_q,NULL,NULL,0,3000,1000,&end) || end!=M11_WORKER_EXIT_OK) _exit(48);
+        if (m11_anchor_check(&own) || read(go[0],&g,1)!=1) _exit(49);
+        if (m11_anchor_final_close(&own) || own.state!=M11_ANCHOR_OWNER_FDS_DROPPED) _exit(50);
+        if (m11_spawner_stop(&sp)) _exit(51);
+        _exit(0);
+    }
+    close(name_pipe[1]); close(go[0]);
+    char name[128]; assert(read(name_pipe[0],name,sizeof(name))==(ssize_t)sizeof(name));
+    int observer=open_slave_by_name(name);
+    assert(write(go[1],"S",1)==1);
+    char c; struct pollfd p={observer,POLLIN,0};
+    assert(poll(&p,1,5000)==1 && read(observer,&c,1)==1 && c=='Q' && !hup_within(observer,0));
+    assert(write(go[1],"F",1)==1);
+    int rc=exit_code(o);
+    if (rc) printf("sealed owner exit code %d\n",rc);
+    assert(!rc && hup_within(observer,2000));
+    close(observer); close(name_pipe[0]); close(go[1]);
 }
 
 int main(void) {
@@ -338,6 +432,11 @@ int main(void) {
     assert(!hup_after[0] && hup_after[1] && a.release==M11_RELEASE_OBSERVED);
     assert(!m11_anchor_end_boot(&a,M11_TERMINAL_ORDERLY_SHUTDOWN,&how) && how==M11_ANCHOR_END_REBOOT);
     pass("final close as sole holder: release observed after the second close, not the first");
+
+    sealed_owner_scenario();
+    pass("sealed owner: close/dup/fcntl/close_range over the reserved numbers, exec, CLONE_FILES, "
+         "SCM_RIGHTS, io_uring, ptrace and mknod refused; jobs run through the pre-bind spawner; "
+         "a confined loan works; the final close_range releases");
 
     if (geteuid()) {
         int rc=bind_standin(&a,&l,0);
