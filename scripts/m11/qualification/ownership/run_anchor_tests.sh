@@ -51,7 +51,7 @@ mutant() {
 # Real-process mutants: one line deleted from the adapter, the backend or the owner unit; the
 # process suite (or, for rmutant, the root suite under sudo) MUST fail on an assertion.
 xmutant() {
-  local suite="$1" name="$2" unit="$3" old="$4" dir="$out/$1-mutant-anchor-$2-$mode"
+  local suite="$1" name="$2" unit="$3" old="$4" expect="$5" dir="$out/$1-mutant-anchor-$2-$mode"
   local srcs_=("$here/m11_pid1_anchor.c" "$here/m11_anchor_linux.c" "$here/m11_anchor_owner.c")
   mutate "$unit" "$old" '' "$dir"
   for i in "${!srcs_[@]}"; do [[ "${srcs_[$i]}" == "$here/$unit.c" ]] && srcs_[$i]="$dir/$unit.c"; done
@@ -62,11 +62,12 @@ xmutant() {
     echo "ERROR: $suite suite did not detect mutant $name" >&2; exit 1
   fi
   grep -m1 -F 'Assertion' "$out/anchor-$suite-mutant-$name-$mode.log"
+  grep -m1 -F -- "$expect" "$out/anchor-$suite-mutant-$name-$mode.log" # the intended reason
   echo "PASS $suite suite detects mutant $name ($mode)"
 }
-pmutant() { xmutant process "$1" "$2" "$3"; }
+pmutant() { xmutant process "$1" "$2" "$3" "$4"; }
 rmutant() {
-  if [[ "$root" == 1 ]]; then xmutant root "$1" "$2" "$3"; else echo "SKIP root mutant $1 ($mode): no sudo"; fi
+  if [[ "$root" == 1 ]]; then xmutant root "$1" "$2" "$3" "$4"; else echo "SKIP root mutant $1 ($mode): no sudo"; fi
 }
 for mode in gcc clang sanitize; do
   cc=gcc
@@ -100,15 +101,17 @@ for mode in gcc clang sanitize; do
     'final close returned success but was not the last fput|final close granted while a second endpoint OFD existed'
   mutant lend-census '/* no other holder may share the loan */' '' \
     'loan granted while another process held the endpoint OFD|loan granted while a second endpoint OFD existed'
-  pmutant no-seccomp m11_anchor_linux '/* worker seccomp confinement */'
-  pmutant no-hygiene m11_anchor_linux '/* worker fd hygiene */'
-  pmutant no-kcmp-census m11_pid1_anchor 'latch(a,M11_ANCHOR_LATCH_SECOND_OFD); foreign=true; continue;'
-  pmutant no-hidden-latch m11_pid1_anchor 'if (a->release==M11_RELEASE_NOT_OBSERVED) latch('
-  pmutant shared-table m11_pid1_anchor 'if (a->ops.fd_table_shared) shared='
-  pmutant no-owner-seal m11_anchor_owner '/* owner seal filter */'
-  rmutant no-cap-drop m11_anchor_owner '/* P5: job capabilities */'
-  rmutant no-unlink m11_anchor_owner '/* P5: no path left to a second OFD */'
-  rmutant inode-census m11_anchor_linux '/* census by device number */'
+  pmutant no-seccomp m11_anchor_linux '/* worker seccomp confinement */' 'lend(&a,confined,'
+  pmutant no-hygiene m11_anchor_linux '/* worker fd hygiene */' 'lend(&a,hygiene,'
+  pmutant no-kcmp-census m11_pid1_anchor 'latch(a,M11_ANCHOR_LATCH_SECOND_OFD); foreign=true; continue;' \
+    'a.latches & M11_ANCHOR_LATCH_SECOND_OFD'
+  pmutant no-hidden-latch m11_pid1_anchor 'if (a->release==M11_RELEASE_NOT_OBSERVED) latch(' \
+    'M11_ANCHOR_LATCH_HIDDEN_REFERENCE'
+  pmutant shared-table m11_pid1_anchor 'if (a->ops.fd_table_shared) shared=' 'm11_anchor_lend_abort(&a) || !kcmp'
+  pmutant no-owner-seal m11_anchor_owner '/* owner seal filter */' 'seal battery step 21'
+  rmutant no-cap-drop m11_anchor_owner '/* P5: job capabilities */' 'job caps rc=0 status=10'
+  rmutant no-unlink m11_anchor_owner '/* P5: no path left to a second OFD */' 'node path still present'
+  rmutant inode-census m11_anchor_linux '/* census by device number */' 'control owner B exit 63'
 done
 # Same seed, same operation sequence under gcc and clang.
 cmp "$out/fuzz-anchor-gcc.log" "$out/fuzz-anchor-clang.log"

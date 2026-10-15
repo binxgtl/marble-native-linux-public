@@ -205,7 +205,7 @@ static void sealed_owner_scenario(void) {
         if (write(name_pipe[1],name,sizeof(name))!=(ssize_t)sizeof(name) || read(go[0],&g,1)!=1) _exit(44);
         if (m11_anchor_owner_seal(&own,NULL)) _exit(45);
         int rc=seal_battery(&own);
-        if (rc) _exit(rc);
+        if (rc) { fprintf(stderr,"seal battery step %d\n",rc); _exit(rc); }
         int status=-1;
         if (m11_spawner_run(&sp,0,NULL,3000,&status) || status) _exit(46);    /* jobs still exec */
         if (m11_spawner_run(&sp,1,NULL,3000,&status) || status!=1) _exit(47);

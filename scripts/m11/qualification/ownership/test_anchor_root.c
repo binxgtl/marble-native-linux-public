@@ -114,7 +114,7 @@ static int positive_owner(const char *node, int out, int in) {
     if (write(out,&r,sizeof(r))!=(ssize_t)sizeof(r) || read(in,&g,1)!=1) return 43;
     if (m11_anchor_owner_seal(&a,node)) return 44;
     struct stat st;
-    if (!lstat(node,&st) || errno!=ENOENT) return 45;
+    if (!lstat(node,&st) || errno!=ENOENT) { fprintf(stderr,"node path still present\n"); return 45; }
     /* open_by_handle_at is not exercised: pinned ACK fs/fhandle.c:179 requires
      * CAP_DAC_READ_SEARCH (dropped, checked by "caps"), but hosted kernels >= 6.10 relax it for
      * CAP_SYS_ADMIN holders, so the CI kernel would not represent the device here. */
