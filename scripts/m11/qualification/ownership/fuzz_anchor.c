@@ -89,6 +89,7 @@ static void scenario(unsigned steps) {
     (void)m11_anchor_bind(&a,&ops,NULL,&evidence,1,KM_ENDPOINT_RDEV);
     anchor_file=km_file_of(&k,0,a.anchor_fd);
     if (anchor_file<0) { violation("bind did not leave an anchor",0); return; }
+    k.oracle_file=anchor_file; /* model-only release oracle (none exists for the real endpoint) */
     bool pid1_bug=false, released_in_final=false, done=false;
     for (unsigned s=0;s<steps && !done;s++) {
         k.current=0;
@@ -144,6 +145,8 @@ static void scenario(unsigned steps) {
                     cov[C_FINAL_OK]++; done=true;
                     if (!before && k.files[anchor_file].released) released_in_final=true;
                     else violation("final close returned success but was not the last fput",s);
+                    if (a.release!=(released_in_final ? M11_RELEASE_OBSERVED : M11_RELEASE_NOT_OBSERVED))
+                        violation("release evidence disagrees with the oracle",s);
                     if (second) violation("final close granted while a second endpoint OFD existed",s);
                 }
             }
@@ -155,7 +158,7 @@ static void scenario(unsigned steps) {
     if (a.latches & M11_ANCHOR_LATCH_FOREIGN_HOLDER) cov[C_LATCH_FOREIGN]++;
     if (a.latches & M11_ANCHOR_LATCH_FD_DISCIPLINE) cov[C_LATCH_FD]++;
     if (a.latches & M11_ANCHOR_LATCH_WORKER_UNRESOLVED) cov[C_LATCH_UNRESOLVED]++;
-    if (a.state!=M11_ANCHOR_RELEASED) {
+    if (a.state!=M11_ANCHOR_OWNER_FDS_DROPPED) {
         m11_anchor_end end;
         (void)m11_anchor_end_boot(&a,M11_TERMINAL_RESET_RETAINING_ANCHORS,&end);
         km_exit(&k,0); /* global init: panic before exit_files() */

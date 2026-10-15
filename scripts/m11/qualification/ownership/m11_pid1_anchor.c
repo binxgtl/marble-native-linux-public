@@ -19,9 +19,13 @@ static uint32_t latch(m11_pid1_anchor *a, uint32_t why) {
     a->latches|=why;
     if ((fresh & (M11_ANCHOR_LATCH_WORKER_ABNORMAL|M11_ANCHOR_LATCH_WORKER_UNRESOLVED)) && a->sink.worker_lost)
         a->sink.worker_lost(a->sink.ctx);
-    if ((fresh & M11_ANCHOR_LATCH_FOREIGN_HOLDER) && a->sink.foreign_holder)
+    if ((fresh & (M11_ANCHOR_LATCH_FOREIGN_HOLDER|M11_ANCHOR_LATCH_HIDDEN_REFERENCE)) && a->sink.foreign_holder)
         a->sink.foreign_holder(a->sink.ctx);
     return fresh;
+}
+/* 1 same open file description, 0 another one, -ENOSYS when kcmp is unavailable. */
+static int ofd_cmp(const m11_pid1_anchor *a, int pa, int fa, int pb, int fb) {
+    return a->ops.same_ofd ? a->ops.same_ofd(a->ops.ctx,pa,fa,pb,fb) : -ENOSYS;
 }
 /* The fd number still names the bound OFD's node, with FD_CLOEXEC and the recorded flags.
  * Identity cannot distinguish two OFDs of one node; the census bounds that separately. */
@@ -32,7 +36,9 @@ static bool fd_ok(const m11_pid1_anchor *a, int fd) {
     return fdf>=0 && (fdf & FD_CLOEXEC) && a->ops.status_flags(a->ops.ctx,fd)==a->status_flags;
 }
 /* Allowed holders: PID1 at exactly the anchor and guard numbers, and while a loan is
- * active the one reported worker at those numbers (it inherited both by fork). */
+ * active the one reported worker at those numbers (it inherited both by fork). With kcmp,
+ * every holder must also be the anchor's own OFD: a second OFD planted at a reserved number
+ * has the same node identity. References outside fd tables are invisible here. */
 static int census(m11_pid1_anchor *a) {
     m11_anchor_holder h[M11_ANCHOR_MAX_HOLDERS];
     unsigned n=0;
@@ -40,6 +46,9 @@ static int census(m11_pid1_anchor *a) {
     if (rc || n>M11_ANCHOR_MAX_HOLDERS) { latch(a,M11_ANCHOR_LATCH_CENSUS_ERROR); return rc?rc:-E2BIG; }
     bool anchor_seen=false, guard_seen=false, foreign=false;
     for (unsigned i=0;i<n;i++) {
+        int same=ofd_cmp(a,a->owner_pid,a->anchor_fd,h[i].pid,h[i].fd);
+        if (same<0 && same!=-ENOSYS) { latch(a,M11_ANCHOR_LATCH_CENSUS_ERROR); return same; }
+        if (!same) { latch(a,M11_ANCHOR_LATCH_SECOND_OFD); foreign=true; continue; }
         bool ours=h[i].fd==a->anchor_fd || h[i].fd==a->guard_fd;
         if (h[i].pid==a->owner_pid && h[i].fd==a->anchor_fd) anchor_seen=true;
         else if (h[i].pid==a->owner_pid && h[i].fd==a->guard_fd) guard_seen=true;
@@ -140,7 +149,12 @@ int m11_anchor_worker_accept(const m11_pid1_anchor *a, int fd) {
     if (!a || a->state!=M11_ANCHOR_LENT || !a->ops.self_pid) return -EINVAL;
     int self=a->ops.self_pid(a->ops.ctx);
     if (self<=0 || self==a->owner_pid) return -EPERM; /* only the forked worker borrows */
+    /* A CLONE_FILES child shares PID1's table: closing "its" guard would close PID1's. */
+    int shared=-ENOSYS; /* without kcmp only the guard-close tripwire remains */
+    if (a->ops.fd_table_shared) shared=a->ops.fd_table_shared(a->ops.ctx); /* kcmp(KCMP_FILES) */
+    if (shared==1 || (shared<0 && shared!=-ENOSYS)) return -EPERM;
     if (fd!=a->anchor_fd || !fd_ok(a,fd) || !fd_ok(a,a->guard_fd)) return -ENODEV;
+    if (!ofd_cmp(a,self,fd,self,a->guard_fd)) return -ENODEV;
     /* Non-final close of the worker's guard copy; PID1 still holds anchor and guard. */
     return a->ops.close_fd(a->ops.ctx,a->guard_fd);
 }
@@ -157,23 +171,28 @@ int m11_anchor_final_close(m11_pid1_anchor *a) {
         latch(a,M11_ANCHOR_LATCH_CLOSE_ERROR); a->state=M11_ANCHOR_RETAINED; return rc;
     }
     a->final_closes++;
-    rc=a->ops.close_fd(a->ops.ctx,a->anchor_fd); /* last fput: audio_pkt_release runs here */
-    a->anchor_fd=-1; a->state=M11_ANCHOR_RELEASED;
+    rc=a->ops.close_fd(a->ops.ctx,a->anchor_fd); /* last VISIBLE reference */
+    a->anchor_fd=-1; a->state=M11_ANCHOR_OWNER_FDS_DROPPED;
     if (rc) latch(a,M11_ANCHOR_LATCH_CLOSE_ERROR);
+    /* Only an oracle can tell a dropped reference from an observed release. */
+    int seen=a->ops.release_oracle ? a->ops.release_oracle(a->ops.ctx) : -ENOSYS;
+    a->release=seen==1 ? M11_RELEASE_OBSERVED : seen==0 ? M11_RELEASE_NOT_OBSERVED : M11_RELEASE_UNKNOWN;
+    if (a->release==M11_RELEASE_NOT_OBSERVED) latch(a,M11_ANCHOR_LATCH_HIDDEN_REFERENCE);
     return rc;
 }
 int m11_anchor_end_boot(m11_pid1_anchor *a, m11_terminal_action t, m11_anchor_end *out) {
     if (!a || !out) return -EINVAL;
-    *out=M11_ANCHOR_END_PID1_EXIT;
+    *out=M11_ANCHOR_END_RETAIN;
     if (t==M11_TERMINAL_HOLD || t==M11_TERMINAL_HOLD_RECONCILE) return -EBUSY;
-    if (t==M11_TERMINAL_ORDERLY_SHUTDOWN && !holds_any(a) && !(a->latches & M11_ANCHOR_LATCH_CLOSE_ERROR) &&
-        (a->state==M11_ANCHOR_RELEASED || a->state==M11_ANCHOR_UNBOUND || a->state==M11_ANCHOR_FAILED)) {
-        *out=M11_ANCHOR_END_REBOOT; /* the anchor's last close already ran, or nothing was opened */
+    if (t==M11_TERMINAL_ORDERLY_SHUTDOWN && !holds_any(a) &&
+        !(a->latches & (M11_ANCHOR_LATCH_CLOSE_ERROR|M11_ANCHOR_LATCH_HIDDEN_REFERENCE)) &&
+        (a->state==M11_ANCHOR_OWNER_FDS_DROPPED || a->state==M11_ANCHOR_UNBOUND || a->state==M11_ANCHOR_FAILED)) {
+        *out=M11_ANCHOR_END_REBOOT; /* PID1 dropped its references, or nothing was opened */
         return 0;
     }
-    /* Retain: PID1 exits holding the OFD; global init panics before exit_files(). */
+    /* Retain: never close, never reboot(2); a live hold or PID1 exit (panic before exit_files()). */
     bool consistent=t!=M11_TERMINAL_ORDERLY_SHUTDOWN;
-    if (a->state!=M11_ANCHOR_RELEASED) a->state=M11_ANCHOR_RETAINED;
+    if (a->state!=M11_ANCHOR_OWNER_FDS_DROPPED) a->state=M11_ANCHOR_RETAINED;
     return consistent ? 0 : -EPROTO; /* ledger said orderly while PID1 still holds a reference */
 }
 const char *m11_anchor_state_name(m11_anchor_state s) {
@@ -181,7 +200,7 @@ const char *m11_anchor_state_name(m11_anchor_state s) {
     case M11_ANCHOR_UNBOUND: return "UNBOUND";
     case M11_ANCHOR_HELD: return "HELD";
     case M11_ANCHOR_LENT: return "LENT";
-    case M11_ANCHOR_RELEASED: return "RELEASED";
+    case M11_ANCHOR_OWNER_FDS_DROPPED: return "OWNER_FDS_DROPPED";
     case M11_ANCHOR_RETAINED: return "RETAINED";
     case M11_ANCHOR_FAILED: return "FAILED";
     }

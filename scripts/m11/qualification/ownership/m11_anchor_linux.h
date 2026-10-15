@@ -15,11 +15,24 @@ typedef struct {
 } m11_anchor_linux;
 
 int m11_anchor_linux_ops(m11_anchor_linux *, const char *path, int census_root, m11_anchor_ops *out);
-/* Runs in the forked worker on the borrowed fd; nonzero = failure. Must not open the node. */
+/* Runs in the forked, confined worker on the borrowed fd; nonzero = failure. It must not
+ * close the borrowed fd (returning the loan is exiting). */
 typedef int (*m11_anchor_work)(int fd, void *arg);
-/* Reserve the loan, fork, let the worker accept the fd (and drop privileges when running as
- * root), wait up to deadline_ms, SIGKILL, wait up to grace_ms, and end the loan. Returns the
- * adapter's lend_end() result; *end says how the worker ended. */
-int m11_anchor_linux_lend(m11_pid1_anchor *, m11_anchor_work, void *arg, unsigned deadline_ms,
-                          unsigned grace_ms, m11_worker_end *end);
+/* Reserve the loan and fork (never CLONE_FILES). The worker refuses a shared fd table,
+ * accepts the fd, closes every inherited fd except stdio, the borrowed fd and `keep`, drops
+ * privileges when root, then sets NO_NEW_PRIVS and a seccomp denylist (no open, mknod, exec,
+ * sendmsg/SCM_RIGHTS, io_uring, pidfd_getfd, fork/clone, ptrace, process_vm_*, reboot)
+ * before running `work`. The parent waits up to deadline_ms, SIGKILLs, waits up to grace_ms
+ * and ends the loan. Returns the adapter's lend_end() result; *end says how it ended. */
+int m11_anchor_linux_lend(m11_pid1_anchor *, m11_anchor_work, void *arg, const int *keep, unsigned nkeep,
+                          unsigned deadline_ms, unsigned grace_ms, m11_worker_end *end);
+/* kcmp(KCMP_FILES) of the caller and its parent: 1 shared, 0 not, negative errno unknown. */
+int m11_anchor_linux_fd_table_shared(void);
+/* Worker steps, exposed for tests: close every fd except stdio, `borrowed` and `keep`; set
+ * NO_NEW_PRIVS and install the seccomp denylist. 0 on success. */
+int m11_anchor_linux_close_unlisted(int borrowed, const int *keep, unsigned nkeep);
+int m11_anchor_linux_confine(void);
+/* Worker exit codes, for tests. */
+enum { M11_WORKER_EXIT_ACCEPT = 90, M11_WORKER_EXIT_PRIVILEGE = 91, M11_WORKER_EXIT_WORK = 92,
+       M11_WORKER_EXIT_HYGIENE = 94, M11_WORKER_EXIT_CONFINE = 95 };
 #endif

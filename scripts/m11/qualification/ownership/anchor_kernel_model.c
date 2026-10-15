@@ -33,7 +33,7 @@ static int lowest_free(const km_proc *p, int min) {
 }
 void km_init(km_kernel *k, bool flush) {
     memset(k,0,sizeof(*k));
-    k->endpoint_has_flush=flush; k->last_released_file=-1; k->next_pid=2;
+    k->endpoint_has_flush=flush; k->last_released_file=-1; k->oracle_file=-1; k->next_pid=2;
     km_proc *init=&k->procs[0];
     init->alive=true; init->privileged=true; init->pid=1;
     int console=new_file(k,false,1);
@@ -123,6 +123,9 @@ bool km_foreign_endpoint_ofd(const km_kernel *k, int file) {
     return false;
 }
 
+void km_hold_hidden(km_kernel *k, int f) { if (f>=0 && f<KM_FILES && k->files[f].refs) k->files[f].refs++; }
+void km_drop_hidden(km_kernel *k, int f) { if (f>=0 && f<KM_FILES) fput(k,f); }
+
 /* ------------------------------ injected adapter ops ------------------------------ */
 static int ops_self(void *v) { km_kernel *k=v; return k->procs[k->current].pid; }
 static int ops_open(void *v) { km_kernel *k=v; return km_open(k,k->current,true); }
@@ -161,6 +164,21 @@ static int ops_holders(void *v, const m11_anchor_id *want, m11_anchor_holder *ou
     }
     return 0;
 }
+static int index_of(const km_kernel *k, int pid) {
+    for (int i=0;i<KM_PROCS;i++) if (k->procs[i].alive && k->procs[i].pid==pid) return i;
+    return -1;
+}
+static int ops_same_ofd(void *v, int pa, int fa, int pb, int fb) { /* kcmp(KCMP_FILE) */
+    km_kernel *k=v;
+    int a=km_file_of(k,index_of(k,pa),fa), b=km_file_of(k,index_of(k,pb),fb);
+    return a<0 || b<0 ? -EBADF : a==b;
+}
+static int ops_table_shared(void *v) { (void)v; return 0; } /* the model forks only */
+static int ops_oracle(void *v) {
+    km_kernel *k=v;
+    return k->oracle_file<0 ? -ENOSYS : k->files[k->oracle_file].released;
+}
 m11_anchor_ops km_ops(km_kernel *k) {
-    return (m11_anchor_ops){k,ops_self,ops_open,ops_identify,ops_dup,ops_fd_flags,ops_status,ops_close,ops_holders};
+    return (m11_anchor_ops){k,ops_self,ops_open,ops_identify,ops_dup,ops_fd_flags,ops_status,ops_close,ops_holders,
+                            ops_same_ofd,ops_table_shared,ops_oracle};
 }

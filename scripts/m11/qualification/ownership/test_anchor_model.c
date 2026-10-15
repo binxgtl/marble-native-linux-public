@@ -114,7 +114,7 @@ int main(void) {
     assert(a.state==M11_ANCHOR_FAILED && a.raw_fd>=0 && km_refs_of(&k,km_file_of(&k,0,a.raw_fd))==1);
     assert(k.endpoint_releases==0 && (a.latches & M11_ANCHOR_LATCH_FD_DISCIPLINE));
     m11_anchor_end end=M11_ANCHOR_END_REBOOT;
-    assert(m11_anchor_end_boot(&a,M11_TERMINAL_ORDERLY_SHUTDOWN,&end)==-EPROTO && end==M11_ANCHOR_END_PID1_EXIT);
+    assert(m11_anchor_end_boot(&a,M11_TERMINAL_ORDERLY_SHUTDOWN,&end)==-EPROTO && end==M11_ANCHOR_END_RETAIN);
     km_exit(&k,0); assert(k.panicked && k.endpoint_releases==0);
     pass("unproven identity: fd retained, never closed, boot ends by PID1 exit without release");
     fresh(false); ops=km_ops(&k); k.fail_dup=true;
@@ -153,8 +153,8 @@ int main(void) {
     int fd=-1;
     assert(m11_anchor_lend_begin(&a,&fd)==-EBUSY && m11_anchor_final_close(&a)==-EBUSY);
     end=M11_ANCHOR_END_REBOOT;
-    assert(m11_anchor_end_boot(&a,M11_TERMINAL_ORDERLY_SHUTDOWN,&end)==-EPROTO && end==M11_ANCHOR_END_PID1_EXIT);
-    assert(m11_anchor_end_boot(&a,M11_TERMINAL_RESET_RETAINING_ANCHORS,&end)==0 && end==M11_ANCHOR_END_PID1_EXIT);
+    assert(m11_anchor_end_boot(&a,M11_TERMINAL_ORDERLY_SHUTDOWN,&end)==-EPROTO && end==M11_ANCHOR_END_RETAIN);
+    assert(m11_anchor_end_boot(&a,M11_TERMINAL_RESET_RETAINING_ANCHORS,&end)==0 && end==M11_ANCHOR_END_RETAIN);
     km_exit(&k,0); assert(k.panicked && k.endpoint_releases==0);
     pass("unresolved worker: loan never ends, no new loan, no final close; PID1 exit releases nothing");
 
@@ -163,7 +163,7 @@ int main(void) {
     assert(m11_anchor_check(&a)==-EBADF && (a.latches & M11_ANCHOR_LATCH_FD_DISCIPLINE));
     assert(seen.lost==1 && seen.lost_released==0);
     assert(m11_anchor_lend_begin(&a,&fd)==-EOWNERDEAD && m11_anchor_final_close(&a)==-EOWNERDEAD);
-    assert(!m11_anchor_end_boot(&a,M11_TERMINAL_RESET_RETAINING_ANCHORS,&end) && end==M11_ANCHOR_END_PID1_EXIT);
+    assert(!m11_anchor_end_boot(&a,M11_TERMINAL_RESET_RETAINING_ANCHORS,&end) && end==M11_ANCHOR_END_RETAIN);
     km_exit(&k,0); assert(k.endpoint_releases==0);
     pass("PID1 bug closes the anchor number: guard keeps the OFD; latched; boot ends retained");
     bound(); f=anchor_file();
@@ -218,12 +218,36 @@ int main(void) {
     km_exit(&k,w); assert(!m11_anchor_lend_end(&a,M11_WORKER_EXIT_OK));
     assert(m11_anchor_end_boot(&a,M11_TERMINAL_HOLD,&end)==-EBUSY && a.state==M11_ANCHOR_HELD);
     assert(m11_anchor_end_boot(&a,M11_TERMINAL_HOLD_RECONCILE,&end)==-EBUSY && a.state==M11_ANCHOR_HELD);
-    f=anchor_file();
-    assert(!m11_anchor_final_close(&a) && a.state==M11_ANCHOR_RELEASED && a.final_closes==1);
+    f=anchor_file(); k.oracle_file=f;
+    assert(!m11_anchor_final_close(&a) && a.state==M11_ANCHOR_OWNER_FDS_DROPPED && a.final_closes==1);
     assert(k.endpoint_releases==1 && k.last_released_file==f && km_refs_of(&k,f)==0);
+    assert(a.release==M11_RELEASE_OBSERVED);
     assert(!m11_anchor_end_boot(&a,M11_TERMINAL_ORDERLY_SHUTDOWN,&end) && end==M11_ANCHOR_END_REBOOT);
     assert(m11_anchor_final_close(&a)==-EBUSY && m11_anchor_lend_begin(&a,&fd)==-EBUSY);
-    pass("final close as sole holder: the second close is the single release; then reboot is allowed");
+    pass("final close as sole holder: owner fds dropped and, with an oracle, the release observed");
+
+    bound(); f=anchor_file();
+    assert(!m11_anchor_final_close(&a) && a.state==M11_ANCHOR_OWNER_FDS_DROPPED);
+    assert(a.release==M11_RELEASE_UNKNOWN && k.endpoint_releases==1);
+    assert(!m11_anchor_end_boot(&a,M11_TERMINAL_ORDERLY_SHUTDOWN,&end) && end==M11_ANCHOR_END_REBOOT);
+    pass("no oracle (the real endpoint): OWNER_FDS_DROPPED, release UNKNOWN, never claimed");
+    bound(); f=anchor_file(); k.oracle_file=f;
+    km_hold_hidden(&k,f); /* e.g. the anchor queued in an SCM_RIGHTS message */
+    assert(!m11_anchor_check(&a)); /* invisible to every fd table */
+    assert(!m11_anchor_final_close(&a) && a.state==M11_ANCHOR_OWNER_FDS_DROPPED);
+    assert(a.release==M11_RELEASE_NOT_OBSERVED && (a.latches & M11_ANCHOR_LATCH_HIDDEN_REFERENCE));
+    assert(k.endpoint_releases==0 && seen.foreign==1);
+    assert(m11_anchor_end_boot(&a,M11_TERMINAL_ORDERLY_SHUTDOWN,&end)==-EPROTO && end==M11_ANCHOR_END_RETAIN);
+    km_drop_hidden(&k,f);
+    assert(k.endpoint_releases==1);
+    pass("hidden reference: owner fds dropped is not release; the oracle refutes it and reboot is refused");
+    bound(); f=anchor_file();
+    int planted=km_open(&k,0,true); /* a second OFD of the same node, at the guard number */
+    assert(planted>=0 && !km_close(&k,0,a.guard_fd) && km_dup2(&k,0,planted,a.guard_fd)==a.guard_fd);
+    km_set_cloexec(&k,0,a.guard_fd,true); assert(!km_close(&k,0,planted));
+    assert(m11_anchor_check(&a)==-EBUSY && (a.latches & M11_ANCHOR_LATCH_SECOND_OFD));
+    assert(m11_anchor_final_close(&a)==-EOWNERDEAD && k.endpoint_releases==0);
+    pass("kcmp census: a second OFD planted at a reserved number has the node identity but is refused");
 
     memset(&a,0,sizeof(a));
     assert(!m11_anchor_end_boot(&a,M11_TERMINAL_ORDERLY_SHUTDOWN,&end) && end==M11_ANCHOR_END_REBOOT);
@@ -268,14 +292,14 @@ int main(void) {
             assert(m11_anchor_end_boot(&a,m11_custodian_terminal_action(&c),&end)==-EBUSY);
             assert(m11_custodian_tick(&c,201)==-EOWNERDEAD);
             assert(m11_custodian_terminal_action(&c)==M11_TERMINAL_RESET_RETAINING_ANCHORS);
-            assert(!m11_anchor_end_boot(&a,m11_custodian_terminal_action(&c),&end) && end==M11_ANCHOR_END_PID1_EXIT);
+            assert(!m11_anchor_end_boot(&a,m11_custodian_terminal_action(&c),&end) && end==M11_ANCHOR_END_RETAIN);
             km_exit(&k,0); assert(k.panicked && k.endpoint_releases==0);
             pass("ledger: DSP-mapped boot, worker killed -> taint -> deadline -> PID1 exit, no release");
         } else {
             int intruder2=km_fork(&k,0); km_exec(&k,intruder2); assert(km_open(&k,intruder2,true)>=0);
             assert(m11_anchor_check(&a)==-EBUSY && c.kernel_imports_lost);
             assert(m11_custodian_terminal_action(&c)==M11_TERMINAL_RESET_RETAINING_ANCHORS);
-            assert(!m11_anchor_end_boot(&a,m11_custodian_terminal_action(&c),&end) && end==M11_ANCHOR_END_PID1_EXIT);
+            assert(!m11_anchor_end_boot(&a,m11_custodian_terminal_action(&c),&end) && end==M11_ANCHOR_END_RETAIN);
             unsigned slot=0; assert(m11_custodian_map(&c,4096,102,&slot)<0);
             pass("ledger: foreign holder = uncontrolled global cleanup -> no MAP, PID1 exit");
         }

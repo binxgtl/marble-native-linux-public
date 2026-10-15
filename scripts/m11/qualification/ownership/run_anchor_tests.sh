@@ -2,8 +2,11 @@
 # PID1 endpoint-anchor adapter (R1) offline suite, under gcc, clang and gcc ASan+UBSan:
 #  - directed cases on the synthetic pinned-ACK file-lifetime model, including a before/after
 #    witness of the current native path and the custodian ledger integration;
-#  - real fork/exec/SIGKILL cases on a STAND-IN character device (/dev/ptmx), never the endpoint;
-#  - seeded fuzz with coverage gates, and detection power against three one-line mutants;
+#  - real fork/exec/SIGKILL cases on a STAND-IN character device (/dev/ptmx), never the endpoint,
+#    including negative controls (CLONE_FILES, close_range, dup3, self-exec, SCM_RIGHTS in flight)
+#    and the confined worker (fd hygiene, seccomp denylist, kcmp census);
+#  - seeded fuzz with coverage gates; detection power against three one-line fuzz mutants and
+#    five one-line process-test mutants;
 #  - the offline compile gate. Mock/model/stand-in evidence only: no device or DSP claim.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -16,15 +19,19 @@ sha256sum "$here/m11_pid1_anchor.c" "$here/m11_pid1_anchor.h" "$here/m11_anchor_
 # Detection power: change exactly ONE line of a copy of the adapter; the same fuzz MUST report
 # the matching invariant violation. The copy sits alone in its directory, so its quoted
 # includes resolve through -I "$here" to the unchanged headers.
-mutant() {
-  local name="$1" old="$2" new="$3" expect="$4" dir="$out/mutant-anchor-$1-$mode"
+mutate() { # unit old new dir: copy unit.c with exactly one line deleted (new='') or replaced
+  local unit="$1" old="$2" new="$3" dir="$4"
   mkdir -p "$dir"
   awk -v old="$old" -v new="$new" -v del="${new:+0}" '
     index($0, old) { n++; if (del == "0") print new; next } { print }
-    END { if (n != 1) exit 3 }' "$here/m11_pid1_anchor.c" > "$dir/m11_pid1_anchor.c"
-  if cmp -s "$here/m11_pid1_anchor.c" "$dir/m11_pid1_anchor.c"; then
-    echo "ERROR: mutant $name changed nothing" >&2; exit 1
+    END { if (n != 1) exit 3 }' "$here/$unit.c" > "$dir/$unit.c"
+  if cmp -s "$here/$unit.c" "$dir/$unit.c"; then
+    echo "ERROR: mutant of $unit changed nothing" >&2; exit 1
   fi
+}
+mutant() {
+  local name="$1" old="$2" new="$3" expect="$4" dir="$out/mutant-anchor-$1-$mode"
+  mutate m11_pid1_anchor "$old" "$new" "$dir"
   "$cc" "${flags[@]}" -I "$here" "$dir/m11_pid1_anchor.c" "$here/anchor_kernel_model.c" \
     "$here/fuzz_anchor.c" -o "$out/fuzz-anchor-mutant-$name-$mode"
   if "$out/fuzz-anchor-mutant-$name-$mode" 1 3000 60 > "$out/fuzz-anchor-mutant-$name-$mode.log" 2>&1; then
@@ -32,6 +39,22 @@ mutant() {
   fi
   grep -m1 -E "$expect" "$out/fuzz-anchor-mutant-$name-$mode.log"
   echo "PASS anchor fuzz detects mutant $name ($mode)"
+}
+# Process-test mutants: one line deleted from the adapter or the backend; the real-process suite
+# MUST fail on the named assertion.
+pmutant() {
+  local name="$1" unit="$2" old="$3" expect="$4" dir="$out/pmutant-anchor-$1-$mode"
+  local adapter="$here/m11_pid1_anchor.c" backend="$here/m11_anchor_linux.c"
+  mutate "$unit" "$old" '' "$dir"
+  [[ "$unit" == m11_pid1_anchor ]] && adapter="$dir/m11_pid1_anchor.c"
+  [[ "$unit" == m11_anchor_linux ]] && backend="$dir/m11_anchor_linux.c"
+  "$cc" "${flags[@]}" -I "$here" "$adapter" "$backend" "$here/test_anchor_process.c" \
+    -o "$out/anchor-process-mutant-$name-$mode"
+  if "$out/anchor-process-mutant-$name-$mode" > "$out/anchor-process-mutant-$name-$mode.log" 2>&1; then
+    echo "ERROR: process suite did not detect mutant $name" >&2; exit 1
+  fi
+  grep -m1 -F "$expect" "$out/anchor-process-mutant-$name-$mode.log"
+  echo "PASS process suite detects mutant $name ($mode)"
 }
 for mode in gcc clang sanitize; do
   cc=gcc
@@ -59,6 +82,11 @@ for mode in gcc clang sanitize; do
     'final close returned success but was not the last fput|final close granted while a second endpoint OFD existed'
   mutant lend-census '/* no other holder may share the loan */' '' \
     'loan granted while another process held the endpoint OFD|loan granted while a second endpoint OFD existed'
+  pmutant no-seccomp m11_anchor_linux '/* worker seccomp confinement */' 'Assertion'
+  pmutant no-hygiene m11_anchor_linux '/* worker fd hygiene */' 'Assertion'
+  pmutant no-kcmp-census m11_pid1_anchor 'latch(a,M11_ANCHOR_LATCH_SECOND_OFD); foreign=true; continue;' 'Assertion'
+  pmutant no-hidden-latch m11_pid1_anchor 'if (a->release==M11_RELEASE_NOT_OBSERVED) latch(' 'Assertion'
+  pmutant shared-table m11_pid1_anchor 'if (a->ops.fd_table_shared) shared=' 'Assertion'
 done
 # Same seed, same operation sequence under gcc and clang.
 cmp "$out/fuzz-anchor-gcc.log" "$out/fuzz-anchor-clang.log"

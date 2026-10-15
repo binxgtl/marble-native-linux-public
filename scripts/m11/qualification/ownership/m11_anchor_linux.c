@@ -4,6 +4,11 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <grp.h>
+#include <linux/audit.h>
+#include <linux/filter.h>
+#include <linux/seccomp.h>
+#include <stddef.h>
+#include <sys/syscall.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdio.h>
@@ -36,6 +41,20 @@ static int lx_dup(void *v, int fd, int min) { (void)v; int r=fcntl(fd,F_DUPFD_CL
 static int lx_fd_flags(void *v, int fd) { (void)v; int r=fcntl(fd,F_GETFD); return r<0 ? -errno : r; }
 static int lx_status(void *v, int fd) { (void)v; int r=fcntl(fd,F_GETFL); return r<0 ? -errno : r; }
 static int lx_close(void *v, int fd) { (void)v; return close(fd) ? -errno : 0; } /* never retried */
+#define M11_KCMP_FILE 0  /* include/uapi/linux/kcmp.h */
+#define M11_KCMP_FILES 2
+static int lx_same_ofd(void *v, int pa, int fa, int pb, int fb) {
+    (void)v;
+    long r=syscall(SYS_kcmp,(pid_t)pa,(pid_t)pb,M11_KCMP_FILE,(unsigned long)fa,(unsigned long)fb);
+    if (r<0) return -errno;
+    return r==0 ? 1 : 0; /* 1/2 order unequal objects; 3 = not comparable */
+}
+int m11_anchor_linux_fd_table_shared(void) {
+    long r=syscall(SYS_kcmp,getpid(),getppid(),M11_KCMP_FILES,0ul,0ul);
+    if (r<0) return -errno;
+    return r==0;
+}
+static int lx_table_shared(void *v) { (void)v; return m11_anchor_linux_fd_table_shared(); }
 
 static int numeric(const char *s) {
     if (!*s) return 0;
@@ -104,7 +123,9 @@ int m11_anchor_linux_ops(m11_anchor_linux *l, const char *path, int census_root,
     for (unsigned i=0;i<sizeof(stand_ins)/sizeof(*stand_ins);i++) if (!strcmp(path,stand_ins[i])) allowed=1;
     if (!allowed) return -EPERM; /* in particular never /dev/aud_pasthru_adsp */
     *l=(m11_anchor_linux){path,census_root};
-    *out=(m11_anchor_ops){l,lx_self,lx_open,lx_identify,lx_dup,lx_fd_flags,lx_status,lx_close,lx_holders};
+    /* No release oracle: the backend cannot observe a driver release. */
+    *out=(m11_anchor_ops){l,lx_self,lx_open,lx_identify,lx_dup,lx_fd_flags,lx_status,lx_close,lx_holders,
+                          lx_same_ofd,lx_table_shared,NULL};
     return 0;
 }
 
@@ -124,6 +145,68 @@ static int drop_privileges(void) {
     }
     return setgroups(0,0) || setresgid(65534,65534,65534) || setresuid(65534,65534,65534) ? -1 : 0;
 }
+static int kept(int fd, int borrowed, const int *keep, unsigned nkeep) {
+    if (fd<=2 || fd==borrowed) return 1;
+    for (unsigned i=0;i<nkeep;i++) if (keep[i]==fd) return 1;
+    return 0;
+}
+/* Worker fd hygiene: snapshot /proc/self/fd, then close every fd not explicitly kept. */
+int m11_anchor_linux_close_unlisted(int borrowed, const int *keep, unsigned nkeep) {
+    static int fds[MAX_FDS];
+    unsigned n=0;
+    DIR *d=opendir("/proc/self/fd"); if (!d) return -1;
+    int self=dirfd(d), rc=0; struct dirent *e;
+    for (;;) {
+        errno=0; e=readdir(d);
+        if (!e) { if (errno) rc=-1; break; }
+        if (!numeric(e->d_name)) continue;
+        int fd=atoi(e->d_name);
+        if (fd==self || kept(fd,borrowed,keep,nkeep)) continue;
+        if (n==MAX_FDS) { rc=-1; break; }
+        fds[n++]=fd;
+    }
+    closedir(d);
+    for (unsigned i=0;i<n;i++) if (close(fds[i])) rc=-1;
+    return rc;
+}
+#if defined(__x86_64__)
+#define M11_AUDIT_ARCH AUDIT_ARCH_X86_64
+#elif defined(__aarch64__)
+#define M11_AUDIT_ARCH AUDIT_ARCH_AARCH64
+#else
+#error "worker confinement is defined for x86_64 and aarch64 only"
+#endif
+#define M11_DENY(nr, err) BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,(nr),0,1), BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ERRNO|((err)&SECCOMP_RET_DATA))
+/* Denylist, not allowlist: the libc and sanitizer runtimes vary. It removes every route the
+ * worker has to a second OFD (open/mknod), to an exported or hidden reference (SCM_RIGHTS,
+ * io_uring, pidfd_getfd), to a new image or process (exec, fork/clone: no CLONE_FILES peer),
+ * to another process (ptrace, process_vm_*), and to KernelSU's fd (installed by a kprobe on
+ * reboot(2) in KernelSU-Next v3.3.0 and v3.4.0). */
+int m11_anchor_linux_confine(void) {
+    struct sock_filter f[]={
+        BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,arch)),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,M11_AUDIT_ARCH,1,0),
+        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_KILL_PROCESS),
+        BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
+#if defined(__x86_64__)
+        BPF_JUMP(BPF_JMP|BPF_JGE|BPF_K,0x40000000u,0,1), /* x32 ABI aliases */
+        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_KILL_PROCESS),
+        M11_DENY(__NR_open,EPERM), M11_DENY(__NR_creat,EPERM), M11_DENY(__NR_mknod,EPERM),
+        M11_DENY(__NR_fork,EPERM), M11_DENY(__NR_vfork,EPERM),
+#endif
+        M11_DENY(__NR_openat,EPERM), M11_DENY(__NR_openat2,EPERM), M11_DENY(__NR_open_by_handle_at,EPERM),
+        M11_DENY(__NR_mknodat,EPERM), M11_DENY(__NR_execve,EPERM), M11_DENY(__NR_execveat,EPERM),
+        M11_DENY(__NR_sendmsg,EPERM), M11_DENY(__NR_sendmmsg,EPERM), M11_DENY(__NR_pidfd_getfd,EPERM),
+        M11_DENY(__NR_io_uring_setup,EPERM), M11_DENY(__NR_io_uring_enter,EPERM),
+        M11_DENY(__NR_io_uring_register,EPERM), M11_DENY(__NR_clone,EPERM), M11_DENY(__NR_clone3,ENOSYS),
+        M11_DENY(__NR_ptrace,EPERM), M11_DENY(__NR_process_vm_readv,EPERM),
+        M11_DENY(__NR_process_vm_writev,EPERM), M11_DENY(__NR_reboot,EPERM),
+        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW),
+    };
+    struct sock_fprog prog={(unsigned short)(sizeof(f)/sizeof(*f)),f};
+    if (prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0)) return -1;
+    return prctl(PR_SET_SECCOMP,SECCOMP_MODE_FILTER,&prog,0,0) ? -1 : 0;
+}
 static int reap(int pid, unsigned ms, int *status) {
     uint64_t t, until;
     if (now_ms(&t)) return 0;
@@ -136,19 +219,20 @@ static int reap(int pid, unsigned ms, int *status) {
         (void)poll(NULL,0,2);
     }
 }
-int m11_anchor_linux_lend(m11_pid1_anchor *a, m11_anchor_work work, void *arg, unsigned deadline_ms,
-                          unsigned grace_ms, m11_worker_end *end) {
-    if (!a || !work || !end) return -EINVAL;
+int m11_anchor_linux_lend(m11_pid1_anchor *a, m11_anchor_work work, void *arg, const int *keep, unsigned nkeep,
+                          unsigned deadline_ms, unsigned grace_ms, m11_worker_end *end) {
+    if (!a || !work || !end || (nkeep && !keep)) return -EINVAL;
     *end=M11_WORKER_UNRESOLVED;
     int fd, rc=m11_anchor_lend_begin(a,&fd);
     if (rc) return rc;
-    pid_t pid=fork();
+    pid_t pid=fork(); /* a separate fd table: never clone(CLONE_FILES) */
     if (pid<0) { rc=-errno; (void)m11_anchor_lend_abort(a); return rc; }
     if (!pid) {
-        /* Worker: accept (validates, drops the guard copy), lose the right to open, work. */
-        if (m11_anchor_worker_accept(a,fd)) _exit(90);
-        if (geteuid()==0 && drop_privileges()) _exit(91);
-        _exit(work(fd,arg) ? 92 : 0);
+        if (m11_anchor_worker_accept(a,fd)) _exit(M11_WORKER_EXIT_ACCEPT);
+        if (m11_anchor_linux_close_unlisted(fd,keep,nkeep)) _exit(M11_WORKER_EXIT_HYGIENE); /* worker fd hygiene */
+        if (geteuid()==0 && drop_privileges()) _exit(M11_WORKER_EXIT_PRIVILEGE);
+        if (m11_anchor_linux_confine()) _exit(M11_WORKER_EXIT_CONFINE); /* worker seccomp confinement */
+        _exit(work(fd,arg) ? M11_WORKER_EXIT_WORK : 0);
     }
     if ((rc=m11_anchor_lend_started(a,pid))) return rc; /* cannot happen for a fresh child */
     int status=0;

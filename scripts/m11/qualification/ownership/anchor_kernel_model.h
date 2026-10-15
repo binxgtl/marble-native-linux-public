@@ -40,6 +40,7 @@ typedef struct {
     unsigned endpoint_releases; /* audio_pkt_release ran: CLOSE_ALL + global ION cleanup */
     unsigned endpoint_flushes;  /* driver code run by a NON-final close (counterfactual) */
     int last_released_file;
+    int oracle_file;            /* release_oracle(): has this file been released? (-1: none) */
     int current;                /* process the injected ops act as */
     int next_pid;
     bool fail_holders, fail_dup;
@@ -59,5 +60,9 @@ int km_file_of(const km_kernel *, int proc, int fd);
 unsigned km_refs_of(const km_kernel *, int file);
 /* Live processes (other than PID1) that hold any reference to an endpoint OFD other than `file`. */
 bool km_foreign_endpoint_ofd(const km_kernel *, int file);
+/* A reference held outside every fd table (an SCM_RIGHTS message in flight, an io_uring
+ * fixed file, a blocked syscall's fdget): invisible to the census, it still pins the OFD. */
+void km_hold_hidden(km_kernel *, int file);
+void km_drop_hidden(km_kernel *, int file);
 m11_anchor_ops km_ops(km_kernel *);
 #endif

@@ -15,13 +15,19 @@
  *    runs f_op->release only on the last fput(). So a worker's close, exec or death (any
  *    signal) is a non-final close that runs no audio_pkt code: no CLOSE_ALL, no ION crash
  *    handler.
- *  - audio_pkt_release runs only from final_close(), which PID1 may call only when a census
- *    shows its own two fds are the ONLY holders (so that close is the last one), and only
- *    when the custodian allowed the endpoint close. Otherwise the boot ends with the
- *    anchor retained (PID1 exit: panic before exit_files(), no release).
+ *  - PID1 drops its two fds only in final_close(), only when a census shows them to be the
+ *    only VISIBLE holders, and only when the custodian allowed the endpoint close. That is
+ *    OWNER_FDS_DROPPED, not "release observed": a reference outside every fd table (an
+ *    SCM_RIGHTS message in flight, an io_uring fixed file, a blocked syscall) keeps the OFD
+ *    alive, and only an injected oracle can say whether the release ran. Otherwise the boot
+ *    ends with the anchor retained (a live terminal hold, or PID1 exit; never a close).
+ *  - A worker never closes the borrowed fd: returning the loan is exiting. Under a shared fd
+ *    table (CLONE_FILES) an explicit close would close PID1's own number; exit does not.
  * Limits: user-space discipline, not kernel enforcement. A second open(2) creates a second
- * OFD whose own last close runs the global cleanup regardless of this anchor; the census
- * can detect another holder of the node but cannot tell OFDs apart.
+ * OFD whose own last close runs the global cleanup regardless of this anchor. The census sees
+ * fd tables only; with kcmp(KCMP_FILE) it can tell OFDs apart, without it only nodes. Both
+ * PID1 references live in one fd table: close_range(), dup2/dup3 onto both numbers, or a
+ * PID1 self-exec (both are FD_CLOEXEC) remove them together. Those are integration rules.
  */
 #ifndef M11_OWNERSHIP_OFFLINE
 #error "PID1 anchor adapter requires explicitly offline qualification; device integration is BLOCKED"
@@ -30,7 +36,10 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#define M11_ANCHOR_API_REVISION 1
+/* 1: one open, anchor + guard, loans by fork, census, sole-holder final close.
+ * 2: OWNER_FDS_DROPPED replaces RELEASED, release oracle and HIDDEN_REFERENCE latch, kcmp
+ *    OFD comparison in the census, shared-fd-table refusal in the worker, END_RETAIN. */
+#define M11_ANCHOR_API_REVISION 2
 #define M11_ANCHOR_RESERVED_FD 512
 #define M11_ANCHOR_MAX_HOLDERS 16u
 
@@ -49,6 +58,13 @@ typedef struct {
     int (*close_fd)(void *ctx, int fd);                     /* never retried */
     /* Every (pid, fd) whose file has this identity. Any unreadable process is an error. */
     int (*holders)(void *ctx, const m11_anchor_id *, m11_anchor_holder *, unsigned cap, unsigned *n);
+    /* Optional (NULL or -ENOSYS = unavailable). same_ofd: 1 same open file description,
+     * 0 different (kcmp KCMP_FILE). fd_table_shared: 1 when the caller shares its fd table
+     * with its parent (kcmp KCMP_FILES). release_oracle: 1 the last-reference consequence is
+     * observable now, 0 it is not; no oracle exists for the real endpoint. */
+    int (*same_ofd)(void *ctx, int pid_a, int fd_a, int pid_b, int fd_b);
+    int (*fd_table_shared)(void *ctx);
+    int (*release_oracle)(void *ctx);
 } m11_anchor_ops;
 
 /* Static facts the adapter cannot observe at run time; each must cite recorded evidence. */
@@ -62,8 +78,8 @@ typedef struct {
 typedef struct {
     void *ctx;
     void (*worker_lost)(void *ctx);    /* lent worker died abnormally or is unresolved */
-    void (*foreign_holder)(void *ctx); /* someone else holds the node: its own OFD's last close
-                                          would run the global cleanup at an unknown time */
+    void (*foreign_holder)(void *ctx); /* someone else holds the node, or a hidden reference
+                                          holds our OFD: a release at an unknown time */
     void (*anchor_lost)(void *ctx, bool may_have_released);
 } m11_anchor_sink;
 
@@ -71,8 +87,9 @@ typedef enum {
     M11_ANCHOR_UNBOUND = 0,
     M11_ANCHOR_HELD,     /* PID1 holds anchor + guard; no worker */
     M11_ANCHOR_LENT,     /* exactly one forked worker shares the anchor OFD */
-    M11_ANCHOR_RELEASED, /* terminal: PID1 performed the single last close */
-    M11_ANCHOR_RETAINED, /* terminal: never closed; the boot ends by PID1 exit */
+    M11_ANCHOR_OWNER_FDS_DROPPED, /* terminal: PID1 closed guard and anchor after the policy
+                                     checks; says nothing by itself about the driver release */
+    M11_ANCHOR_RETAINED, /* terminal: never closed; the boot ends retaining the anchor */
     M11_ANCHOR_FAILED    /* bind failed; any descriptor it obtained is kept, never closed */
 } m11_anchor_state;
 
@@ -83,12 +100,17 @@ enum { /* latched for the rest of the boot */
     M11_ANCHOR_LATCH_FD_DISCIPLINE = 8u, /* anchor/guard missing, replaced or lost FD_CLOEXEC */
     M11_ANCHOR_LATCH_CENSUS_ERROR = 16u,
     M11_ANCHOR_LATCH_CLOSE_ERROR = 32u,
+    M11_ANCHOR_LATCH_SECOND_OFD = 64u,   /* kcmp: a holder of the node at ANOTHER OFD */
+    M11_ANCHOR_LATCH_HIDDEN_REFERENCE = 128u, /* oracle: owner fds dropped, release not observed */
 };
 /* Every latch except an abnormal (reaped) worker refuses new loans and the final close. */
 #define M11_ANCHOR_LATCH_REFUSE (~(uint32_t)M11_ANCHOR_LATCH_WORKER_ABNORMAL)
 
 typedef enum { M11_WORKER_EXIT_OK, M11_WORKER_EXIT_ABNORMAL, M11_WORKER_UNRESOLVED } m11_worker_end;
-typedef enum { M11_ANCHOR_END_REBOOT, M11_ANCHOR_END_PID1_EXIT } m11_anchor_end;
+/* RETAIN: never close, never reboot(2). A live terminal hold, or PID1 exit (global init
+ * panics before exit_files()); which one is an integration decision. */
+typedef enum { M11_ANCHOR_END_REBOOT, M11_ANCHOR_END_RETAIN } m11_anchor_end;
+typedef enum { M11_RELEASE_UNKNOWN = 0, M11_RELEASE_OBSERVED, M11_RELEASE_NOT_OBSERVED } m11_release_evidence;
 
 typedef struct {
     m11_anchor_ops ops;
@@ -101,6 +123,7 @@ typedef struct {
     int lent_pid;            /* 0 while a loan is reserved but its fork is not reported */
     uint32_t latches;
     uint32_t opens, lends, final_closes;
+    m11_release_evidence release;
 } m11_pid1_anchor;
 
 /* One-shot per boot, owner only (self_pid() == owner_pid; production passes 1). Requires a
@@ -116,13 +139,15 @@ int m11_anchor_lend_started(m11_pid1_anchor *, int pid);
 int m11_anchor_lend_abort(m11_pid1_anchor *); /* fork failed: no worker exists */
 /* UNRESOLVED keeps the loan forever: the worker still holds a reference. */
 int m11_anchor_lend_end(m11_pid1_anchor *, m11_worker_end);
-/* Worker side, after fork: validates the borrowed fd and drops the guard copy. Never opens. */
+/* Worker side, after fork (never CLONE_FILES): refuses a shared fd table, validates the
+ * borrowed fd, drops the guard copy. Never opens; never closes the borrowed fd. */
 int m11_anchor_worker_accept(const m11_pid1_anchor *, int fd);
 /* Owner only. The custodian's endpoint close maps here: allowed only when PID1's two fds
- * are the sole holders, so the second close is the last fput (audio_pkt_release). */
+ * are the sole VISIBLE holders. Ends in OWNER_FDS_DROPPED; `release` records the oracle. */
 int m11_anchor_final_close(m11_pid1_anchor *);
 /* How this boot may end, from the custodian decision. HOLD/HOLD_RECONCILE: -EBUSY.
- * Anything but a released anchor with ORDERLY_SHUTDOWN ends by PID1 exit, anchor retained. */
+ * REBOOT only for ORDERLY_SHUTDOWN after OWNER_FDS_DROPPED (or nothing opened) with no
+ * hidden reference or close error; everything else is RETAIN. */
 int m11_anchor_end_boot(m11_pid1_anchor *, m11_terminal_action, m11_anchor_end *);
 const char *m11_anchor_state_name(m11_anchor_state);
 #endif
