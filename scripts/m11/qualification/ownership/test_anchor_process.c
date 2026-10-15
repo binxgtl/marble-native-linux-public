@@ -137,6 +137,7 @@ static int confined(int fd, void *arg) {
 
 int main(void) {
     alarm(120); /* finite harness bound, not a recovery mechanism */
+    setvbuf(stdout,NULL,_IONBF,0); /* keep every PASS line if an assertion aborts */
     struct stat st;
     standin=!lstat("/dev/ptmx",&st) && S_ISCHR(st.st_mode) ? "/dev/ptmx" : "/dev/pts/ptmx";
     m11_anchor_linux l; m11_anchor_ops ops;
@@ -234,7 +235,8 @@ int main(void) {
 
     if (kcmp) {
         assert(!bind_standin(&a,&l,getpid()));
-        int planted=open(standin,O_RDWR|O_NOCTTY|O_NONBLOCK|O_CLOEXEC); assert(planted>=0);
+        /* Same open flags as the backend, so identity AND F_GETFL match: only kcmp differs. */
+        int planted=open(standin,O_RDWR|O_NONBLOCK|O_CLOEXEC|O_NOFOLLOW|O_NOCTTY); assert(planted>=0);
         assert(dup3(planted,a.guard_fd,O_CLOEXEC)==a.guard_fd); close(planted);
         assert(m11_anchor_check(&a)==-EBUSY && (a.latches & M11_ANCHOR_LATCH_SECOND_OFD) && !hung_up());
         pass("kcmp census: a second OFD planted at the guard number is refused despite equal identity");
