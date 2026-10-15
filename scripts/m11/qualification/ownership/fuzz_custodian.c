@@ -31,7 +31,7 @@ static bool chance(unsigned pct) { return pick(100u) < pct; }
 
 static struct { unsigned long ops, unmap_ok, map_ok, graph_started, graph_unknown, lost_ack,
     late_ack_release, foreign_simple, foreign_graph, worker_death, latch_refusal, repeat_retire,
-    teardown_after_worker, reset, unsafe, orderly, nack, unmap_tx, map_tx; } cov;
+    teardown_after_worker, reset, unsafe, orderly, nack, unmap_tx, map_tx, oneshot_refusal; } cov;
 
 static void fail(const char *why) {
     fprintf(stderr,"FUZZ VIOLATION seed=%llu scenario=%u op=%u: %s\n",g_seed,g_sc,g_op,why);
@@ -62,6 +62,9 @@ static int probe_write(void *u, int fd, const uint8_t *pkt, size_t len) {
     } else if (op == M11_APM_CMD_SHARED_MEM_MAP_REGIONS) {
         cov.map_tx++;
         if (boot.state != M11_ADSP_CLEAN) fail("MAP transmitted from a non-CLEAN boot");
+#if M11_CUSTODIAN_API_REVISION >= 4
+        if (boot.dsp_unmap_attempted) fail("MAP transmitted after a DSP UNMAP in the same boot");
+#endif
     }
     return orig_write(u, fd, pkt, len);
 }
@@ -212,13 +215,17 @@ int main(int argc, char **argv) {
         fixture();
         bool worker_dead=false;
         /* Prologue: START needs a CLEAN boot, which random background faults end quickly.
-         * Reach a mapped (and usually STARTED) state first; graph faults still apply. */
-        unsigned nmap=1+pick(2u);
-        for (unsigned k=0;k<nmap;k++) {
-            unsigned pi=UINT_MAX;
-            if (!m11_custodian_map(&c,4096u,++now_ms,&pi)) cov.map_ok++;
+         * Reach a mapped (and usually STARTED) state first; graph faults still apply. A few
+         * scenarios skip it, so a boot that never DSP-maps can reach ORDERLY_SHUTDOWN. */
+        bool prologue=!chance(5);
+        if (prologue) {
+            unsigned nmap=1+pick(2u);
+            for (unsigned k=0;k<nmap;k++) {
+                unsigned pi=UINT_MAX;
+                if (!m11_custodian_map(&c,4096u,++now_ms,&pi)) cov.map_ok++;
+            }
+            if (chance(75)) graph_lifecycle(2u);
         }
-        if (chance(75)) graph_lifecycle(2u);
         for (unsigned op=0; op<ops; op++) {
             g_op=op;
             cov.ops++;
@@ -243,6 +250,7 @@ int main(int argc, char **argv) {
             case 0: case 1: case 2:
                 rc=m11_custodian_map(&c,4096u,now_ms,&i);
                 if (!rc) cov.map_ok++;
+                if (rc==-EPERM) cov.oneshot_refusal++;
                 break;
             case 3: case 4: retire_some(false); break;
             case 5: retire_some(true); break;
@@ -299,6 +307,10 @@ int main(int argc, char **argv) {
             if (terminal_final(term0) && !terminal_final(term)) fail("terminal relaxed");
             if (term==M11_TERMINAL_ORDERLY_SHUTDOWN && (any_region() || !ledger_empty() || boot.state!=M11_ADSP_CLEAN))
                 fail("reboot permitted while resources held or tainted");
+#if M11_CUSTODIAN_API_REVISION >= 4
+            if (term==M11_TERMINAL_ORDERLY_SHUTDOWN && boot.dsp_map_attempted)
+                fail("reboot permitted after a DSP MAP in this boot");
+#endif
             /* I7: custodian-driven streaming starts only from a CLEAN boot. Foreign graph
              * traffic (case 17) bypasses the custodian by construction and is excluded. */
             if (which!=17 && ((!rx_started0 && mock.rx_started) || (!vi_started0 && mock.vi_tx_started)) &&
@@ -320,11 +332,11 @@ int main(int argc, char **argv) {
     printf("fuzz seed=%llu scenarios=%u ops=%u: ops=%lu map_ok=%lu unmap_ok=%lu map_tx=%lu unmap_tx=%lu "
            "started=%lu graph_unknown=%lu lost_ack=%lu late_ack_release=%lu foreign_simple=%lu "
            "foreign_graph=%lu worker_death=%lu teardown_after_worker=%lu latch_refusal=%lu "
-           "repeat_retire=%lu nack=%lu reset=%lu unsafe=%lu orderly=%lu\n", seed, scenarios, ops,
+           "repeat_retire=%lu nack=%lu reset=%lu unsafe=%lu orderly=%lu oneshot_refusal=%lu\n", seed, scenarios, ops,
            cov.ops, cov.map_ok, cov.unmap_ok, cov.map_tx, cov.unmap_tx, cov.graph_started,
            cov.graph_unknown, cov.lost_ack, cov.late_ack_release, cov.foreign_simple,
            cov.foreign_graph, cov.worker_death, cov.teardown_after_worker, cov.latch_refusal,
-           cov.repeat_retire, cov.nack, cov.reset, cov.unsafe, cov.orderly);
+           cov.repeat_retire, cov.nack, cov.reset, cov.unsafe, cov.orderly, cov.oneshot_refusal);
     /* Coverage gate: thresholds scale with the campaign; a campaign that does not reach these
      * states qualifies nothing. */
     if (scenarios>=200) {
@@ -337,6 +349,9 @@ int main(int argc, char **argv) {
             {"teardown_after_worker",cov.teardown_after_worker,s/10},
             {"latch_refusal",cov.latch_refusal,s/10}, {"repeat_retire",cov.repeat_retire,s/4},
             {"reset",cov.reset,s/10}, {"unsafe",cov.unsafe,1}, {"orderly",cov.orderly,1},
+#if M11_CUSTODIAN_API_REVISION >= 4
+            {"oneshot_refusal",cov.oneshot_refusal,s/10},
+#endif
         };
         bool ok=true;
         for (unsigned k=0;k<sizeof(gate)/sizeof(gate[0]);k++)

@@ -73,9 +73,36 @@ int main(void) {
     assert(mock.unmap_cmd_count==1 && !mgr.active_dma_fds);
     assert(m11_custodian_terminal_action(&c)==M11_TERMINAL_HOLD); /* endpoint still open */
     assert(!m11_custodian_close(&c)); assert(m11_custodian_close(&c)==-EALREADY);
+    /* A clean orderly teardown after a DSP MAP still ends by reset, never reboot(2). */
+    assert(m11_custodian_terminal_action(&c)==M11_TERMINAL_RESET_RETAINING_ANCHORS);
+    assert(!m11_custodian_reboot_permitted(&c));
+    denied_map(); pass("normal MAP/UNMAP ACK/local release/one close; no reboot(2) after any DSP MAP");
+
+    /* ---------------- one-shot regions and the reboot(2) boundary (rev 4) ---------------- */
+    fixture();
+    assert(!m11_custodian_close(&c));
+    assert(!boot.dsp_map_attempted && !boot.dsp_unmap_attempted);
     assert(m11_custodian_terminal_action(&c)==M11_TERMINAL_ORDERLY_SHUTDOWN);
     assert(m11_custodian_reboot_permitted(&c));
-    denied_map(); pass("normal MAP/UNMAP ACK/local release/one close; reboot only when nothing is held");
+    pass("a boot that never DSP-mapped a region may still end with reboot(2)");
+    fixture(); i=map(); unsigned j1=map();
+    assert(boot.dsp_map_attempted && !boot.dsp_unmap_attempted);
+    assert(!m11_custodian_retire(&c,i,101) && mock.unmap_cmd_count==1 && boot.dsp_unmap_attempted);
+    {
+        unsigned k=0; uint32_t tx=mock.tx_pkt_count, maps=mock.map_cmd_count, fds=mgr.active_dma_fds;
+        assert(m11_custodian_map(&c,4096,102,&k)==-EPERM);
+        assert(k==UINT_MAX && mock.tx_pkt_count==tx && mock.map_cmd_count==maps && mgr.active_dma_fds==fds);
+    }
+    assert(boot.state==M11_ADSP_CLEAN && !boot.reasons);   /* a policy refusal, not a taint */
+    assert(!m11_custodian_retire(&c,j1,103) && mock.unmap_cmd_count==2);
+    assert(!m11_custodian_close(&c));
+    assert(m11_custodian_terminal_action(&c)==M11_TERMINAL_RESET_RETAINING_ANCHORS);
+    pass("one-shot regions: no MAP after the first DSP UNMAP; other regions still retire; no taint");
+    fixture(); i=map(); unsigned g1=open_rx(i,100); (void)g1;
+    assert(m11_custodian_retire(&c,i,101)==-EBUSY && !mock.unmap_cmd_count);
+    assert(!boot.dsp_unmap_attempted);                     /* refused before any transmit */
+    j1=UINT_MAX; assert(!m11_custodian_map(&c,4096,102,&j1) && j1!=i && c.occupied[j1]);
+    pass("a retire refused before transmit does not spend the one-shot MAP budget");
 
     fixture(); i=map(); m11_custodian_worker_exit(&c,101);
     safe_retention(i); assert(boot.reasons&M11_TAINT_WORKER_EXIT);
@@ -237,6 +264,9 @@ int main(void) {
     assert(m11_custodian_map(&c,4096,100,&i)==-EREMOTEIO);
     assert(!c.occupied[i] && !mgr.active_dma_fds && boot.state==M11_ADSP_CLEAN);
     pass("atomic MAP NACK rollback MODEL ONLY");
+    assert(boot.dsp_map_attempted && !m11_custodian_close(&c));
+    assert(m11_custodian_terminal_action(&c)==M11_TERMINAL_RESET_RETAINING_ANCHORS);
+    pass("a MAP that the ADSP may have seen (here NACKed) still forbids reboot(2)");
     fixture(); i=map(); mock.nack_shmem_unmap=true;
     assert(m11_custodian_retire(&c,i,101)==-EREMOTEIO); safe_retention(i);
     pass("UNMAP NACK retains backing and taints");
@@ -277,7 +307,8 @@ int main(void) {
     assert(!mock.rx_started && !mock.rx_opened && c.graphs[g].state==M11_GRAPH_FREE);
     assert(c.region_graph_refs[i]==0 && boot.state==M11_ADSP_CLEAN);
     assert(!m11_custodian_retire(&c,i,104) && mock.unmap_cmd_count==1);
-    assert(!m11_custodian_close(&c) && m11_custodian_reboot_permitted(&c));
+    assert(!m11_custodian_close(&c) && !m11_custodian_reboot_permitted(&c));
+    assert(m11_custodian_terminal_action(&c)==M11_TERMINAL_RESET_RETAINING_ANCHORS);
     pass("stock ordering: graph STOP/CLOSE ACK before UNMAP; STARTED graph cannot skip STOP");
 
     fixture(); i=map(); g=open_rx(i,100); start_rx(g,101);

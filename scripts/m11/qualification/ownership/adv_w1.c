@@ -219,7 +219,8 @@ static void run(int gi, int ei, unsigned nreg) {
     if (expect_liveness(gi, ei)) {
         bool ok = released_all && unmaps == nreg && !ledger_busy();
         if (ei==E_WORKER) ok = ok && pre==M11_TERMINAL_HOLD_RECONCILE;
-        else ok = ok && after_close==M11_TERMINAL_ORDERLY_SHUTDOWN;
+        /* Rev 4: a boot that DSP-mapped ends by reset even after a clean teardown. */
+        else ok = ok && after_close==M11_TERMINAL_RESET_RETAINING_ANCHORS && !m11_custodian_reboot_permitted(&c);
         if (!ok) { live_fail++; printf("LIVENESS-FAIL %s released=%d unmaps=%u ledger=%d pre=%s after_close=%s\n",
             id, released_all, unmaps, ledger_busy(), m11_terminal_action_name(pre), m11_terminal_action_name(after_close)); }
     }

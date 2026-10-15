@@ -7,8 +7,11 @@
 #include "../runtime-repair/m11_shmem.h"
 #include "../runtime-repair/m11_apm_protocol.h"
 
-/* 3: graph ledger, foreign-traffic latch, engine clock, terminal boundary, next_arg gate. */
-#define M11_CUSTODIAN_API_REVISION 3
+/* 3: graph ledger, foreign-traffic latch, engine clock, terminal boundary, next_arg gate.
+ * 4: one-shot regions (no MAP after the first DSP UNMAP of a boot) and no reboot(2) after
+ *    any DSP MAP of a boot. Both are fail-closed narrowing rules; neither proves ADSP DMA
+ *    quiescence. */
+#define M11_CUSTODIAN_API_REVISION 4
 #define M11_CUSTODIAN_REGIONS 4u
 #define M11_CUSTODIAN_GRAPHS 2u
 typedef enum { M11_ADSP_CLEAN, M11_ADSP_TAINTED, M11_RECOVERY_REQUIRED } m11_adsp_state;
@@ -28,6 +31,13 @@ typedef struct {
     bool initialized, owner_alive, owner_enrolled, recovery_deadline_set;
     /* Model of the final-anchor holder's death (m11_custodian_supervisor_exit). */
     bool supervisor_dead, final_anchor_released;
+    /* Set at intent, before the call that may transmit; never cleared in a boot.
+     * dsp_map_attempted: a MAP may have reached the ADSP, so this boot never ends with
+     *   reboot(2) (device_shutdown() runs the SMMU driver's .shutdown, the ADSP has none,
+     *   and quiescence after any ACK is unproven).
+     * dsp_unmap_attempted: an UNMAP may have reached the ADSP; its IOVA returns to the
+     *   allocator, so no later MAP may receive it while a late DSP access is possible. */
+    bool dsp_map_attempted, dsp_unmap_attempted;
 } m11_boot_ledger;
 typedef struct {
     /* These are synthetic model preconditions, NOT a physical admission API. */
@@ -57,8 +67,9 @@ typedef struct {
 } m11_custodian_graph;
 /*
  * How this boot may END. Derived from the ledger only; it executes nothing.
- *  ORDERLY_SHUTDOWN   clean, nothing mapped/open, endpoint already closed once:
- *                     reboot(2)/poweroff may run device_shutdown().
+ *  ORDERLY_SHUTDOWN   clean, nothing mapped/open, endpoint already closed once, and no
+ *                     region was ever DSP-mapped in this boot: reboot(2)/poweroff may
+ *                     run device_shutdown().
  *  HOLD               clean but regions/graphs/endpoint still held: orderly teardown
  *                     first. reboot(2) is FORBIDDEN while anything is mapped:
  *                     device_shutdown() runs arm_smmu_device_shutdown() ("disabling
@@ -68,7 +79,8 @@ typedef struct {
  *                     end the boot with the anchors still held: PID1 exits, which
  *                     panics before exit_files(); PANIC_TIMEOUT=-1 then calls
  *                     emergency_restart() without device_shutdown(). Never close an
- *                     anchor, never reboot(2).
+ *                     anchor, never reboot(2). Also the only end of a boot that ever
+ *                     DSP-mapped a region, even after a clean orderly teardown.
  *  UNSAFE_LAST_CLOSE_OCCURRED
  *                     the model recorded that a non-PID1 final-anchor holder died, so
  *                     the kernel release path (CLOSE_ALL + global ION cleanup) ran
@@ -101,6 +113,7 @@ typedef struct {
 int m11_model_new_boot(m11_boot_ledger *, uint64_t epoch, uint64_t now_ms);
 int m11_custodian_init(m11_custodian *, m11_boot_ledger *, m11_shmem_mgr_t *,
                        const m11_custodian_model_contract *, uint32_t recovery_budget_ms);
+/* -EPERM once any DSP UNMAP was attempted in this boot (one-shot regions). */
 int m11_custodian_map(m11_custodian *, size_t bytes, uint64_t now_ms, unsigned *slot);
 /* Refused for the rest of the boot once FOREIGN_TRAFFIC or GRAPH_UNKNOWN is latched. */
 int m11_custodian_retire(m11_custodian *, unsigned slot, uint64_t now_ms);

@@ -193,6 +193,9 @@ int m11_custodian_map(m11_custodian *c, size_t bytes, uint64_t now, unsigned *sl
     if (c->closed || c->boot->state != M11_ADSP_CLEAN || !c->boot->owner_alive || c->kernel_imports_lost)
         return -EOWNERDEAD;
     if (c->call_inflight || !c->contract.graph_quiescent) return -EBUSY;
+    /* One-shot regions: an UNMAP may have reached the ADSP and freed its IOVA. No ACK is
+     * proven to mean that ADSP DMA stopped, so no later MAP may be given that IOVA. */
+    if (c->boot->dsp_unmap_attempted) return -EPERM;
     if (c->mgr->gpr->pdr_down) { m11_custodian_pd_down(c, now); return -ENETRESET; }
     if (m11_gpr_engine_orphan_count(c->mgr->gpr)) {
         taint(c,M11_TAINT_REMOTE_UNKNOWN,now); return -EOWNERDEAD;
@@ -206,6 +209,7 @@ int m11_custodian_map(m11_custodian *c, size_t bytes, uint64_t now, unsigned *sl
     if (i==M11_CUSTODIAN_REGIONS) return -ENOSPC;
     /* Owner stores the region before allocation/import/TX. Workers never own fds/tokens. */
     c->occupied[i]=true; c->call_inflight=true; *slot=i;
+    c->boot->dsp_map_attempted=true; /* intent before allocation/import/TX */
     rc=m11_shmem_alloc_and_map(c->mgr, M11_SHMEM_MODE_DMA_ION_OFFSET, bytes,
                               false, &c->regions[i]);
     c->call_inflight=false; observe_own(c);
@@ -252,7 +256,10 @@ int m11_custodian_retire(m11_custodian *c, unsigned i, uint64_t now) {
             else c->mgr->timeout_ms=budget-(uint32_t)elapsed;
         }
     }
-    if (!rc && retained(r)) rc=m11_shmem_unmap_and_free(c->mgr,r);
+    if (!rc && retained(r)) {
+        c->boot->dsp_unmap_attempted=true; /* intent before the call that may transmit */
+        rc=m11_shmem_unmap_and_free(c->mgr,r);
+    }
     c->mgr->timeout_ms=original; c->call_inflight=false; observe_own(c);
     if (r->state == M11_SHMEM_STATE_OWNERSHIP_UNRESOLVED)
         taint(c,M11_TAINT_REMOTE_UNKNOWN,now);
@@ -442,8 +449,13 @@ m11_terminal_action m11_custodian_terminal_action(const m11_custodian *c) {
     if (b->state == M11_RECOVERY_REQUIRED || !b->owner_alive || c->kernel_imports_lost ||
         (b->recovery_deadline_set && b->last_ms >= b->recovery_due_ms))
         return M11_TERMINAL_RESET_RETAINING_ANCHORS;
+    bool torn_down = !any_region(c) && !graphs_active(c) && c->closed;
+    /* A clean orderly teardown does not prove ADSP quiescence; device_shutdown() must not
+     * run after any DSP MAP of this boot. Once torn down nothing is left to reconcile and
+     * nothing can be mapped again, so this decision is final even if a taint follows. */
+    if (torn_down && b->dsp_map_attempted) return M11_TERMINAL_RESET_RETAINING_ANCHORS;
     if (b->state == M11_ADSP_TAINTED) return M11_TERMINAL_HOLD_RECONCILE;
-    if (any_region(c) || graphs_active(c) || !c->closed) return M11_TERMINAL_HOLD;
+    if (!torn_down) return M11_TERMINAL_HOLD;
     return M11_TERMINAL_ORDERLY_SHUTDOWN;
 }
 bool m11_custodian_reboot_permitted(const m11_custodian *c) {

@@ -35,6 +35,22 @@ if [[ -n "${M11_ACK_SRC:-}" ]]; then
 else
   echo 'SKIP W3 cmdline differential: M11_ACK_SRC not set (pinned ACK sources are not in Git)'
 fi
+# Detection power for the rev-4 rules: delete exactly one rule line from a copy of the
+# current custodian; the same fuzz MUST report the matching violation.
+mutant() {
+  local name="$1" line="$2" expect="$3" mut="$out/mutant-$1-$mode/ownership"
+  mkdir -p "$mut"; cp "$here/m11_custodian.h" "$here/fuzz_custodian.c" "$mut/"
+  grep -vF -- "$line" "$here/m11_custodian.c" > "$mut/m11_custodian.c" || true
+  if [[ $(wc -l < "$here/m11_custodian.c") -ne $(( $(wc -l < "$mut/m11_custodian.c") + 1 )) ]]; then
+    echo "ERROR: mutant $name did not remove exactly one line" >&2; exit 1
+  fi
+  "$cc" "${flags[@]}" "${srcs[@]}" "$mut/m11_custodian.c" "$mut/fuzz_custodian.c" -o "$out/fuzz-mutant-$name-$mode"
+  if "$out/fuzz-mutant-$name-$mode" 1 3000 60 > "$out/fuzz-mutant-$name-$mode.log" 2>&1; then
+    echo "ERROR: fuzz did not detect mutant $name" >&2; exit 1
+  fi
+  grep -F "$expect" "$out/fuzz-mutant-$name-$mode.log"
+  echo "PASS fuzz detects mutant $name ($mode)"
+}
 for mode in gcc clang sanitize; do
   cc=gcc
   flags=(-std=c11 -O1 -g -Wall -Wextra -Werror -DM11_OWNERSHIP_OFFLINE -I "$repair")
@@ -69,8 +85,15 @@ for mode in gcc clang sanitize; do
   if "$out/fuzz-w1b-baseline-$mode" 1 3000 60 > "$out/fuzz-w1b-baseline-$mode.log" 2>&1; then
     echo 'ERROR: fuzz did not detect the pre-W1b UNMAP-after-latch defect' >&2; exit 1
   fi
-  grep -F 'UNMAP transmitted after FOREIGN_TRAFFIC/GRAPH_UNKNOWN was latched' "$out/fuzz-w1b-baseline-$mode.log"
+  # W1b shows as either form: the retire after the latch transmits UNMAP (DSP-mapped
+  # region) or succeeds without one (region never DSP-mapped). Both are the defect.
+  grep -E 'UNMAP transmitted after FOREIGN_TRAFFIC/GRAPH_UNKNOWN was latched|retire succeeded after the FOREIGN/GRAPH_UNKNOWN latch' \
+    "$out/fuzz-w1b-baseline-$mode.log"
   echo "PASS fuzz detects the pre-W1b defect ($mode)"
+  mutant oneshot 'if (c->boot->dsp_unmap_attempted) return -EPERM;' \
+    'MAP transmitted after a DSP UNMAP in the same boot'
+  mutant reboot 'if (torn_down && b->dsp_map_attempted) return M11_TERMINAL_RESET_RETAINING_ANCHORS;' \
+    'reboot permitted after a DSP MAP in this boot'
   # Bounded seeded state-machine fuzz against mock ground truth.
   "$cc" "${flags[@]}" "${srcs[@]}" "$here/m11_custodian.c" "$here/fuzz_custodian.c" -o "$out/fuzz-$mode"
   scen=3000; [[ "$mode" == sanitize ]] && scen=1500
