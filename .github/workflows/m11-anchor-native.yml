@@ -1,0 +1,50 @@
+name: M11 native anchor integration (offline)
+# The PID1 endpoint anchor (R1) and its owner seal and pre-bind spawner (P1-P5), integrated into
+# copies of the native runner and runtime under scripts/m11/anchor-native/. Offline only: the
+# qualification suite (model, stand-in processes, root stand-in via sudo, fuzz, mutants) and the
+# integration suite (runner control flow, census rule, end-to-end GET_SPF on a /dev/ptmx
+# stand-in held by a sealed owner, mutants) under gcc, clang and ASan+UBSan on x64 and native
+# ARM64. No device, driver, firmware, ADSP or DMA claim. Needs no repository history.
+on:
+  workflow_dispatch:
+  push:
+    branches: [m11/native-anchor-integration]
+    paths:
+      - 'scripts/m11/anchor-native/**'
+      - 'scripts/m11/qualification/ownership/**'
+      - 'scripts/m11/qualification/runtime-repair/**'
+      - 'scripts/m11/runtime/**'
+      - '.github/workflows/m11-anchor-native.yml'
+permissions:
+  contents: read
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang
+          gcc --version | head -1; clang --version | head -1; uname -m; uname -r
+      - name: Anchor qualification suite
+        run: bash scripts/m11/qualification/ownership/run_anchor_tests.sh artifacts/m11/anchor
+      - name: Integrated native anchor suite
+        if: always()
+        run: bash scripts/m11/anchor-native/test.sh artifacts/m11/anchor-native
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: m11-anchor-native-${{ runner.arch }}-${{ github.sha }}
+          path: |
+            artifacts/m11/anchor/*.log
+            artifacts/m11/anchor/*.txt
+            artifacts/m11/anchor/*.sha256
+            artifacts/m11/anchor-native/*.log
+            artifacts/m11/anchor-native/*.txt
+            artifacts/m11/anchor-native/*.sha256
