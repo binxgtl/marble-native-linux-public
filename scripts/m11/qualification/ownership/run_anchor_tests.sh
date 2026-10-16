@@ -116,11 +116,12 @@ done
 # Same seed, same operation sequence under gcc and clang.
 cmp "$out/fuzz-anchor-gcc.log" "$out/fuzz-anchor-clang.log"
 echo 'PASS anchor fuzz logs identical under gcc and clang'
-# Neither the adapter nor its Linux backend may compile outside offline qualification.
+# Neither the adapter nor its Linux backend may compile without an explicit build mode
+# (M11_OWNERSHIP_OFFLINE, or M11_ANCHOR_NATIVE for scripts/m11/anchor-native/ only).
 for unit in m11_pid1_anchor m11_anchor_linux m11_anchor_owner; do
   if gcc -std=c11 -I "$repair" -c "$here/$unit.c" -o "$out/forbidden-$unit.o" 2> "$out/physical-build-rejection-$unit.txt"; then
     echo "ERROR: offline compile gate bypassed for $unit" >&2; exit 1
   fi
   grep -F 'device integration is BLOCKED' "$out/physical-build-rejection-$unit.txt"
 done
-echo 'PASS offline compile boundary; anchor adapter not wired to the native runner or the real endpoint'
+echo 'PASS compile boundary: no anchor build without an explicit mode; the qualification build is wired to no runner and refuses the real endpoint'

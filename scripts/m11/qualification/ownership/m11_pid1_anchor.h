@@ -1,9 +1,11 @@
 #ifndef M11_PID1_ANCHOR_H
 #define M11_PID1_ANCHOR_H
 /*
- * PID1 ownership adapter for the GPR endpoint (R1). Qualification ONLY: it is not wired to
- * the native runner, the native GPR query worker or the native audio runtime, and its Linux
- * backend refuses the real endpoint path.
+ * PID1 ownership adapter for the GPR endpoint (R1). Its qualification build is not wired to
+ * any runner and its Linux backend refuses the real endpoint path. Only the native
+ * integration build (M11_ANCHOR_NATIVE, below) wires it into COPIES of the native runner,
+ * GPR query worker and audio runtime under scripts/m11/anchor-native/: engineering source,
+ * not staged, not a candidate, not hardware-qualified.
  *
  * Mechanism (design and evidence: the M11 PID1 anchor adapter document under docs/):
  *  - PID1 performs the boot's only open(2) of the endpoint and immediately holds TWO

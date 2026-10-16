@@ -305,6 +305,6 @@ int main(void) {
         }
         seen.c=NULL;
     }
-    printf("PID1 anchor model qualification: %u cases PASS; not wired to the native runner; hardware UNKNOWN\n",cases);
+    printf("PID1 anchor model qualification: %u cases PASS (qualification build, wired to no runner); hardware UNKNOWN\n",cases);
     return 0;
 }

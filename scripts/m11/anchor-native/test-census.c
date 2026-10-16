@@ -6,7 +6,7 @@
 
 int main(void) {
     const unsigned long long ep=0xf000000ull, other=0x100003ull; /* synthetic device numbers */
-    int fds[4]; unsigned long long rdevs[4];
+    int fds[4]={0}; unsigned long long rdevs[4]={0};
     assert(!m11_census_pid1_endpoint(fds,rdevs,0,ep,-1,-1));
     fds[0]=3; rdevs[0]=other;
     assert(!m11_census_pid1_endpoint(fds,rdevs,1,ep,-1,-1));

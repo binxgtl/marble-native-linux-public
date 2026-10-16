@@ -252,8 +252,8 @@ int main(int argc, char **argv) {
     if (spawned(JOB_CHECKPOINT,color,10000)) hold("result checkpoint failed");
     if (spawned(JOB_CONTROL,"unmount",10000)) hold("proc/sys teardown failed");
     /* A never-mapped boot may reboot once PID1 dropped its references (or never opened). */
-    m11_anchor_end end;
-    if (m11_anchor_end_boot(&anchor,M11_TERMINAL_ORDERLY_SHUTDOWN,&end) || end!=M11_ANCHOR_END_REBOOT)
+    m11_anchor_end ending;
+    if (m11_anchor_end_boot(&anchor,M11_TERMINAL_ORDERLY_SHUTDOWN,&ending) || ending!=M11_ANCHOR_END_REBOOT)
         hold("anchor retained; reboot(2) refused");
     if (m11_spawner_stop(&spawner)) hold("spawner stop failed");
     (void)reboot(RB_AUTOBOOT);

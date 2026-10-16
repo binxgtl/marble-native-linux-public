@@ -1,8 +1,9 @@
 #ifndef M11_ANCHOR_OWNER_H
 #define M11_ANCHOR_OWNER_H
 /*
- * Owner-side (PID1) enforcement of the anchor integration rules. Offline qualification ONLY:
- * not wired to the native runner; the Linux backend still refuses the real endpoint path.
+ * Owner-side (PID1) enforcement of the anchor integration rules. The qualification build is
+ * wired to no runner and its Linux backend refuses the real endpoint path; only the native
+ * integration build (M11_ANCHOR_NATIVE, scripts/m11/anchor-native/) uses it from PID1.
  *
  *  P1  no CLONE_FILES or thread peer of the owner      seal: clone(CLONE_FILES|CLONE_THREAD),
  *                                                       clone3 refused
