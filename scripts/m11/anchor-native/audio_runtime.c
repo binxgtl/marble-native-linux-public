@@ -503,8 +503,10 @@ int m11_audio_attach_spawner(struct m11_audio_runtime *r, pid_t spawner) {
     return 0;
 }
 int m11_audio_attach_anchor(struct m11_audio_runtime *r, m11_pid1_anchor *a) {
-    if (!valid(r) || r->anchor || !r->device || r->status.pd_started || !a ||
-        a->state!=M11_ANCHOR_HELD || !a->ops.close_pair || a->id.rdev!=(uint64_t)r->device) return -1;
+    /* After a qualified PDR UP and before admission: the anchor replaces the worker's open. */
+    if (!valid(r) || r->anchor || !r->device || !r->status.pd_started || r->status.admitted ||
+        r->status.retired || r->status.poisoned || !a || a->state!=M11_ANCHOR_HELD ||
+        !a->ops.close_pair || a->id.rdev!=(uint64_t)r->device) return -1;
     r->anchor=a;
     if (census(r,0)) { invalidate(r,M11_PD_IO); return -1; }
     return 0;

@@ -85,7 +85,7 @@ static void inspect_worker(pid_t owner_pid) {
     DIR *d=opendir(dir); assert(d); struct dirent *e; int ptmx=0, sockets=0, pipes=0, other=0;
     while ((e=readdir(d))) {
         int fd=atoi(e->d_name); if (e->d_name[0]=='.' || fd<=2) continue;
-        char path[96], link[128]; snprintf(path,sizeof(path),"%s/%s",dir,e->d_name);
+        char path[384], link[128]; snprintf(path,sizeof(path),"%s/%s",dir,e->d_name);
         ssize_t n=readlink(path,link,sizeof(link)-1); assert(n>0); link[n]=0;
         if (strstr(link,"ptmx")) ptmx++;
         else if (!strncmp(link,"socket:",7)) sockets++;

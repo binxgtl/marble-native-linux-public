@@ -1,8 +1,9 @@
 /* Native anchor integration of next/runner.c (which stays byte-identical: frozen manifests
  * pin it). Engineering source only: not staged, not a candidate, not hardware-qualified.
- * One SPF query, no playback. R1: PID1 performs the boot's only open of the endpoint and
- * holds it (anchor + guard); the query worker borrows it. P1-P5: post-bind jobs run from a
- * spawner forked before the bind; PID1 seals itself right after the bind. */
+ * One SPF query, no playback. R1: PID1 performs the boot's only open of the endpoint (after a
+ * qualified PDR UP, as the worker's open was) and holds it (anchor + guard); the query worker
+ * borrows it. P1-P5: post-bind jobs run from a spawner forked before the endpoint bind; PID1
+ * seals itself right after its open. */
 #define _GNU_SOURCE
 #include "audio_runtime.h"
 #include "gpr_native.h"
@@ -194,20 +195,10 @@ int main(int argc, char **argv) {
         if (record("admission","endpoint metadata/bind unavailable; query not attempted",1)) hold("journal failed");
     } else {
         if (m11_audio_bind_endpoint(r,dev)) { (void)log_owner(r); hold("endpoint identity/owner census denied"); }
-        /* R1: the boot's only open of the endpoint, by PID1 (anchor + guard), then the seal:
-         * node unlinked, PID1 non-dumpable, no close/dup/exec/CLONE_FILES/SCM_RIGHTS/mknod. */
-        m11_anchor_ops ops;
-        if (m11_anchor_linux_ops(&anchor_backend,"/dev/aud_pasthru_adsp",0,&ops) ||
-            m11_anchor_bind(&anchor,&ops,NULL,&evidence,1,(uint64_t)dev))
-            hold("anchor bind refused; any fd it obtained is retained");
-        if (m11_anchor_owner_seal(&anchor,"/dev/aud_pasthru_adsp")) hold("owner seal failed; anchor retained");
-        if (m11_audio_attach_anchor(r,&anchor)) { (void)log_owner(r); hold("anchor census refused; anchor retained"); }
-        if (record("anchor","PID1 anchor and guard held; node unlinked; owner sealed",0)) hold("journal failed");
         struct diagnostic diagnostic={.fd=open("/dev/kmsg",O_WRONLY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC),.token=0x17000001};
         struct stat diagnostic_stat;
         if (diagnostic.fd<0 || fstat(diagnostic.fd,&diagnostic_stat) ||
             !S_ISCHR(diagnostic_stat.st_mode) || diagnostic_stat.st_rdev!=makedev(1,11)) hold("diagnostic kmsg identity failed");
-        if (m11_gpr_anchor_attach(&anchor,&diagnostic.fd,1)) hold("anchor loan setup failed");
         struct m11_gpr_session s={.runtime=r,.expected_device=dev,.token=diagnostic.token,
             .observe=observe,.observe_context=&diagnostic,
             .service_down_fd=-1,.cancel_fd=-1,.budget_ms=4000,.reap_grace_ms=200};
@@ -218,15 +209,34 @@ int main(int argc, char **argv) {
         if (record("pd_begin","active listener registration; query requires qualified UP",0)) hold("journal failed");
         int pdrc=m11_audio_start_pd(r,5000), qrc=-1;
         if (log_owner(r) || record("pd_return","before query; returned PDR rc",pdrc)) hold("PDR evidence failed");
-        if (!pdrc) qrc=m11_gpr_linux_query(&s,&result);
+        if (!pdrc) { /* PDR qualified UP: the boot's only open of the endpoint */
+            /* R1: by PID1 (anchor + guard), only after a qualified PDR UP as the worker's open
+             * was; then the seal: node unlinked, PID1 non-dumpable, no close/dup/exec/
+             * CLONE_FILES/SCM_RIGHTS/mknod. The monitor is pumped between the steps (at most
+             * 250 ms apart); a lapse latches and admission then refuses the query. */
+            m11_anchor_ops ops;
+            if (m11_anchor_linux_ops(&anchor_backend,"/dev/aud_pasthru_adsp",0,&ops) ||
+                m11_anchor_bind(&anchor,&ops,NULL,&evidence,1,(uint64_t)dev))
+                hold("anchor bind refused; any fd it obtained is retained");
+            if (m11_anchor_owner_seal(&anchor,"/dev/aud_pasthru_adsp")) hold("owner seal failed; anchor retained");
+            (void)m11_audio_pump(r);
+            if (m11_audio_attach_anchor(r,&anchor)) { (void)log_owner(r); hold("anchor census refused; anchor retained"); }
+            if (record("anchor","PID1 anchor and guard held; node unlinked; owner sealed",0)) hold("journal failed");
+            (void)m11_audio_pump(r);
+            if (m11_gpr_anchor_attach(&anchor,&diagnostic.fd,1)) hold("anchor loan setup failed");
+            qrc=m11_gpr_linux_query(&s,&result);
+        } else if (unlink("/dev/aud_pasthru_adsp")) {
+            hold("endpoint node removal failed"); /* never opened; no post-bind job may find it */
+        }
         /* Retire before any logging/control child can pause the PDR monitor. */
         if (m11_audio_snapshot(r,&owner)) hold("owner snapshot failed");
         if (!owner.resources_quiescent || owner.unresolved_worker) {
             (void)log_owner(r); hold("endpoint close/reap unresolved; no PDR ACK or ADSP stop");
         }
-        /* The boot's single release, by PID1, while the ADSP still runs (where the worker's
-         * close used to release). Never-mapped boot: nothing is mapped or imported. */
-        if (m11_anchor_final_close(&anchor)) { (void)log_owner(r); hold("anchor final close refused; anchor retained"); }
+        /* The boot's single release, by PID1, while the ADSP still runs and the PDR listener is
+         * still registered (where the worker's close used to release). Never-mapped boot:
+         * nothing is mapped or imported. A boot whose PDR never came UP never opened. */
+        if (!pdrc && m11_anchor_final_close(&anchor)) { (void)log_owner(r); hold("anchor final close refused; anchor retained"); }
         int retired=m11_audio_retire(r);
         if (!pdrc) {
             if (m11_gpr_result_encode(&result,json,sizeof(json))<0 || record("spf_query",json,qrc)) hold("query evidence incomplete");

@@ -1,9 +1,10 @@
 /* Executes the actual integrated runner control flow with every syscall, runtime, anchor and
  * spawner boundary replaced. No boot, cdev, QRTR, remoteproc or endpoint call can escape.
- * Checks the R1/P1-P5 ordering: spawner before the bind; anchor bind and seal right after the
- * endpoint bind; no fork/exec by PID1 after the seal; the single release (final close) before
- * retire and before stop_adsp; every post-bind job through the spawner; reboot only after a
- * REBOOT end. */
+ * Checks the R1/P1-P5 ordering: spawner before the endpoint bind; the anchor bind (the only
+ * open) only after a qualified PDR UP, sealed right after it; a boot without PDR UP never
+ * opens and unlinks the node before any post-bind job; no fork/exec by PID1 after the seal;
+ * the single release (final close) before retire and before stop_adsp; every post-bind job
+ * through the spawner; reboot only after a REBOOT end. */
 #define main candidate_main
 #include "runner.c"
 #undef main
@@ -11,7 +12,7 @@
 #include <setjmp.h>
 
 static jmp_buf escape;
-static int mode, held, booted, sealed, forks_after_seal;
+static int mode, held, booted, sealed, forks_after_seal, pd_up;
 static char trace[64][32]; static unsigned steps;
 static char path[256];
 static int owner_sentinel;
@@ -64,6 +65,7 @@ FILE *__wrap_fopen(const char *p, const char *m) {
     assert(fputs("Character devices:\n240 aud_pasthru_adsp\n",f)>=0); rewind(f); return f;
 }
 int __wrap_pipe2(int fds[2], int flags) { (void)flags; fds[0]=21; fds[1]=22; return 0; }
+int __wrap_unlink(const char *p) { assert(!sealed && !strcmp(p,"/dev/aud_pasthru_adsp")); step("unlink_node"); return 0; }
 int __wrap_reboot(int command) { assert(command==RB_AUTOBOOT); step("reboot"); booted=1; longjmp(escape,1); }
 
 /* ------------------------------ runtime boundaries ------------------------------ */
@@ -76,8 +78,10 @@ int m11_audio_bind_endpoint(struct m11_audio_runtime *r, dev_t d) {
     return mode==BIND_ENDPOINT_FAIL ? -1 : 0;
 }
 int m11_audio_start_pd(struct m11_audio_runtime *r, unsigned ms) {
-    assert(r==(void *)&owner_sentinel && ms==5000); step("start_pd"); return mode==PD_FAIL ? -1 : 0;
+    assert(r==(void *)&owner_sentinel && ms==5000); step("start_pd");
+    pd_up=mode!=PD_FAIL; return pd_up ? 0 : -1;
 }
+int m11_audio_pump(struct m11_audio_runtime *r) { assert(r==(void *)&owner_sentinel); return 0; }
 int m11_gpr_linux_query(struct m11_gpr_session *s, struct m11_gpr_result *out) {
     assert(s->runtime==(void *)&owner_sentinel && s->budget_ms==4000); step("query");
     memset(out,0,sizeof(*out)); out->close_returned=out->close_ok=out->worker_reaped=out->worker_exit_ok=out->ipc_complete=1;
@@ -93,7 +97,7 @@ int m11_audio_attach_spawner(struct m11_audio_runtime *r, pid_t pid) {
     assert(r==(void *)&owner_sentinel && pid==700); step("attach_spawner"); return 0;
 }
 int m11_audio_attach_anchor(struct m11_audio_runtime *r, m11_pid1_anchor *a) {
-    assert(r==(void *)&owner_sentinel && a==&anchor); step("attach_anchor"); return mode==ATTACH_FAIL ? -1 : 0;
+    assert(r==(void *)&owner_sentinel && a==&anchor && sealed); step("attach_anchor"); return mode==ATTACH_FAIL ? -1 : 0;
 }
 int m11_gpr_anchor_attach(m11_pid1_anchor *a, const int *keep, unsigned n) {
     assert(a==&anchor && n==1 && keep && *keep==20); step("loan_setup"); return mode==LOAN_SETUP_FAIL ? -1 : 0;
@@ -124,6 +128,7 @@ int m11_anchor_bind(m11_pid1_anchor *a, const m11_anchor_ops *ops, const m11_anc
                     const m11_anchor_contract *ct, int owner_pid, uint64_t rdev) {
     assert(a==&anchor && ops && !sink && ct==&evidence && owner_pid==1 && rdev==(uint64_t)makedev(240,0));
     assert(ct->endpoint_has_no_flush && ct->release_on_last_fput_only && ct->owner_single_threaded);
+    assert(pd_up); /* the boot's only open, only after a qualified PDR UP */
     step("anchor_bind");
     if (mode==ANCHOR_BIND_FAIL) return -ENODEV;
     a->state=M11_ANCHOR_HELD; a->bind_attempted=true; return 0;
@@ -149,19 +154,22 @@ int main(void) {
     static const char *post[]={"spawn:seal","spawn:usb_stop","spawn:stop_adsp","spawn:common",
                                "checkpoint:green","spawn:unmount"};
     for (mode=OK;mode<MODES;mode++) {
-        held=booted=sealed=forks_after_seal=0; steps=0; journal_sealed=0;
+        held=booted=sealed=forks_after_seal=pd_up=0; steps=0; journal_sealed=0;
         memset(&result,0,sizeof(result)); memset(&anchor,0,sizeof(anchor)); memset(&spawner,0,sizeof(spawner));
         if (!setjmp(escape)) { candidate_main(1,NULL); assert(0); }
         assert(held!=booted && !forks_after_seal);           /* PID1 never forks/execs after the seal */
         int spawn=at("spawner_start"), bind=at("bind_endpoint"), anch=at("anchor_bind"), seal=at("seal");
         int query=at("query"), fin=at("final_close"), retire=at("retire"), stop=at("spawn:stop_adsp");
+        int pd=at("start_pd"), unlinked=at("unlink_node");
         if (mode!=SPAWNER_FAIL) assert(spawn>=0 && at("attach_spawner")==spawn+1);
         if (bind>=0) assert(spawn>=0 && spawn<bind);         /* the spawner predates the bind */
-        if (anch>=0) assert(anch==bind+1);                   /* PID1's single open right after the bind */
+        if (anch>=0) assert(bind>=0 && pd>bind && anch==pd+1); /* PID1's single open only after PDR UP */
         if (seal>=0) assert(seal==anch+1);                   /* sealed before anything else */
         if (query>=0) assert(seal>=0 && at("attach_anchor")>seal && at("loan_setup")<query);
-        if (fin>=0) assert(fin>query && (retire<0 || fin<retire));
-        if (stop>=0) assert(mode==NO_ENDPOINT || (fin>=0 && fin<stop)); /* release before the ADSP stops */
+        if (fin>=0) assert(anch>=0 && fin>query && (retire<0 || fin<retire));
+        if (stop>=0 && anch>=0) assert(fin>=0 && fin<stop);  /* release before the ADSP stops */
+        if (unlinked>=0) assert(anch<0 && fin<0 && unlinked>pd && unlinked<retire); /* PDR never UP: never opened */
+        if (stop>=0 && bind>=0) assert(anch>=0 || (unlinked>=0 && unlinked<at("spawn:seal")));
         if (booted) {
             for (unsigned i=0;i<6;i++) {
                 const char *want=post[i];
@@ -173,7 +181,7 @@ int main(void) {
         switch (mode) {
         case OK: assert(booted && at("checkpoint:green")>=0); break;
         case QUERY_ERROR: assert(booted && at("checkpoint:red")>=0 && fin>=0); break;
-        case PD_FAIL: assert(booted && query<0 && fin>=0 && at("checkpoint:cyan")>=0); break;
+        case PD_FAIL: assert(booted && query<0 && anch<0 && fin<0 && unlinked>=0 && at("checkpoint:cyan")>=0); break;
         case NO_ENDPOINT: assert(booted && bind<0 && anch<0 && fin<0 && at("checkpoint:red")>=0); break;
         case BIND_ENDPOINT_FAIL: assert(held && anch<0 && stop<0); break;
         case SPAWNER_FAIL: assert(held && bind<0 && anch<0); break;
@@ -188,8 +196,9 @@ int main(void) {
         case LOAN_SETUP_FAIL: assert(held && query<0 && fin<0 && stop<0); break;
         }
     }
-    printf("Integrated runner control flow: %d scenarios PASS (spawner before bind, seal after the "
-           "bind, no PID1 fork after the seal, release before retire and stop_adsp, post-bind jobs "
-           "via the spawner, reboot only after a REBOOT end); no hardware\n",MODES-1);
+    printf("Integrated runner control flow: %d scenarios PASS (spawner before the endpoint bind, the "
+           "only open after PDR UP and sealed at once, no open without PDR UP, no PID1 fork after "
+           "the seal, release before retire and stop_adsp, post-bind jobs via the spawner, reboot "
+           "only after a REBOOT end); no hardware\n",MODES-1);
     return 0;
 }

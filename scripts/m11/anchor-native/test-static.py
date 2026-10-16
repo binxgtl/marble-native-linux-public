@@ -32,8 +32,12 @@ after = main[seal:]
 check(not re.search(r'\bjob\(|\bfork\(|\bexecl\(|\bcheckpoint\(', after),
       'runner: no job()/fork()/execl()/checkpoint() by PID1 after the seal')
 check(pos('m11_spawner_start(') < pos('m11_audio_bind_endpoint(r,dev)'), 'runner: spawner started before the endpoint bind')
-check(pos('m11_audio_bind_endpoint(r,dev)') < pos('m11_anchor_bind(') < seal < pos('m11_audio_attach_anchor('),
-      'runner: anchor bind and seal right after the endpoint bind, before the anchor is attached')
+check(pos('m11_audio_bind_endpoint(r,dev)') < pos('m11_audio_start_pd(') < pos('if (!pdrc) {') <
+      pos('m11_anchor_bind(') < seal < pos('m11_audio_attach_anchor('),
+      'runner: anchor bind (the only open) after the endpoint bind and a qualified PDR UP; seal right after it')
+check(pos('} else if (unlink("/dev/aud_pasthru_adsp"))') > seal and
+      pos('if (!pdrc && m11_anchor_final_close(&anchor))') > pos('m11_gpr_linux_query('),
+      'runner: a boot without PDR UP never opens (node unlinked); the final close only after an open')
 check(pos('m11_anchor_final_close(') < pos('m11_audio_retire(r)') < pos('spawned(JOB_CONTROL,"stop_adsp"'),
       'runner: final close before retire and before stop_adsp')
 check(pos('m11_anchor_end_boot(') < pos('reboot(RB_AUTOBOOT)'), 'runner: reboot only after end_boot')

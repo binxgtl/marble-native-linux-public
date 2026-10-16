@@ -45,7 +45,7 @@ build() { # name output [file-to-replace replacement-path]
     inc=(-I "$(dirname "$to")" -I "$here") # test-runner.c includes runner.c: a mutated copy wins
   fi
   if [[ "$name" == test-runner ]]; then
-    for w in getpid umask fork waitpid poll clock_gettime open read write close lstat fstat mknod fopen pipe2 reboot; do
+    for w in getpid umask fork waitpid poll clock_gettime open read write close lstat fstat mknod fopen pipe2 unlink reboot; do
       extra+=("-Wl,--wrap=$w")
     done
   fi
@@ -104,7 +104,8 @@ for mode in gcc clang sanitize; do
   fi
   if [[ "$mode" != sanitize ]]; then
     nmutant no-seal test-runner runner.c 'm11_anchor_owner_seal(&anchor,"/dev/aud_pasthru_adsp")' '' 'a==&anchor && sealed'
-    nmutant no-final-close test-runner runner.c 'if (m11_anchor_final_close(&anchor))' '' 'fin>=0 && fin<stop'
+    nmutant no-final-close test-runner runner.c 'if (!pdrc && m11_anchor_final_close(&anchor))' '' 'fin>=0 && fin<stop'
+    nmutant open-without-pdr-up test-runner runner.c 'if (!pdrc) { /* PDR qualified UP' '        if (1) {' 'pd_up'
     nmutant direct-job test-runner runner.c 'if (spawned(JOB_CONTROL,"stop_adsp",40000)) hold("ADSP stop/restore failed");' \
       '    if (job("/m11/control","stop_adsp",40000)) hold("ADSP stop/restore failed");' '!forks_after_seal'
   fi
