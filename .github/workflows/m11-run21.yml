@@ -1,0 +1,122 @@
+name: M11 Run21 GPR diagnostic (offline + binaries)
+# Run21 (scripts/m11/run21/SPEC.md): one GPR GET_SPF_STATE on a never-mapped boot behind the
+# Disable-only amplifier gate; NOT an audio PASS. Offline suites on x64 and native ARM64, the
+# Windows receiver, and the two on-device binaries (static ARM64 runner with native gcc,
+# freestanding relay with the pinned clang-r416183b), each built twice and compared. No device,
+# driver, firmware, ROM payload or proprietary module is used or uploaded.
+on:
+  workflow_dispatch:
+  push:
+    branches: [m11/run21-gpr-diagnostic]
+    paths:
+      - 'scripts/m11/run21/**'
+      - 'scripts/m11/anchor-native/**'
+      - 'scripts/m11/qualification/ownership/**'
+      - 'scripts/m11/runtime/**'
+      - '.github/workflows/m11-run21.yml'
+permissions:
+  contents: read
+  actions: read
+jobs:
+  suites:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang
+          gcc --version | head -1; clang --version | head -1; uname -m
+      - name: Run21 runner suite
+        run: bash scripts/m11/run21/test.sh artifacts/m11/run21/runner
+      - name: Run21 transport suite
+        if: always()
+        run: |
+          (cd scripts/m11/instrumentation && python3 test-evidence.py)
+          bash scripts/m11/run21/test-transport.sh artifacts/m11/run21/transport
+      - name: Integrated anchor suite (stand-in GET_SPF_STATE, census, worker confinement)
+        if: always()
+        run: bash scripts/m11/anchor-native/test.sh artifacts/m11/run21/anchor-native
+      - name: Anchor qualification suite
+        if: always()
+        run: bash scripts/m11/qualification/ownership/run_anchor_tests.sh artifacts/m11/run21/anchor
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: run21-suites-${{ runner.arch }}-${{ github.sha }}
+          path: |
+            artifacts/m11/run21/**/*.log
+            artifacts/m11/run21/**/*.txt
+            artifacts/m11/run21/**/*.sha256
+            artifacts/m11/run21/transport/*.bin
+  windows-receiver:
+    needs: suites
+    runs-on: windows-2025
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: run21-suites-ARM64-${{ github.sha }}
+          path: artifacts/m11/run21
+      - name: Continuous receiver and launcher plan (no phone tool)
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -File scripts/m11/run21/test-host-reader.ps1 -Fixture artifacts/m11/run21/transport/capture.bin
+          $env:M11_PWSH='pwsh'; python scripts/m11/run21/test-launch.py
+  build-runner:
+    needs: suites
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Static ARM64 runner, A/B identical, refuses outside PID1
+        run: bash scripts/m11/run21/build.sh runner artifacts/m11/run21-build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: run21-runner-${{ github.sha }}
+          path: |
+            artifacts/m11/run21-build/m11-run21
+            artifacts/m11/run21-build/runner-elf.txt
+            artifacts/m11/run21-build/runner-compiler.txt
+            artifacts/m11/run21-build/SHA256SUMS-runner
+  build-relay:
+    needs: suites
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Freestanding relay with the pinned clang-r416183b, A/B identical
+        run: bash scripts/m11/run21/build.sh relay artifacts/m11/run21-build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: run21-relay-${{ github.sha }}
+          path: |
+            artifacts/m11/run21-build/m11-kmsg-relay
+            artifacts/m11/run21-build/relay-compiler.txt
+            artifacts/m11/run21-build/relay-toolchain-commit.txt
+            artifacts/m11/run21-build/SHA256SUMS-relay
+  native-arm64-elf:
+    needs: build-relay
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: run21-relay-${{ github.sha }}
+          path: artifacts/m11/run21-build
+      - name: Exact relay ELF over a private PTY (Run21 paths, runner journal)
+        run: |
+          cd artifacts/m11/run21-build && sha256sum -c SHA256SUMS-relay && cd -
+          chmod 0755 artifacts/m11/run21-build/m11-kmsg-relay
+          sudo python3 scripts/m11/run21/test-elf.py artifacts/m11/run21-build/m11-kmsg-relay --out artifacts/m11/run21-elf/elf-pty.bin
+      - uses: actions/upload-artifact@v4
+        with:
+          name: run21-relay-elf-${{ github.sha }}
+          path: artifacts/m11/run21-elf
