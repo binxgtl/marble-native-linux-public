@@ -24,7 +24,7 @@
 #define CHECK(c) do { if (!(c)) { fprintf(stderr,"FAIL %s:%d %s (errno %d)\n",__FILE__,__LINE__,#c,errno); _exit(10); } } while (0)
 static int refused(long rc) { return rc==-1 && errno==EPERM; }
 static long crange(unsigned a, unsigned b, unsigned flags) { return syscall(SYS_close_range,a,b,flags); }
-static void at(int fd, int want) {
+static void at(int want) {
     int f=open("/dev/zero",O_RDONLY|O_CLOEXEC); CHECK(f>=0);
     if (f!=want) { CHECK(dup2(f,want)==want); CHECK(!close(f)); }
     CHECK(fcntl(want,F_SETFD,FD_CLOEXEC)==0);
@@ -40,15 +40,15 @@ static int run(int (*body)(void)) {
 /* The single-pair filter (Run22's seal) leaves a second pair unprotected and never closable by
  * close_range: an ION anchor needs the two-pair seal. */
 static int single_pair_leaves_second_open(void) {
-    at(600,600); at(601,601); at(602,602); at(603,603);
+    at(600); at(601); at(602); at(603);
     CHECK(!m11_anchor_owner_filter(600,601));
     CHECK(refused(crange(602,603,0)));
     CHECK(!close(602) && !close(603));      /* unprotected: any code could close the ION pair */
     return 0;
 }
 static int two_pairs(void) {
-    for (int fd=600;fd<=603;fd++) at(fd,fd);
-    at(700,700);
+    for (int fd=600;fd<=603;fd++) at(fd);
+    at(700);
     const int bad[][2]={{600,601},{602,601},{-1,600}};
     for (unsigned i=0;i<3;i++) CHECK(m11_anchor_owner_filter_pairs(bad[i],2)==-EINVAL); /* overlap/invalid */
     const int fds[2]={600,602};

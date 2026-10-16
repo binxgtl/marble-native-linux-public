@@ -79,7 +79,7 @@ for mode in gcc clang sanitize; do
   nmutant amp-gate-ignored 'return strcmp(result,"switches-disabled' '    return 0;' 'spawn<0 && bind<0'
   nmutant no-fatal-record 'kmsg_line(b,strlen(b));' '    (void)b;' 'fatal_logged'
   nmutant no-anchor-crumb 'crumb("anchor_bind");' '' 'last_crumb(),"anchor_bind"'
-  nmutant no-seal 'if (m11_anchor_owner_seal_pairs(pairs,nodes,2))' '' 'ion==&ion_anchor && sealed'
+  nmutant no-seal 'if (m11_anchor_owner_seal_pairs(pairs,nodes,2))' '            (void)pairs; (void)nodes;' 'ion==&ion_anchor && sealed'
   nmutant no-final-close 'if (!pdrc && m11_anchor_final_close(&anchor))' '' 'anchor.state==M11_ANCHOR_OWNER_FDS_DROPPED'
   nmutant no-ion-final-close 'if (!pdrc && m11_anchor_final_close(&ion_anchor))' '' 'ifin>=0'
   nmutant no-ion-unlink 'if (unlink("/dev/msm_audio_ion"))' '' 'unlinked_ion>=0'
