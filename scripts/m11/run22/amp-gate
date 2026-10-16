@@ -1,0 +1,122 @@
+#!/bin/busybox sh
+# Sourced only by Run22 `control amp_gate`, after `control start` (ADSP running) and
+# `control usb_start`, before the endpoint node exists. Run19's registration wait (ALSA card,
+# control node, playback+capture PCM entries, both amplifiers bound, ADSP running, five stable
+# samples) followed by the unchanged Run19 amp-switch stage: Disable written to exactly
+# aw_dev_0_switch and aw_dev_1_switch, then read back. No PCM node, no /dev/snd, no endpoint,
+# no playback, unmute, calibration or gain. Publishes one result; the runner admits the GPR query
+# only for `switches-disabled`.
+gate_log=/run/m11/amp-gate.log
+log() {
+ # Bounded evidence for the runner's journal (it reads at most 16 KiB of this file).
+ size=$($BB wc -c < "$gate_log" 2>/dev/null || echo 0)
+ [ "$size" -le 15360 ] || return 0
+ printf '%b\n' "$*" >> "$gate_log" 2>/dev/null || :
+ # Also live on kmsg (streamed as K frames), as Run19's log() did.
+ ( printf '<6>M11R22: %s\n' "$*" > /dev/kmsg ) 2>/dev/null || :
+ return 0
+}
+# amp_snapshot is byte-identical to run16/prepare and run19/bootstrap.
+amp_snapshot() {
+ amp34_count=0; amp35_count=0; amp34_bound=0; amp35_bound=0
+ amp34_adapter=; amp35_adapter=; amp_bad=0
+ for node in /sys/bus/i2c/devices/*-0034 /sys/bus/i2c/devices/*-0035; do
+  [ -d "$node" ] || continue
+  base=${node##*/}; current=${base%-*}; address=${base##*-}
+  case "$current" in ''|*[!0-9]*) amp_bad=1;; esac
+  case "$address" in
+   0034) amp34_count=$((amp34_count+1)); amp34_adapter=$current;;
+   0035) amp35_count=$((amp35_count+1)); amp35_adapter=$current;;
+   *) amp_bad=1;;
+  esac
+  linked=0
+  if [ -L "$node/driver" ]; then
+   if target=$($BB readlink -f "$node/driver" 2>/dev/null); then
+    if [ "${target##*/}" = aw882xx_smartpa ] && [ -d "$target" ]; then
+     linked=1
+    else
+     amp_bad=1
+    fi
+   else
+    amp_bad=1
+   fi
+  elif [ -e "$node/driver" ]; then
+   amp_bad=1
+  fi
+  case "$address" in
+   0034) amp34_bound=$linked;;
+   0035) amp35_bound=$linked;;
+  esac
+ done
+ amp_state=unknown
+ if [ "$amp_bad" -eq 0 ] && [ "$amp34_count" -eq 1 ] &&
+    [ "$amp35_count" -eq 1 ] && [ "$amp34_adapter" = "$amp35_adapter" ]; then
+  case "$amp34_bound:$amp35_bound" in
+   1:1) amp_state=both;;
+   1:0) amp_state=only34;;
+   0:1) amp_state=only35;;
+   0:0) amp_state=neither;;
+  esac
+ fi
+ return 0
+}
+amp_gate() {
+ : > "$gate_log" || return 1
+ adsp=$(read_value /run/m11/adsp-node) || return 1
+ [ ! -e /dev/aud_pasthru_adsp ] || { log "AMP_GATE endpoint node already present"; return 1; }
+ result=registration-incomplete
+ # Run19 registration observer (registration lines 31-75), unchanged predicates.
+ i=0; stable=0; stable_card=; previous_sample=
+ while [ "$i" -lt 300 ] && [ "$stable" -lt 5 ]; do
+  card=$($BB awk '/ukee-mtp-snd-card/ && $1 ~ /^[0-9]+$/ {print $1}' /proc/asound/cards 2>/dev/null || :)
+  case "$card" in ''|*[!0-9]*) card=;; esac
+  devno=; valid=0
+  if [ -n "$card" ]; then
+   prefix=$(printf '%02d-' "$card")
+   devno=$(read_value "/sys/class/sound/controlC$card/dev" 2>/dev/null || :)
+   major=${devno%%:*}; minor=${devno#*:}
+   case "$devno" in
+    *:*)
+     case "$major" in ''|*[!0-9]*) ;; *)
+      case "$minor" in ''|*[!0-9]*) ;; *)
+      if [ "$major" -gt 0 ] &&
+         $BB grep -q "^${prefix}.*playback" /proc/asound/pcm 2>/dev/null &&
+         $BB grep -q "^${prefix}.*capture" /proc/asound/pcm 2>/dev/null; then valid=1; fi;;
+      esac;;
+     esac;;
+   esac
+  fi
+  amp_snapshot
+  if [ "$valid" -eq 1 ] && [ "$amp_state" = both ] &&
+     [ "$(read_value "$adsp/state")" = running ]; then
+   if [ "$stable_card" = "$card" ]; then stable=$((stable+1)); else stable=1; stable_card=$card; fi
+  else stable=0; stable_card=; fi
+  sample_adsp=$(read_value "$adsp/state" 2>&1 || :)
+  sample="$card|$devno|$valid|$amp_state|$stable_card|$sample_adsp"
+  if [ "$sample" != "$previous_sample" ] || [ $((i%50)) -eq 0 ] || [ "$stable" -eq 5 ]; then
+   log "ALSA sample poll=$i card=[$card] devno=[$devno] adsp=[$sample_adsp] valid=$valid amps=$amp_state stable=$stable"
+   previous_sample=$sample
+  fi
+  $BB sleep 0.1 || return 1
+  i=$((i+1))
+ done
+ final_card=$($BB awk '/ukee-mtp-snd-card/ && $1 ~ /^[0-9]+$/ {print $1}' /proc/asound/cards 2>/dev/null || :)
+ amp_snapshot
+ if [ "$stable" -eq 5 ] && [ "$final_card" = "$stable_card" ] &&
+    [ "$amp_state" = both ] && [ "$(read_value "$adsp/state")" = running ] &&
+    [ "$(read_value "/sys/class/sound/controlC$stable_card/dev" 2>/dev/null || :)" = "$devno" ] &&
+    $BB grep -q "^${prefix}.*playback" /proc/asound/pcm 2>/dev/null &&
+    $BB grep -q "^${prefix}.*capture" /proc/asound/pcm 2>/dev/null; then
+  result=registration-ready
+ fi
+ log "ALSA final result=$result stable=$stable card=[$stable_card] final_card=[$final_card] devno=[$devno] amps=$amp_state"
+ if [ "$result" = registration-ready ]; then
+  card=$stable_card
+  . /m11/amp-switch || return 1
+  amp_switch_stage
+  result=$switch_result
+ fi
+ [ ! -e /dev/m11-snd-control ] || return 1
+ printf '%s\n' "$result" > /run/m11/amp-gate.result || return 1
+ return 0
+}

@@ -1,0 +1,121 @@
+#!/bin/busybox sh
+# Sourced by bootstrap only after all loaders and amp sampling succeed.
+# Run19: registration-ready additionally runs the amp-switch Disable stage.
+# Every failure is explicit: this file is sourced in a conditional context.
+write_state() { printf '%s' "$1" > "$adsp/state"; }
+poll_value() {
+ poll=0
+ while [ "$poll" -lt 300 ]; do
+  [ "$(read_value "$1" 2>/dev/null || :)" = "$2" ] && return 0
+  $BB sleep 0.1 || hold "ADSP poll sleep"
+  poll=$((poll+1))
+ done
+ return 1
+}
+sound_absent || hold "sound appeared before explicit ADSP start"
+[ "$(read_value "$adsp/state")" = offline ] || hold "ADSP changed before start"
+printf '%s' adsp2.mdt > "$adsp/firmware" || hold "ADSP firmware selection"
+[ "$(read_value "$adsp/firmware")" = adsp2.mdt ] || hold "ADSP firmware readback"
+pd_alive || hold "PDR mapper died before ADSP start"
+. /m11/asoc-diagnostics || hold "ASoC diagnostic definitions"
+asoc_diag_start
+log "ADSP start begin"
+if write_state start; then start_rc=0; else start_rc=$?; fi
+log "ADSP start returned rc=$start_rc"
+result=adsp-incomplete
+if [ "$start_rc" -eq 0 ] && poll_value "$adsp/state" running; then
+ result=registration-incomplete
+ log "ADSP running; USB setup begin"
+ usb_start || hold "USB transport setup"
+ log "USB ready; registration observer begin"
+ i=0; stable=0; stable_card=; previous_sample=
+ while [ "$i" -lt 300 ] && [ "$stable" -lt 5 ]; do
+  pd_alive || hold "PDR mapper died during registration"
+  card=$($BB awk '/ukee-mtp-snd-card/ && $1 ~ /^[0-9]+$/ {print $1}' /proc/asound/cards 2>/dev/null || :)
+  case "$card" in ''|*[!0-9]*) card=;; esac
+  devno=; valid=0
+  if [ -n "$card" ]; then
+   prefix=$(printf '%02d-' "$card")
+   devno=$(read_value "/sys/class/sound/controlC$card/dev" 2>/dev/null || :)
+   major=${devno%%:*}; minor=${devno#*:}
+   case "$devno" in
+    *:*)
+     case "$major" in ''|*[!0-9]*) ;; *)
+      case "$minor" in ''|*[!0-9]*) ;; *)
+      if [ "$major" -gt 0 ] &&
+         $BB grep -q "^${prefix}.*playback" /proc/asound/pcm 2>/dev/null &&
+         $BB grep -q "^${prefix}.*capture" /proc/asound/pcm 2>/dev/null; then valid=1; fi;;
+      esac;;
+     esac;;
+   esac
+  fi
+  amp_snapshot
+  if [ "$valid" -eq 1 ] && [ "$amp_state" = both ] &&
+     [ "$(read_value "$adsp/state")" = running ]; then
+   if [ "$stable_card" = "$card" ]; then stable=$((stable+1)); else stable=1; stable_card=$card; fi
+  else stable=0; stable_card=; fi
+  sample_adsp=$(read_value "$adsp/state" 2>&1 || :)
+  sample="$card|$devno|$valid|$amp_state|$stable_card|$sample_adsp"
+  if [ "$sample" != "$previous_sample" ] || [ $((i%50)) -eq 0 ] || [ "$stable" -eq 5 ]; then
+   log "ALSA sample poll=$i card=[$card] devno=[$devno] adsp=[$sample_adsp] valid=$valid amps=$amp_state stable=$stable adapter=$amp34_adapter:$amp35_adapter links=$amp34_bound:$amp35_bound"
+   previous_sample=$sample
+  fi
+  $BB sleep 0.1 || hold "ALSA observer sleep"
+  i=$((i+1))
+ done
+ final_card=$($BB awk '/ukee-mtp-snd-card/ && $1 ~ /^[0-9]+$/ {print $1}' /proc/asound/cards 2>/dev/null || :)
+ amp_snapshot
+ if [ "$stable" -eq 5 ] && [ "$final_card" = "$stable_card" ] &&
+    [ "$amp_state" = both ] && [ "$(read_value "$adsp/state")" = running ] &&
+    [ "$(read_value "/sys/class/sound/controlC$stable_card/dev" 2>/dev/null || :)" = "$devno" ] &&
+    $BB grep -q "^${prefix}.*playback" /proc/asound/pcm 2>/dev/null &&
+    $BB grep -q "^${prefix}.*capture" /proc/asound/pcm 2>/dev/null; then
+  result=registration-ready
+ fi
+ log "ALSA final result=$result stable=$stable card=[$stable_card] final_card=[$final_card] devno=[$devno] amps=$amp_state"
+  if [ "$result" = registration-ready ]; then
+   # Only authorized hardware-control writes: two amp switches := Disable.
+   card=$stable_card
+   . /m11/amp-switch || hold "amp-switch definitions"
+   amp_switch_stage
+   result=$switch_result
+  fi
+ if snapshot=$($BB head -c 8192 /proc/asound/cards 2>&1); then snapshot_rc=0; else snapshot_rc=$?; fi
+ log "cards snapshot limit=8192 rc=$snapshot_rc BEGIN\n$snapshot\nEND cards"
+ if snapshot=$($BB head -c 8192 /proc/asound/pcm 2>&1); then snapshot_rc=0; else snapshot_rc=$?; fi
+ log "pcm snapshot limit=8192 rc=$snapshot_rc BEGIN\n$snapshot\nEND pcm"
+ asoc_diag_capture
+ for node in /sys/class/sound/*; do
+  [ -e "$node" ] || continue
+  if snapshot=$(read_value "$node/dev" 2>&1); then snapshot_rc=0; else snapshot_rc=$?; fi
+  log "sound node=$node dev=[$snapshot] read_rc=$snapshot_rc"
+ done
+ for node in /sys/bus/platform/devices/*; do
+  case "$node" in *spf_core_platform*sound*)
+   snapshot=$($BB readlink -f "$node/driver" 2>&1 || :)
+   log "sound platform=$node driver=[$snapshot]";;
+  esac
+ done
+ if snapshot=$($BB head -c 16384 /run/m11/pd.log 2>&1); then snapshot_rc=0; else snapshot_rc=$?; fi
+ log "PDR mapper log limit=16384 rc=$snapshot_rc BEGIN\n$snapshot\nEND mapper"
+ pd_alive || hold "PDR mapper died before cleanup"
+ asoc_diag_stop
+ log "FINAL_EVIDENCE result=$result; stopping logger then USB before ADSP"
+ logger_stop || hold "logger stop before USB unbind"
+ usb_stop || hold "USB gadget teardown"
+fi
+asoc_diag_stop
+log "registration result=$result"
+# A returned start error need not leave ADSP offline. Inspect actual state.
+state=$(read_value "$adsp/state")
+case "$state" in
+ running)
+  log "ADSP stop begin"
+  write_state stop || hold "ADSP stop returned failure"
+  poll_value "$adsp/state" offline || hold "ADSP offline timeout";;
+ offline) ;;
+ *) hold "ADSP cleanup state unclassified: $state";;
+esac
+printf '%s' "$initial_firmware" > "$adsp/firmware" || hold "ADSP firmware restore"
+[ "$(read_value "$adsp/firmware")" = "$initial_firmware" ] || hold "ADSP firmware restore readback"
+return 0

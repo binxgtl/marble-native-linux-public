@@ -1,0 +1,79 @@
+#!/bin/busybox sh
+# Sourced by Run19 registration only after registration-ready.
+# Authorization (2026-10-12): read-only inventory, then write Disable to exactly
+# aw_dev_0_switch and aw_dev_1_switch, then read back. Nothing else is written.
+# No PCM node, pcm_open/prepare, AGM/GSL, /dev/aud_pasthru_adsp, playback,
+# unmute, calibration or gain operation exists in this file.
+# This stage never holds on an amp-switch outcome: it publishes one result and
+# returns so the unchanged USB/ADSP/common cleanup and reboot path still runs.
+# Results: switches-disabled (GREEN), switch-not-written (YELLOW, no write was
+# attempted), switch-write-failed / switch-readback-failed (RED).
+switch_consumers_closed() {
+ # Every playback and capture substream of the identified card must be idle.
+ found=0
+ for status in /proc/asound/card$card/pcm*/sub*/status; do
+  [ -e "$status" ] || continue
+  found=$((found+1))
+  if value=$($BB cat "$status" 2>&1); then :; else
+   log "AMP_SWITCH consumer status read failed path=$status"; return 1
+  fi
+  if [ "$value" != closed ]; then
+   log "AMP_SWITCH consumer active path=$status state=[$value]"; return 1
+  fi
+ done
+ [ "$found" -gt 0 ] || { log "AMP_SWITCH no substream status files"; return 1; }
+ # No PCM/control node is ever created in this RAM /dev except our own node.
+ [ ! -e /dev/snd ] || { log "AMP_SWITCH unexpected /dev/snd"; return 1; }
+ log "AMP_SWITCH consumers closed substreams=$found"
+ return 0
+}
+amp_switch_attempt() {
+ # Every early return leaves switch_result=switch-not-written and no node.
+ control=/dev/m11-snd-control
+ case "$card" in ''|*[!0-9]*) log "AMP_SWITCH invalid card=[$card]; no write"; return 0;; esac
+ cdev=$(read_value "/sys/class/sound/controlC$card/dev" 2>/dev/null || :)
+ cmajor=${cdev%%:*}; cminor=${cdev#*:}
+ case "$cdev" in *:*) ;; *) log "AMP_SWITCH invalid control devno=[$cdev]; no write"; return 0;; esac
+ case "$cmajor:$cminor" in *[!0-9:]*|:*|*:|*:*:*) log "AMP_SWITCH invalid control devno=[$cdev]; no write"; return 0;; esac
+ [ "$cdev" = "$devno" ] || { log "AMP_SWITCH control devno changed [$devno]->[$cdev]; no write"; return 0; }
+ [ ! -e "$control" ] || { log "AMP_SWITCH stale control node; no write"; return 0; }
+ switch_consumers_closed || { log "AMP_SWITCH consumer precondition failed; no write"; return 0; }
+ $BB mknod -m 600 "$control" c "$cmajor" "$cminor" || { log "AMP_SWITCH control node create failed; no write"; return 0; }
+ if output=$(/sbin/m11-ampctl verify "$control" "$card" 2>&1); then rc=0; else rc=$?; fi
+ log "AMP_SWITCH verify-before rc=$rc BEGIN\n$output\nEND verify-before"
+ if [ "$rc" -eq 0 ] && switch_consumers_closed; then
+  if output=$(/sbin/m11-ampctl disable "$control" "$card" 2>&1); then rc=0; else rc=$?; fi
+  log "AMP_SWITCH disable rc=$rc BEGIN\n$output\nEND disable"
+  case "$rc" in
+   0) switch_result=switches-disabled;;
+   2|3) switch_result=switch-not-written;;
+   5) switch_result=switch-readback-failed;;
+   *) switch_result=switch-write-failed;;
+  esac
+  if [ "$switch_result" = switches-disabled ]; then
+   # Independent read-only process; both values must read Disable.
+   if output=$(/sbin/m11-ampctl verify "$control" "$card" 2>&1); then rc=0; else rc=$?; fi
+   log "AMP_SWITCH verify-after rc=$rc BEGIN\n$output\nEND verify-after"
+   case "$output" in
+    *"
+values aw_dev_0_switch=0 aw_dev_1_switch=0
+"*) ;;
+    *) rc=9;;
+   esac
+   [ "$rc" -eq 0 ] || switch_result=switch-readback-failed
+   switch_consumers_closed || switch_result=switch-readback-failed
+  fi
+ else
+  log "AMP_SWITCH identity/semantics/consumer gate not exact; no write"
+ fi
+ $BB rm "$control" || hold "AMP_SWITCH control node removal"
+ [ ! -e "$control" ] || hold "AMP_SWITCH control node still present"
+ return 0
+}
+amp_switch_stage() {
+ switch_result=switch-not-written
+ amp_switch_attempt
+ # Logged on every path, including no-write early returns.
+ log "AMP_SWITCH result=$switch_result; mixer readback is not proof of physical amplifier power state"
+ return 0
+}

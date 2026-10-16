@@ -1,0 +1,6 @@
+# name|role|url|ref|commit|notes
+ack-common|baseline|https://android.googlesource.com/kernel/common|android12-5.10-2025-05_r1|b97c62c4e7d1e80fb6a2cb0cb381f03bbcd26a4e|Linux 5.10.236; fetched from canonical AOSP remote
+clang-r416183b|toolchain-mirror|https://github.com/LineageOS/android_prebuilts_clang_kernel_linux-x86_clang-r416183b.git|lineage-20.0|54220fd601050b350b2af7adc913089ebf0e7aed|Android clang 12 family matching audited runtime revision name
+kernelsu-next|m4-root|https://github.com/KernelSU-Next/KernelSU-Next.git|v3.3.0|3b18216f71df189ab3d1b1ce0bdb21be1268e771|Source-integrated at M4; must be cloned at full depth so the in-tree version is deterministic
+xiaomi-kernel|donor-reference-only|https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git|marble-s-oss|48952ed36228217531482b39d5bef13e7fd808ec|Do not merge wholesale; Android S-era donor
+xiaomi-devicetree|donor-reference-only|https://github.com/MiCode/kernel_devicetree.git|marble-s-oss|4e89193c78ea0ca0e8134a0b8d5cf0457e015df0|Do not merge wholesale; device-tree donor

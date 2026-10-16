@@ -1,0 +1,67 @@
+# Sourced only by Run22 control jobs. The caller owns ADSP and modem lifecycle.
+# Exact M8/M9 connector-driven configfs ACM sequence. Never force a USB role.
+G=/config/usb_gadget/m11r22
+UDC=/sys/class/udc/a600000.dwc3
+usb_start() {
+ log 'USB waiting for connector-created UDC (ADSP already running)'
+ i=0
+ while [ ! -d "$UDC" ]; do
+  [ "$i" -lt 300 ] || return 1
+  $BB sleep 0.1 || return 1; i=$((i+1))
+ done
+ [ ! -e /config ] || return 1
+ $BB mkdir /config || return 1
+ $BB mount -t configfs -o nosuid,nodev,noexec configfs /config || return 1
+ $BB mkdir "$G" || return 1
+ printf '%s' 0x1d6b > "$G/idVendor" || return 1
+ printf '%s' 0x0104 > "$G/idProduct" || return 1
+ printf '%s' 0xef > "$G/bDeviceClass" || return 1
+ printf '%s' 0x02 > "$G/bDeviceSubClass" || return 1
+ printf '%s' 0x01 > "$G/bDeviceProtocol" || return 1
+ $BB mkdir "$G/strings/0x409" "$G/configs/c.1" "$G/configs/c.1/strings/0x409" "$G/functions/acm.usb0" || return 1
+ printf '%s' marble-native-linux > "$G/strings/0x409/manufacturer" || return 1
+ printf '%s' 'M11 Run 22 kernel log' > "$G/strings/0x409/product" || return 1
+ printf '%s' M11R22 > "$G/strings/0x409/serialnumber" || return 1
+ printf '%s' kernel-log > "$G/configs/c.1/strings/0x409/configuration" || return 1
+ $BB ln -s "$G/functions/acm.usb0" "$G/configs/c.1/acm.usb0" || return 1
+ printf '%s' a600000.dwc3 > "$G/UDC" || return 1
+ [ "$($BB cat "$G/UDC")" = a600000.dwc3 ] || return 1
+ poll_value "$UDC/state" configured || return 1
+ devno=$($BB cat /sys/class/tty/ttyGS0/dev) || return 1
+ major=${devno%%:*}; minor=${devno#*:}
+ case "$major" in ''|*[!0-9]*) return 1;; esac
+ case "$minor" in ''|*[!0-9]*) return 1;; esac
+ [ "$major" -gt 0 ] || return 1
+ [ ! -e /dev/ttyGS0 ] || return 1
+ $BB mknod -m 600 /dev/ttyGS0 c "$major" "$minor" || return 1
+ [ -c /dev/ttyGS0 ] || return 1
+ # Run22 has no host acknowledgement (receive-only observer, as Run19/Run20):
+ # give the Windows observer time to open the COM port; the relay keeps its
+ # backlog. Publish only after the reduced-privilege relay can open the TTY. A
+ # fixed sleep/configured UDC is not evidence that a host reader received bytes.
+ $BB sleep 3 || return 1
+ $BB chown 65534:65534 /dev/ttyGS0 || return 1
+ $BB chmod 0600 /dev/ttyGS0 || return 1
+ printf '%s\n' 1 > /run/m11-instrumentation/usb.ready || return 1
+ log 'USB ACM streaming early backlog and live kmsg; best effort'
+}
+usb_stop() {
+ log 'USB gadget unbind after logger stop; ADSP still running'
+ [ -z "$relay_pid" ] || return 1
+ printf '%s' none > "$G/UDC" || return 1
+ i=0; verified=0
+ while [ "$i" -lt 50 ]; do
+  # EOF is the exact unbound function_show result. cat read errors remain
+  # errors, unlike the consumed Run-2T attr_get regression.
+  if function=$($BB cat "$UDC/function") && bound=$($BB cat "$G/UDC") &&
+     [ -z "$function" ] && [ -z "$bound" ]; then verified=1; break; fi
+  $BB sleep 0.1 || return 1; i=$((i+1))
+ done
+ [ "$verified" -eq 1 ] || return 1
+ $BB rm "$G/configs/c.1/acm.usb0" || return 1
+ $BB rmdir "$G/functions/acm.usb0" "$G/configs/c.1/strings/0x409" "$G/configs/c.1" "$G/strings/0x409" "$G" || return 1
+ $BB umount /config || return 1
+ $BB rmdir /config || return 1
+ $BB rm /dev/ttyGS0 || return 1
+ log 'USB logger reaped and gadget unbound; stopping ADSP next'
+}
