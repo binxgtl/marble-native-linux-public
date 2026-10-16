@@ -80,7 +80,8 @@ static unsigned crumbs;
 static void kmsg_line(const char *b, size_t n) {
     int fd=open("/dev/kmsg",O_WRONLY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC);
     if (fd<0) return;
-    (void)write(fd,b,n); (void)close(fd);
+    ssize_t w=write(fd,b,n); (void)w; /* best effort: (void) alone does not satisfy warn_unused_result */
+    (void)close(fd);
 }
 static void crumb(const char *step) {
     char b[160];
