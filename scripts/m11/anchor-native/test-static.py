@@ -57,6 +57,17 @@ check('/dev/aud_pasthru_adsp' not in admit and 'm11_anchor_check(r->anchor)' in 
       'audio_runtime: admission rests on the sealed anchor, not the node path')
 check('no_device_fds(1,r->device)' not in runtime and 'pid1_endpoint_fds_ok(r)' in runtime,
       'audio_runtime: PID1 census admits exactly the anchor pair')
+# R2: the ION device and its CMA twin enter every census; the worker drops the ION pair first.
+check('r->ion && m11_census_pid1_endpoint(' in runtime and 'r->ion_cma && m11_census_pid1_endpoint(' in runtime and
+      'r->ion_cma,-1,-1)' in runtime,
+      'audio_runtime: PID1 holds the ION device only as its ION anchor pair, its CMA twin never')
+check('no_audio_fds(r,h->pid)' in runtime and 'no_audio_fds(r,r->spawner)' in runtime,
+      'audio_runtime: helpers and the spawner hold no endpoint, ION or ION-CMA fd')
+check('lstat("/dev/msm_audio_ion_cma",&st) || errno!=ENOENT' in runtime,
+      'audio_runtime: the ION CMA twin must have no node')
+hyg = gpr[gpr.index('int m11_gpr_worker_hygiene('):]
+check(hyg.index('SYS_close_range') < hyg.index('m11_anchor_linux_worker_hygiene('),
+      'gpr_linux: the worker drops the ION pair (close_range) before its fd hygiene')
 # R3: the integrated flow's shell inputs create no ALSA node.
 for name in ('scripts/m11/next/control', 'scripts/m11/next/usb', 'scripts/m11/run16/prepare'):
     text = (ROOT / name).read_text()

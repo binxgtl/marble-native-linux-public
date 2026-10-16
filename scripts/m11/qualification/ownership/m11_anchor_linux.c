@@ -21,6 +21,9 @@
 #include <time.h>
 #include <unistd.h>
 
+#if defined(M11_ANCHOR_NATIVE_ION) && !defined(M11_ANCHOR_NATIVE)
+#error "M11_ANCHOR_NATIVE_ION extends the native integration build only"
+#endif
 #define MAX_PROCESSES 4096u
 #define MAX_FDS 4096u
 static const char *const stand_ins[]={"/dev/ptmx","/dev/pts/ptmx","/dev/null"};
@@ -130,6 +133,9 @@ static int lx_holders(void *v, const m11_anchor_id *want, m11_anchor_holder *out
 static int standin(const char *path) {
 #if defined(M11_ANCHOR_NATIVE)
     if (!strcmp(path,"/dev/aud_pasthru_adsp")) return 1; /* the integration build's one real node */
+#endif
+#if defined(M11_ANCHOR_NATIVE_ION)
+    if (!strcmp(path,"/dev/msm_audio_ion")) return 1; /* R2 build: the ION node, never its CMA twin */
 #endif
     if (strstr(path,"aud_pasthru") || strstr(path,"msm_audio_ion") || strstr(path,"/snd/")) return 0;
     for (unsigned i=0;i<sizeof(stand_ins)/sizeof(*stand_ins);i++) if (!strcmp(path,stand_ins[i])) return 1;

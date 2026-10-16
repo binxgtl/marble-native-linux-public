@@ -12,6 +12,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -39,12 +40,19 @@ static m11_pid1_anchor *anchor;  /* PID1's sealed anchor; NULL refuses every que
 static int borrowed_fd=-1;         /* the loan's fd number, set before fork */
 static int extra_keep[4]; static unsigned extra_n;
 static int last_worker_status=-1;  /* raw wait status of the last reaped worker, -1 if none */
+static const m11_pid1_anchor *ion;  /* R2: PID1's sealed ION anchor, dropped by the worker */
 int m11_gpr_last_worker_status(void) { return last_worker_status; }
 int m11_gpr_anchor_attach(m11_pid1_anchor *a, const int *keep, unsigned nkeep) {
     if (!a || a->state!=M11_ANCHOR_HELD || nkeep>4 || (nkeep && !keep)) return -1;
     anchor=a; extra_n=nkeep;
     for (unsigned i=0;i<nkeep;i++) extra_keep[i]=keep[i];
     return 0;
+}
+int m11_gpr_anchor_attach_ion(const m11_pid1_anchor *a) {
+    if (!a || a->state!=M11_ANCHOR_HELD || !a->ops.close_pair || a->guard_fd!=a->anchor_fd+1) return -1;
+    /* Never the endpoint anchor, nor a pair overlapping its numbers. */
+    if (anchor && (a==anchor || (a->anchor_fd<=anchor->guard_fd && anchor->anchor_fd<=a->guard_fd))) return -1;
+    ion=a; return 0;
 }
 static int pipe_or_socket(int fd) {
     struct stat st;
@@ -239,6 +247,8 @@ static int lx_record(void *v, const struct m11_gpr_event *e) {
  * the DOWN and cancel pipes and the runner's extra fds; everything else inherited is closed. */
 int m11_gpr_worker_hygiene(int ipc, const struct m11_gpr_session *s) {
     int keep[3+4]; unsigned n=0;
+    /* R2: the ION pair first, through the one close the inherited seal permits for it. */
+    if (ion && syscall(SYS_close_range,(unsigned)ion->anchor_fd,(unsigned)ion->guard_fd,0u)) return -1;
     keep[n++]=ipc; keep[n++]=s->service_down_fd; keep[n++]=s->cancel_fd;
     for (unsigned i=0;i<extra_n;i++) keep[n++]=extra_keep[i];
     return m11_anchor_linux_worker_hygiene(borrowed_fd,anchor->guard_fd,keep,n);

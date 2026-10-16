@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <sys/wait.h>
 #include <termios.h>
 #include <unistd.h>
@@ -72,6 +73,7 @@ static int status_value(pid_t pid, const char *key) {
     fclose(f); return v;
 }
 /* Confinement is visible to anyone; the fd table only to root (the worker is non-dumpable). */
+static int ion_mode; /* R2: the owner also holds a sealed ION stand-in anchor (/dev/null) */
 static void inspect_worker(pid_t owner_pid) {
     pid_t w=worker_of(owner_pid);
     int seccomp=status_value(w,"Seccomp"), filters=status_value(w,"Seccomp_filters");
@@ -88,6 +90,7 @@ static void inspect_worker(pid_t owner_pid) {
         char path[384], link[128]; snprintf(path,sizeof(path),"%s/%s",dir,e->d_name);
         ssize_t n=readlink(path,link,sizeof(link)-1); assert(n>0); link[n]=0;
         if (strstr(link,"ptmx")) ptmx++;
+        else if (!strcmp(link,"/dev/null")) { printf("worker fd hygiene: ION stand-in fd %d kept\n",fd); other++; }
         else if (!strncmp(link,"socket:",7)) sockets++;
         else if (!strncmp(link,"pipe:",5)) pipes++;
         else { printf("worker fd hygiene: unexpected %s\n",link); other++; }
@@ -105,9 +108,19 @@ static void fill_session(struct m11_gpr_session *s, dev_t dev, uint32_t token, i
     memset(s->capture_nonce,0xaa,16); memset(s->image_sha256,0xbb,32);
 }
 
+/* The owner's census counts every holder of the stand-in device numbers in its process tree:
+ * inherited stdio on the null device would be a foreign ION holder. */
+static void stdio_off_null(void) {
+    for (int fd=0;fd<3;fd++) {
+        struct stat st; int p[2];
+        if (fstat(fd,&st) || !S_ISCHR(st.st_mode) || st.st_rdev!=makedev(1,3)) continue;
+        assert(!pipe(p) && dup2(fd==0 ? p[0] : p[1],fd)==fd); close(p[0]); close(p[1]);
+    }
+}
 /* The owner: bind, seal, attach, run `queries` transactions, then wait and final-close. */
 static int owner(int out, int in, unsigned budget, int answer) {
     struct stat st; static m11_anchor_linux l; m11_anchor_ops ops; static m11_pid1_anchor a;
+    static m11_anchor_linux li; m11_anchor_ops oi; static m11_pid1_anchor ion; struct stat si;
     if (pipe2(down_pipe,O_CLOEXEC|O_NONBLOCK)) return 40;
     int cancel[2]; if (pipe2(cancel,O_CLOEXEC|O_NONBLOCK)) return 40;
     if (stat("/dev/ptmx",&st) || m11_anchor_linux_ops(&l,"/dev/ptmx",getpid(),&ops)) return 41;
@@ -116,12 +129,19 @@ static int owner(int out, int in, unsigned budget, int answer) {
     char name[128]; snprintf(name,sizeof(name),"%s",ptsname(a.anchor_fd));
     char g;
     if (write(out,name,sizeof(name))!=(ssize_t)sizeof(name) || read(in,&g,1)!=1) return 44;
-    if (m11_anchor_owner_seal(&a,NULL)) return 45;
+    if (ion_mode) {
+        stdio_off_null();
+        if (stat("/dev/null",&si) || m11_anchor_linux_ops(&li,"/dev/null",getpid(),&oi) ||
+            m11_anchor_bind(&ion,&oi,NULL,&evidence,getpid(),(uint64_t)si.st_rdev)) return 60;
+        m11_pid1_anchor *both[2]={&a,&ion};
+        if (m11_anchor_owner_seal_pairs(both,NULL,2)) return 61;
+    } else if (m11_anchor_owner_seal(&a,NULL)) return 45;
     struct m11_gpr_session s; struct m11_gpr_result r;
     fill_session(&s,st.st_rdev,0x17000001,cancel[0],budget);
     s.runtime=NULL;
     if (m11_gpr_linux_query(&s,&r)!=-1 || r.outcome!=M11_GPR_OPEN_FAILED) return 46; /* no anchor attached */
     if (m11_gpr_anchor_attach(&a,NULL,0)) return 47;
+    if (ion_mode && m11_gpr_anchor_attach_ion(&ion)) return 62;
     fill_session(&s,st.st_rdev,0x17000002,cancel[0],budget);
     int rc=m11_gpr_linux_query(&s,&r);
     if (answer) {
@@ -133,6 +153,8 @@ static int owner(int out, int in, unsigned budget, int answer) {
     if (answer && a.latches) return 51;
     if (a.state!=M11_ANCHOR_HELD || (a.latches & M11_ANCHOR_LATCH_REFUSE) || a.lends!=1 || m11_anchor_check(&a)) return 51;
     if (write(out,"D",1)!=1 || read(in,&g,1)!=1) return 52;          /* harness: still no hang-up */
+    if (ion_mode && (ion.state!=M11_ANCHOR_HELD || ion.latches || m11_anchor_check(&ion) ||
+                     m11_anchor_final_close(&ion) || ion.state!=M11_ANCHOR_OWNER_FDS_DROPPED)) return 63;
     if (m11_anchor_final_close(&a) || a.state!=M11_ANCHOR_OWNER_FDS_DROPPED) return 53;
     return finished==2 ? 0 : 54;
 }
@@ -179,8 +201,13 @@ int main(void) {
     scenario(300,0);
     puts("PASS integrated query timeout on the stand-in: no response, worker stopped at its deadline "
          "(SIGKILL is a non-final close), no release; the loan ends and the final close releases once");
+    ion_mode=1;
+    scenario(4000,1);
+    puts("PASS R2 integrated query with a sealed ION stand-in anchor: one two-pair seal; the worker "
+         "dropped the ION pair by close_range before its hygiene (no ION fd in the worker), the ION "
+         "anchor stayed HELD with no latch, both final closes succeeded");
     alarm(0);
-    printf("Integrated stand-in query qualification: 2 cases PASS as %s (real endpoint not opened)\n",
+    printf("Integrated stand-in query qualification: 3 cases PASS as %s (real endpoint and ION not opened)\n",
            geteuid() ? "non-root" : "root (worker dropped to 65534; fd table inspected)");
     return 0;
 }

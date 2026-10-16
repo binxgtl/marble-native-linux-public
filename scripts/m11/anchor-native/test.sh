@@ -9,6 +9,8 @@
 #  - an end-to-end GET_SPF_STATE through the integrated worker on a /dev/ptmx stand-in held by a
 #    sealed owner, as non-root and (sudo) as root, with the live worker's confinement and fd
 #    table inspected;
+#  - R2 (docs/m11-r2-ion-ownership.md): path admission per build mode, the two-pair owner seal,
+#    and the stand-in query with a sealed ION anchor that the worker drops before its hygiene;
 #  - one-line mutants of the integration that must fail for a named reason.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -28,6 +30,14 @@ gcc -std=c11 -Wall -Wextra -Werror -DM11_ANCHOR_NATIVE -I "$own" "$here/test-ter
 "$out/enum-offline" > "$out/enum-offline.txt"; "$out/enum-native" > "$out/enum-native.txt"
 cmp "$out/enum-offline.txt" "$out/enum-native.txt"
 echo 'PASS terminal enum identical in the offline and native build modes'
+# R2 path admission: native build (endpoint only) and R2 build (endpoint + /dev/msm_audio_ion).
+gcc -std=c11 -Wall -Wextra -Werror -DM11_ANCHOR_NATIVE -I "$own" "$here/test-ion-path.c" "${anchor[@]}" -o "$out/ion-path-native"
+gcc -std=c11 -Wall -Wextra -Werror -DM11_ANCHOR_NATIVE -DM11_ANCHOR_NATIVE_ION -I "$own" "$here/test-ion-path.c" "${anchor[@]}" -o "$out/ion-path-r2"
+"$out/ion-path-native" | tee "$out/ion-path-native.log"; "$out/ion-path-r2" | tee "$out/ion-path-r2.log"
+if gcc -std=c11 -DM11_OWNERSHIP_OFFLINE -DM11_ANCHOR_NATIVE_ION -I "$own" -I "$repair" -c "$own/m11_anchor_linux.c" -o "$out/ion-offline.o" 2>/dev/null; then
+  echo "ERROR: M11_ANCHOR_NATIVE_ION compiled outside the native build" >&2; exit 1
+fi
+echo 'PASS M11_ANCHOR_NATIVE_ION refused outside the native integration build'
 
 # Unit -> sources it is built from, for the mutants below.
 build() { # name output [file-to-replace replacement-path]
@@ -40,6 +50,7 @@ build() { # name output [file-to-replace replacement-path]
     test-query) srcs=("$here/test-query-standin.c" "$here/gpr_linux.c" "$rt/gpr_native.c" "${anchor[@]}");;
     test-pdr) srcs=("$here/test-pdr.c" "$rt/audio_pd.c" "${anchor[@]}");;
     test-pdr-e2e) srcs=("$here/test-pdr-e2e.c" "$rt/audio_pd.c" "${anchor[@]}");;
+    test-ion-seal) srcs=("$here/test-ion-seal.c" "${anchor[@]}");;
   esac
   local extra=() inc=(-I "$here")
   if [[ -n "$from" ]]; then
@@ -94,7 +105,7 @@ nmutant() { # name test file old new expect [root]
 
 for mode in gcc clang sanitize; do
   cc=gcc
-  flags=(-std=c11 -O1 -g -Wall -Wextra -Werror -DM11_ANCHOR_NATIVE)
+  flags=(-std=c11 -O1 -g -Wall -Wextra -Werror -DM11_ANCHOR_NATIVE -DM11_ANCHOR_NATIVE_ION)
   if [[ "$mode" == clang ]]; then cc=clang; fi
   if [[ "$mode" == sanitize ]]; then flags+=(-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer); fi
   build runner "$out/runner-$mode"
@@ -132,6 +143,8 @@ for mode in gcc clang sanitize; do
   timeout 120 "$out/test-pdr-e2e-$mode" | tee "$out/test-pdr-e2e-$mode.log"
   build test-census "$out/test-census-$mode"
   "$out/test-census-$mode" | tee "$out/test-census-$mode.log"
+  build test-ion-seal "$out/test-ion-seal-$mode"
+  "$out/test-ion-seal-$mode" | tee "$out/test-ion-seal-$mode.log"
   build test-query "$out/test-query-$mode"
   "$out/test-query-$mode" | tee "$out/test-query-$mode.log"
   if [[ "$sudo_ok" == 1 ]]; then
@@ -155,5 +168,6 @@ for mode in gcc clang sanitize; do
   nmutant no-worker-confine test-query gpr_linux.c 'if (m11_anchor_linux_confine()) _exit(M11_WORKER_EXIT_CONFINE);' '' \
     'worker seccomp filters'
   nmutant no-worker-hygiene test-query gpr_linux.c '/* worker fd hygiene */' '' 'worker fd hygiene' 1
+  nmutant no-ion-drop test-query gpr_linux.c 'if (ion && syscall(SYS_close_range' '' 'query rc=-1'
 done
 echo 'PASS integrated native anchor suite (offline, stand-ins; not a candidate, not hardware-qualified)'

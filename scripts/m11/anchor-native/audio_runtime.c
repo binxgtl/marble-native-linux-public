@@ -38,6 +38,9 @@ struct m11_audio_runtime {
     struct helper helpers[2];
     m11_pid1_anchor *anchor;          /* sealed PID1 anchor (NULL before the bind) */
     pid_t spawner; unsigned long long spawner_start;
+    /* R2: msm_audio_ion (PID1's ION anchor) and msm_audio_ion_cma (never opened, no node). */
+    dev_t ion, ion_cma;
+    m11_pid1_anchor *ion_anchor;
 };
 static struct m11_audio_runtime runtime;
 static int attempted; /* Never reset, even after a failed acquire. */
@@ -101,6 +104,11 @@ static int no_device_fds(pid_t pid, dev_t device) {
     }
     closedir(d); return ok;
 }
+/* R2: no endpoint, ION or ION-CMA descriptor (the ION devices once bound). */
+static int no_audio_fds(const struct m11_audio_runtime *r, pid_t pid) {
+    return no_device_fds(pid,r->device) && (!r->ion || no_device_fds(pid,r->ion)) &&
+        (!r->ion_cma || no_device_fds(pid,r->ion_cma));
+}
 static int sandbox_status(const char *b) {
     /* Exact uid/gid and no ambient/permitted/effective/bounding privilege. */
     const char *required[]={"\nUid:\t65534\t65534\t65534\t65534\n",
@@ -124,7 +132,7 @@ static int helper_ok(struct m11_audio_runtime *r, unsigned role) {
         p.state!='Z' && p.state!='X' && !stat(path,&a) && !lstat(helper_path[role],&b) &&
         S_ISREG(b.st_mode) && b.st_uid==0 && !(b.st_mode&022) &&
         a.st_dev==h->dev && a.st_ino==h->ino && b.st_dev==h->dev && b.st_ino==h->ino &&
-        sandboxed(h->pid) && single_thread(h->pid) && no_device_fds(h->pid,r->device);
+        sandboxed(h->pid) && single_thread(h->pid) && no_audio_fds(r,h->pid);
 }
 static int initial_pid_status(const char *b) {
     /* ACK omits NSpid AND both pid namespace entries with CONFIG_PID_NS=n.
@@ -177,15 +185,21 @@ static int pid1_endpoint_fds_ok(const struct m11_audio_runtime *r) {
     }
     closedir(d);
     if (!ok || !r->device) return ok && !r->device;
-    const m11_pid1_anchor *a=r->anchor;
-    return !m11_census_pid1_endpoint(fds,rdevs,n,(unsigned long long)r->device,
-                                     a ? a->anchor_fd : -1, a ? a->guard_fd : -1);
+    const m11_pid1_anchor *a=r->anchor, *i=r->ion_anchor;
+    if (m11_census_pid1_endpoint(fds,rdevs,n,(unsigned long long)r->device,
+                                 a ? a->anchor_fd : -1, a ? a->guard_fd : -1)) return 0;
+    /* R2: the same rule for the ION device (exactly the ION anchor pair once attached, none
+     * before) and for its CMA twin (never any). */
+    if (r->ion && m11_census_pid1_endpoint(fds,rdevs,n,(unsigned long long)r->ion,
+                                           i ? i->anchor_fd : -1, i ? i->guard_fd : -1)) return 0;
+    if (r->ion_cma && m11_census_pid1_endpoint(fds,rdevs,n,(unsigned long long)r->ion_cma,-1,-1)) return 0;
+    return 1;
 }
 /* The spawner: PID1's direct child, unchanged since attach, one thread, no endpoint fd. */
 static int spawner_ok(const struct m11_audio_runtime *r) {
     struct process p;
     return r->spawner>1 && !process(r->spawner,&p) && p.ppid==r->parent && p.start==r->spawner_start &&
-        p.state!='Z' && p.state!='X' && single_thread(r->spawner) && no_device_fds(r->spawner,r->device);
+        p.state!='Z' && p.state!='X' && single_thread(r->spawner) && no_audio_fds(r,r->spawner);
 }
 static int census(struct m11_audio_runtime *r, int initial) {
     if (getpid()!=1 || geteuid()!=0 || !single_thread(1) || !pid1_endpoint_fds_ok(r)) return -1;
@@ -261,6 +275,30 @@ int m11_audio_bind_endpoint(struct m11_audio_runtime *r, dev_t device) {
         invalidate(r,M11_PD_IO); return -1;
     }
     r->device=device; r->status.endpoint_device=(uint64_t)device;
+    if (census(r,0)) { invalidate(r,M11_PD_IO); return -1; }
+    return 0;
+}
+/* R2: like the endpoint bind, for /dev/msm_audio_ion (made by PID1, root 0600, one link); the CMA
+ * twin is identified through sysfs only and must have no node at all. After the endpoint bind and
+ * before PDR start; both device numbers then enter every census. */
+static int sysfs_devname(dev_t device, const char *line) {
+    char path[128], b[4096];
+    snprintf(path,sizeof(path),"/sys/dev/char/%u:%u/uevent",major(device),minor(device));
+    return !text(path,b,sizeof(b)) && strstr(b,line);
+}
+int m11_audio_bind_ion(struct m11_audio_runtime *r, dev_t ion, dev_t ion_cma) {
+    if (!valid(r) || !r->device || r->ion || r->status.retired || !ion || !ion_cma || ion==ion_cma ||
+        ion==r->device || ion_cma==r->device || r->status.pd_started || r->status.admitted ||
+        r->status.poisoned || r->anchor) return -1;
+    struct stat st; struct statfs fs;
+    if (statfs("/sys",&fs) || fs.f_type!=SYSFS_MAGIC ||
+        !sysfs_devname(ion,"DEVNAME=msm_audio_ion\n") || !sysfs_devname(ion_cma,"DEVNAME=msm_audio_ion_cma\n") ||
+        lstat("/dev/msm_audio_ion",&st) || !S_ISCHR(st.st_mode) || st.st_rdev!=ion ||
+        st.st_uid || st.st_gid || (st.st_mode&0777)!=0600 || st.st_nlink!=1 ||
+        !lstat("/dev/msm_audio_ion_cma",&st) || errno!=ENOENT) {
+        invalidate(r,M11_PD_IO); return -1;
+    }
+    r->ion=ion; r->ion_cma=ion_cma;
     if (census(r,0)) { invalidate(r,M11_PD_IO); return -1; }
     return 0;
 }
@@ -452,6 +490,11 @@ int m11_audio_admit(struct m11_gpr_session *s) {
         r->anchor->id.rdev!=(uint64_t)r->device) {
         invalidate(r,M11_PD_IO); return -1;
     }
+    /* R2: a bound ION device is admitted only as PID1's sealed ION anchor (no other holder). */
+    if (r->ion && (!r->ion_anchor || !r->ion_anchor->ops.close_pair || m11_anchor_check(r->ion_anchor) ||
+                   r->ion_anchor->id.rdev!=(uint64_t)r->ion)) {
+        invalidate(r,M11_PD_IO); return -1;
+    }
     s->exclusive_native_owner=1; s->service_down_fd=r->down[0];
     r->status.resources_quiescent=0; r->status.pd.resources_busy=1;
     return 0;
@@ -530,14 +573,21 @@ int m11_audio_attach_spawner(struct m11_audio_runtime *r, pid_t spawner) {
     if (!spawner_ok(r)) { r->spawner=0; invalidate(r,M11_PD_IO); return -1; }
     return 0;
 }
-int m11_audio_attach_anchor(struct m11_audio_runtime *r, m11_pid1_anchor *a) {
-    /* After a qualified PDR UP and before admission: the anchor replaces the worker's open. */
+int m11_audio_attach_anchors(struct m11_audio_runtime *r, m11_pid1_anchor *a, m11_pid1_anchor *ion) {
+    /* After a qualified PDR UP and before admission: the anchor replaces the worker's open. With
+     * a bound ION device both sealed anchors are attached together (each census needs both). */
     if (!valid(r) || r->anchor || !r->device || !r->status.pd_started || r->status.admitted ||
         r->status.retired || r->status.poisoned || !a || a->state!=M11_ANCHOR_HELD ||
         !a->ops.close_pair || a->id.rdev!=(uint64_t)r->device) return -1;
-    r->anchor=a;
+    if (!r->ion != !ion) return -1;
+    if (ion && (ion==a || ion->state!=M11_ANCHOR_HELD || !ion->ops.close_pair ||
+                ion->id.rdev!=(uint64_t)r->ion)) return -1;
+    r->anchor=a; r->ion_anchor=ion;
     if (census(r,0)) { invalidate(r,M11_PD_IO); return -1; }
     return 0;
+}
+int m11_audio_attach_anchor(struct m11_audio_runtime *r, m11_pid1_anchor *a) {
+    return m11_audio_attach_anchors(r,a,NULL);
 }
 int m11_audio_snapshot(const struct m11_audio_runtime *r, struct m11_audio_status *out) {
     if (!valid(r) || !out) return -1;

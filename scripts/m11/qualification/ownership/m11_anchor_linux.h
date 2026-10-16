@@ -5,7 +5,9 @@
  * it is bound to STAND-IN character devices only (/dev/ptmx, /dev/pts/ptmx, /dev/null, or a
  * private c 5:2 / c 1:3 node) and refuses every other path, including /dev/aud_pasthru_adsp and
  * /dev/msm_audio_ion. Only the native integration build (M11_ANCHOR_NATIVE) also admits the
- * exact path /dev/aud_pasthru_adsp; ION and ALSA paths stay refused in both builds.
+ * exact path /dev/aud_pasthru_adsp; ION and ALSA paths stay refused in both builds. The R2
+ * build (M11_ANCHOR_NATIVE plus M11_ANCHOR_NATIVE_ION) also admits /dev/msm_audio_ion for the
+ * PID1 ION anchor; /dev/msm_audio_ion_cma and ALSA paths stay refused in every build.
  */
 #include "m11_pid1_anchor.h"
 

@@ -35,6 +35,14 @@ int m11_anchor_owner_seal(m11_pid1_anchor *, const char *node);
  * remove the three job capabilities from the calling process (root only). */
 int m11_anchor_owner_filter(int anchor_fd, int guard_fd);
 int m11_anchor_owner_drop_job_caps(void);
+/* R2: one seal over up to M11_OWNER_MAX_PAIRS anchors (the GPR endpoint and /dev/msm_audio_ion),
+ * each held with guard == anchor + 1 and all four numbers distinct. Every reserved number gets the
+ * P3 protection above; the only permitted closes are close_range(anchor_i, guard_i, 0), one per
+ * pair. nodes[i] (NULL keeps it) is unlinked first. A process may be sealed once: a second filter
+ * would refuse the first filter's permitted close_range. 0 or -errno. */
+#define M11_OWNER_MAX_PAIRS 2u
+int m11_anchor_owner_seal_pairs(m11_pid1_anchor *const *anchors, const char *const *nodes, unsigned n);
+int m11_anchor_owner_filter_pairs(const int *anchor_fds, unsigned n);
 
 typedef struct { int sock, pid; bool dropped; } m11_spawner;
 /* Fork the spawner. As root it removes CAP_MKNOD, CAP_SYS_PTRACE and CAP_DAC_READ_SEARCH from

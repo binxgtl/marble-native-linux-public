@@ -132,6 +132,115 @@ int m11_anchor_owner_seal(m11_pid1_anchor *a, const char *node) {
     return rc ? rc : m11_anchor_check(a);
 }
 
+/* ------------------------------ the seal over two pairs (R2) ------------------------------ */
+/* Same rules as build(), with the reserved set {a_i, a_i + 1} of every pair. Jump offsets are
+ * relative (BPF: target = next instruction + offset); each block still ends in a return. */
+static void reserved_arg_set(struct prog *p, uint32_t nr, unsigned i, const uint32_t *r, unsigned k) {
+    JUMP(BPF_JMP|BPF_JEQ|BPF_K,nr,0,(uint8_t)(k+3));
+    STMT(BPF_LD|BPF_W|BPF_ABS,arg_lo(i));
+    for (unsigned j=0;j<k;j++) JUMP(BPF_JMP|BPF_JEQ|BPF_K,r[j],(uint8_t)(k-j),0);
+    STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW);
+    STMT(BPF_RET|BPF_K,RET_DENY);
+}
+static void build_pairs(struct prog *p, const uint32_t *a, unsigned n) {
+    uint32_t r[2*M11_OWNER_MAX_PAIRS]; unsigned k=0;
+    for (unsigned i=0;i<n;i++) { r[k++]=a[i]; r[k++]=a[i]+1; }
+    STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,arch));
+    JUMP(BPF_JMP|BPF_JEQ|BPF_K,OWNER_ARCH,1,0);
+    STMT(BPF_RET|BPF_K,SECCOMP_RET_KILL_PROCESS);
+    STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr));
+#if defined(__x86_64__)
+    JUMP(BPF_JMP|BPF_JGE|BPF_K,0x40000000u,0,1); /* x32 ABI aliases */
+    STMT(BPF_RET|BPF_K,SECCOMP_RET_KILL_PROCESS);
+    deny(p,__NR_mknod,EPERM);
+    reserved_arg_set(p,__NR_dup2,1,r,k);
+#endif
+    /* P2 */
+    deny(p,__NR_execve,EPERM); deny(p,__NR_execveat,EPERM);
+    /* P4 */
+    deny(p,__NR_sendmsg,EPERM); deny(p,__NR_sendmmsg,EPERM);
+    deny(p,__NR_io_uring_setup,EPERM); deny(p,__NR_io_uring_enter,EPERM); deny(p,__NR_io_uring_register,EPERM);
+    deny(p,__NR_pidfd_getfd,EPERM); deny(p,__NR_ptrace,EPERM);
+    deny(p,__NR_process_vm_readv,EPERM); deny(p,__NR_process_vm_writev,EPERM);
+    /* P5 (the owner itself) */
+    deny(p,__NR_mknodat,EPERM); deny(p,__NR_open_by_handle_at,EPERM);
+    /* P1 */
+    deny(p,__NR_clone3,ENOSYS);
+    JUMP(BPF_JMP|BPF_JEQ|BPF_K,__NR_clone,0,4);
+    STMT(BPF_LD|BPF_W|BPF_ABS,arg_lo(0));
+    JUMP(BPF_JMP|BPF_JSET|BPF_K,CLONE_FILES|CLONE_THREAD,1,0);
+    STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW);
+    STMT(BPF_RET|BPF_K,RET_DENY);
+    /* P3 */
+    reserved_arg_set(p,__NR_close,0,r,k);
+    reserved_arg_set(p,__NR_dup,0,r,k);
+    reserved_arg_set(p,__NR_dup3,1,r,k);
+    /* fcntl on a reserved number: F_DUPFD, F_DUPFD_CLOEXEC, F_SETFD and F_SETFL refused. */
+    JUMP(BPF_JMP|BPF_JEQ|BPF_K,__NR_fcntl,0,(uint8_t)(k+9));
+    STMT(BPF_LD|BPF_W|BPF_ABS,arg_lo(0));
+    for (unsigned j=0;j<k;j++) JUMP(BPF_JMP|BPF_JEQ|BPF_K,r[j],(uint8_t)(k-j),0);
+    STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW);
+    STMT(BPF_LD|BPF_W|BPF_ABS,arg_lo(1));
+    JUMP(BPF_JMP|BPF_JEQ|BPF_K,F_DUPFD,4,0);
+    JUMP(BPF_JMP|BPF_JEQ|BPF_K,F_DUPFD_CLOEXEC,3,0);
+    JUMP(BPF_JMP|BPF_JEQ|BPF_K,F_SETFD,2,0);
+    JUMP(BPF_JMP|BPF_JEQ|BPF_K,F_SETFL,1,0);
+    STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW);
+    STMT(BPF_RET|BPF_K,RET_DENY);
+    /* The only permitted closes of reserved numbers: close_range(a_i, a_i + 1, 0), one per pair.
+     * Every other close_range is refused (it could span a reserved number). */
+    JUMP(BPF_JMP|BPF_JEQ|BPF_K,__NR_close_range,0,(uint8_t)(7*n+1));
+    for (unsigned i=0;i<n;i++) {
+        STMT(BPF_LD|BPF_W|BPF_ABS,arg_lo(0));
+        JUMP(BPF_JMP|BPF_JEQ|BPF_K,a[i],0,5);
+        STMT(BPF_LD|BPF_W|BPF_ABS,arg_lo(1));
+        JUMP(BPF_JMP|BPF_JEQ|BPF_K,a[i]+1,0,(uint8_t)(7*(n-i)-4));
+        STMT(BPF_LD|BPF_W|BPF_ABS,arg_lo(2));
+        JUMP(BPF_JMP|BPF_JEQ|BPF_K,0,0,(uint8_t)(7*(n-i)-6));
+        STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW);
+    }
+    STMT(BPF_RET|BPF_K,RET_DENY);
+    STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW);
+}
+int m11_anchor_owner_filter_pairs(const int *anchor_fds, unsigned n) {
+    static struct prog p;
+    memset(&p,0,sizeof(p));
+    if (!anchor_fds || !n || n>M11_OWNER_MAX_PAIRS) return -EINVAL;
+    uint32_t a[M11_OWNER_MAX_PAIRS];
+    for (unsigned i=0;i<n;i++) {
+        if (anchor_fds[i]<0 || anchor_fds[i]==0x7fffffff) return -EINVAL;
+        for (unsigned j=0;j<i;j++) /* pairs may not overlap: {a, a+1} disjoint */
+            if (anchor_fds[i]<=anchor_fds[j]+1 && anchor_fds[j]<=anchor_fds[i]+1) return -EINVAL;
+        a[i]=(uint32_t)anchor_fds[i];
+    }
+    build_pairs(&p,a,n);
+    if (p.overflow) return -E2BIG;
+    struct sock_fprog fp={(unsigned short)p.n,p.f};
+    if (prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0)) return -errno;
+    return prctl(PR_SET_SECCOMP,SECCOMP_MODE_FILTER,&fp,0,0) ? -errno : 0;
+}
+int m11_anchor_owner_seal_pairs(m11_pid1_anchor *const *anchors, const char *const *nodes, unsigned n) {
+    if (!anchors || !n || n>M11_OWNER_MAX_PAIRS) return -EINVAL;
+    int fds[M11_OWNER_MAX_PAIRS];
+    for (unsigned i=0;i<n;i++) {
+        m11_pid1_anchor *a=anchors[i];
+        if (!a || a->state!=M11_ANCHOR_HELD || (a->latches & M11_ANCHOR_LATCH_REFUSE) ||
+            a->guard_fd!=a->anchor_fd+1 || a->ops.close_pair) return -EINVAL;
+        if (nodes && nodes[i] && !*nodes[i]) return -EINVAL;
+        if (!a->ops.self_pid || a->ops.self_pid(a->ops.ctx)!=a->owner_pid) return -EPERM;
+        for (unsigned j=0;j<i;j++) if (anchors[j]==a || anchors[j]->owner_pid!=a->owner_pid ||
+                                       anchors[j]->id.rdev==a->id.rdev) return -EINVAL;
+        fds[i]=a->anchor_fd;
+    }
+    for (unsigned i=0;i<n;i++) if (nodes && nodes[i] && unlink(nodes[i])) return -errno; /* P5 */
+    if (prctl(PR_SET_DUMPABLE,0,0,0,0)) return -errno;
+    int rc=m11_anchor_owner_filter_pairs(fds,n);
+    if (rc) return rc;
+    for (unsigned i=0;i<n;i++) anchors[i]->ops.close_pair=close_pair;
+    for (unsigned i=0;i<n;i++) if ((rc=m11_anchor_check(anchors[i]))) return rc;
+    return 0;
+}
+
 /* ----------------------------------- the spawner ----------------------------------- */
 #define SPAWN_ARG 160u
 struct request { uint32_t index, deadline_ms, flags; char arg[SPAWN_ARG]; };
