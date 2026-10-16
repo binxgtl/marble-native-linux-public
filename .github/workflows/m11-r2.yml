@@ -1,7 +1,8 @@
-name: M11 R2 offline (journal stamp fix, anchor-native suites)
+name: M11 R2 offline (journal stamp fix, anchor-native suites, graph plan)
 # Offline only, on x64 and native ARM64: the integrated anchor suite (runner control flow, PDR
 # model, census, stand-in GET_SPF_STATE, the Run22 journal-stamp fix through the real journal.sh
-# with BusyBox and the unmodified evidence rule, mutants) and the anchor qualification suite.
+# with BusyBox and the unmodified evidence rule, mutants), the anchor qualification suite and the
+# synthetic AudioReach graph-plan parser tests.
 # No candidate, no device, driver, firmware, ROM payload or proprietary module.
 on:
   workflow_dispatch:
@@ -12,6 +13,7 @@ on:
       - 'scripts/m11/qualification/ownership/**'
       - 'scripts/m11/instrumentation/**'
       - 'scripts/m11/runtime/**'
+      - 'scripts/m11/r2/**'
       - '.github/workflows/m11-r2.yml'
 permissions:
   contents: read
@@ -38,6 +40,12 @@ jobs:
       - name: Anchor qualification suite
         if: always()
         run: bash scripts/m11/qualification/ownership/run_anchor_tests.sh artifacts/m11/r2/anchor
+      - name: AudioReach graph-plan parser (synthetic ACDB/XML only)
+        if: always()
+        run: |
+          mkdir -p artifacts/m11/r2/graph-plan
+          (cd scripts/m11/r2 && python3 test_graph_plan.py -v) 2>&1 | tee artifacts/m11/r2/graph-plan/test.log
+          test "${PIPESTATUS[0]}" -eq 0
       - uses: actions/upload-artifact@v4
         if: always()
         with:
