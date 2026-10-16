@@ -77,7 +77,7 @@ for mode in gcc clang sanitize; do
   # -Werror=unused-function cannot mask the mutant.)
   nmutant no-amp-gate 'if (amp_gate()) hold(' '    if (0 && amp_gate()) hold("mutant");' 'gate>=0 && gate<spawn'
   nmutant amp-gate-ignored 'return strcmp(result,"switches-disabled' '    return 0;' 'spawn<0 && bind<0'
-  nmutant no-fatal-record 'kmsg_line(b,strlen(b));' '' 'fatal_logged'
+  nmutant no-fatal-record 'kmsg_line(b,strlen(b));' '    (void)b;' 'fatal_logged'
   nmutant no-anchor-crumb 'crumb("anchor_bind");' '' 'last_crumb(),"anchor_bind"'
   nmutant no-seal 'm11_anchor_owner_seal(&anchor,"/dev/aud_pasthru_adsp")' '' 'a==&anchor && sealed'
   nmutant no-final-close 'if (!pdrc && m11_anchor_final_close(&anchor))' '' 'fin>=0 && fin<stop'
