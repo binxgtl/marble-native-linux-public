@@ -177,7 +177,19 @@ ssize_t __wrap_recvfrom(int fd, void *b, size_t cap, int flags, struct sockaddr 
 }
 static int fake_close_pair(void *ctx, int a, int g) { (void)ctx; (void)a; (void)g; return 0; }
 static m11_pid1_anchor fake_anchor;
-#define CHECK(cond, what) do { if (!(cond)) { printf("FAIL %s: %s (line %d)\n", what, #cond, __LINE__); abort(); } } while (0)
+static void dump(void) {
+    const struct m11_pd *p=&runtime.status.pd;
+    printf("STATE phase=%d fault=%d invalid=%d peer=%d node=%u port=%u registered=%d register_txn=%u ack_txn=%u "
+           "ack_deferred=%d count=%u poisoned=%d pd_started=%d qrtr=%d bound_port=%u sends_ok=%u refused=%u "
+           "lookups=%u registers=%u unregisters=%u acks=%u q=%u/%u\n",
+           (int)p->phase,(int)p->fault,p->invalid,p->peer,p->node,p->port,p->registered,(unsigned)p->register_txn,
+           (unsigned)p->ack_txn,p->ack_deferred,p->count,runtime.status.poisoned,runtime.status.pd_started,runtime.qrtr,
+           bound_port,sends_ok,sends_refused,lookups,registers,unregisters,acks,q_head,q_tail);
+    for (unsigned i=0;i<p->count && i<12;i++)
+        printf("  record %u tx=%u node=%u port=%u size=%u rc=%d first=%02x\n",i,p->records[i].tx,p->records[i].node,
+               p->records[i].port,p->records[i].size,p->records[i].rc,p->records[i].size?p->records[i].bytes[0]:0);
+}
+#define CHECK(cond, what) do { if (!(cond)) { printf("FAIL %s: %s (line %d)\n", what, #cond, __LINE__); dump(); abort(); } } while (0)
 static void owner(unsigned flags) {
     attempted=fail_mode=listed=ready=unreg_reply=0;
     memset(fd_mode,0,sizeof(fd_mode)); memset(&runtime,0,sizeof(runtime));
