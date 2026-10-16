@@ -396,11 +396,19 @@ int m11_audio_start_pd(struct m11_audio_runtime *r, unsigned int budget_ms) {
         !r->helpers[M11_AUDIO_LOCATOR].pid || census(r,0)) return -1;
     r->status.pd_started=1;
     r->qrtr=socket(AF_QIPCRTR,SOCK_DGRAM|SOCK_NONBLOCK|SOCK_CLOEXEC,0);
-    struct sockaddr_qrtr a={.sq_family=AF_QIPCRTR}; socklen_t len=sizeof(a); uint64_t now;
-    if (r->qrtr<0 || bind(r->qrtr,(struct sockaddr *)&a,sizeof(a)) ||
-        getsockname(r->qrtr,(struct sockaddr *)&a,&len) || len!=sizeof(a) || a.sq_family!=AF_QIPCRTR || ns(&now)) {
-        invalidate(r,M11_PD_IO); return -1;
+    /* qrtr_bind() refuses any sq_node other than the socket's own node (pinned ACK
+     * net/qrtr/af_qrtr.c:816; qrtr_create sets it to qrtr_local_nid, :1261). Run21 bound node 0
+     * and got -EINVAL: read the own address first, then bind port 0 (assigned) on that node. */
+    struct sockaddr_qrtr a; socklen_t len=sizeof(a); uint64_t now=0; memset(&a,0,sizeof(a));
+    int ok=r->qrtr>=0 && !getsockname(r->qrtr,(struct sockaddr *)&a,&len) && len==sizeof(a) &&
+        a.sq_family==AF_QIPCRTR;
+    if (ok) {
+        a.sq_port=0; len=sizeof(a);
+        ok=!bind(r->qrtr,(struct sockaddr *)&a,sizeof(a)) &&
+           !getsockname(r->qrtr,(struct sockaddr *)&a,&len) && len==sizeof(a) &&
+           a.sq_family==AF_QIPCRTR && a.sq_port && !ns(&now);
     }
+    if (!ok) { invalidate(r,M11_PD_IO); return -1; }
     uint64_t until=now+(uint64_t)budget_ms*1000000u;
     /* Includes startup + maximum4s query + cleanup headroom; fixed one-shot. */
     if (m11_pd_begin(&r->status.pd,a.sq_node,a.sq_port,now,now+10000000000ULL,send_qrtr,r)) {
@@ -479,6 +487,14 @@ int m11_audio_retire(struct m11_audio_runtime *r) {
     if (r->down[1]>=0) { close(r->down[1]); r->down[1]=-1; }
     r->down_latched=1;
     if (!r->status.pd_started || r->qrtr<0) return -1;
+    if (!r->status.pd.send) {
+        /* m11_pd_begin never ran (PDR start failed before it): no lookup, registration or ACK
+         * was ever sent, so nothing needs unregistering, and m11_pd_stop would call the NULL
+         * send hook (Run21: PID1 SIGSEGV at address 0). Close the socket only. */
+        int cr=close(r->qrtr); r->qrtr=-1;
+        r->status.notifier_cleanup_complete=cr==0;
+        return cr==0?0:-1;
+    }
     uint64_t now; if (ns(&now)) return -1; uint64_t until=now+2000000000ULL;
     int rc=-1;
     while (!ns(&now) && now<until) {

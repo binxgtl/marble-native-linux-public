@@ -93,6 +93,20 @@ for mode in gcc clang sanitize; do
     build test-runner "$out/test-runner-$mode"
     "$out/test-runner-$mode" | tee "$out/test-runner-$mode.log"
   fi
+  # Run21 hardware failure, offline: the frozen runtime binds QRTR node 0 (refused, :816),
+  # fails before m11_pd_begin, and retire then calls the NULL send hook (PID1 SIGSEGV at 0).
+  pdr_wrap=()
+  for w in getpid geteuid open openat close read statfs fstatfs fstat flock fcntl opendir readdir closedir stat lstat pipe2 recvfrom sendto socket bind getsockname; do
+    pdr_wrap+=("-Wl,--wrap=$w")
+  done
+  "$cc" "${flags[@]}" -DRUNTIME_ORIGINAL -I "$rt" "$here/test-pdr.c" "$rt/audio_pd.c" "${pdr_wrap[@]}" -o "$out/test-pdr-original-$mode"
+  set +e; "$out/test-pdr-original-$mode" > "$out/test-pdr-original-$mode.log" 2>&1; rc=$?; set -e
+  if [[ "$rc" == 0 ]] || ! grep -q '^REPRO Run21' "$out/test-pdr-original-$mode.log" || grep -q UNEXPECTED "$out/test-pdr-original-$mode.log"; then
+    echo "ERROR: the frozen runtime did not reproduce the Run21 PDR crash (rc=$rc)" >&2; cat "$out/test-pdr-original-$mode.log" >&2; exit 1
+  fi
+  echo "PASS frozen runtime reproduces Run21 offline ($mode): bind(node 0) refused, retire faults (rc=$rc)"
+  "$cc" "${flags[@]}" -I "$here" -I "$rt" -I "$own" "$here/test-pdr.c" "$rt/audio_pd.c" "${anchor[@]}" "${pdr_wrap[@]}" -o "$out/test-pdr-$mode"
+  "$out/test-pdr-$mode" | tee "$out/test-pdr-$mode.log"
   build test-census "$out/test-census-$mode"
   "$out/test-census-$mode" | tee "$out/test-census-$mode.log"
   build test-query "$out/test-query-$mode"
