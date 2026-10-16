@@ -227,10 +227,13 @@ int m11_spawner_start(m11_spawner *s, const char *const *const *commands, unsign
         _exit(0);
     }
     close(sv[1]); close(ready[1]);
-    char ok=0; ssize_t got;
+    char ok=0, extra; ssize_t got, eof;
     do { got=read(ready[0],&ok,1); } while (got<0 && errno==EINTR);
+    /* Then EOF: the child has closed its last inherited fd (ready[1]) and its fd table is
+     * final, so a census of it cannot race a close. */
+    do { eof=read(ready[0],&extra,1); } while (eof<0 && errno==EINTR);
     close(ready[0]);
-    if (got!=1 || !ok) {
+    if (got!=1 || !ok || eof!=0) {
         close(sv[0]); (void)kill(pid,SIGKILL); (void)waitpid(pid,NULL,0); return -EPERM;
     }
     *s=(m11_spawner){sv[0],pid,root};
