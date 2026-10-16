@@ -1,0 +1,48 @@
+name: M11 R2 offline (journal stamp fix, anchor-native suites)
+# Offline only, on x64 and native ARM64: the integrated anchor suite (runner control flow, PDR
+# model, census, stand-in GET_SPF_STATE, the Run22 journal-stamp fix through the real journal.sh
+# with BusyBox and the unmodified evidence rule, mutants) and the anchor qualification suite.
+# No candidate, no device, driver, firmware, ROM payload or proprietary module.
+on:
+  workflow_dispatch:
+  push:
+    branches: [m11/r2-ion-ownership]
+    paths:
+      - 'scripts/m11/anchor-native/**'
+      - 'scripts/m11/qualification/ownership/**'
+      - 'scripts/m11/instrumentation/**'
+      - 'scripts/m11/runtime/**'
+      - '.github/workflows/m11-r2.yml'
+permissions:
+  contents: read
+jobs:
+  suites:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang busybox
+          gcc --version | head -1; clang --version | head -1; busybox | head -1; uname -m
+      - name: Evidence rule tests
+        run: (cd scripts/m11/instrumentation && python3 test-evidence.py)
+      - name: Integrated anchor suite (incl. journal stamp end to end)
+        if: always()
+        run: bash scripts/m11/anchor-native/test.sh artifacts/m11/r2/anchor-native
+      - name: Anchor qualification suite
+        if: always()
+        run: bash scripts/m11/qualification/ownership/run_anchor_tests.sh artifacts/m11/r2/anchor
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: r2-suites-${{ runner.arch }}-${{ github.sha }}
+          path: |
+            artifacts/m11/r2/**/*.log
+            artifacts/m11/r2/**/*.txt
+            artifacts/m11/r2/**/*.sha256
