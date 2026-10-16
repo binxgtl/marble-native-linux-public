@@ -88,7 +88,7 @@ int __wrap_pipe2(int fds[2], int flags) { (void)flags; fds[0]=903; fds[1]=904; r
  * port for port 0. Never a real socket. */
 #define LOCAL_NID 1u
 #define ASSIGNED_PORT 0x4001u
-static unsigned bound_port, bind_calls, bind_node, sends, first_cmd, first_port, force_bind_fail;
+static unsigned bound_port, bind_calls, bind_node, sends, first_cmd, first_port, force_bind_fail, recvs;
 int __wrap_socket(int domain, int type, int protocol) {
     assert(domain==AF_QIPCRTR && (type&SOCK_DGRAM) && !protocol); bound_port=0; return 905;
 }
@@ -105,7 +105,7 @@ int __wrap_getsockname(int fd, struct sockaddr *addr, socklen_t *len) {
     *len=sizeof(*a); return 0;
 }
 ssize_t __wrap_recvfrom(int fd, void *b, size_t cap, int flags, struct sockaddr *addr, socklen_t *len) {
-    (void)fd; (void)b; (void)cap; (void)flags; (void)addr; (void)len; errno=EAGAIN; return -1;
+    (void)fd; (void)b; (void)cap; (void)flags; (void)addr; (void)len; recvs++; errno=EAGAIN; return -1;
 }
 ssize_t __wrap_sendto(int fd, const void *b, size_t n, int flags, const struct sockaddr *addr, socklen_t len) {
     const struct sockaddr_qrtr *a=(const void *)addr; const unsigned char *p=b;
@@ -117,7 +117,7 @@ ssize_t __wrap_sendto(int fd, const void *b, size_t n, int flags, const struct s
 static void setup(void) {
     attempted=fail_mode=listed=ready=unreg_reply=0;
     memset(fd_mode,0,sizeof(fd_mode)); memset(&runtime,0,sizeof(runtime));
-    bound_port=bind_calls=bind_node=sends=first_cmd=first_port=force_bind_fail=0;
+    bound_port=bind_calls=bind_node=sends=first_cmd=first_port=force_bind_fail=recvs=0;
     assert(!ns(&fixture_now));
 }
 static void owner(void) {
@@ -145,6 +145,7 @@ int main(void) {
     assert(rc==-1 && bind_calls==1 && bind_node==LOCAL_NID && runtime.status.pd.send &&
            runtime.status.pd.local_node==LOCAL_NID && runtime.status.pd.local_port==ASSIGNED_PORT);
     assert(sends>=1 && first_cmd==10 && first_port==QRTR_PORT_CTRL);
+    assert(recvs>=1); /* the runtime polled through the modelled socket, not a real syscall */
     assert(!m11_audio_retire(&runtime) && runtime.status.notifier_cleanup_complete && runtime.qrtr<0);
     puts("PASS PDR start binds the socket's own QRTR node and sends the locator lookup; retire after a begun start unregisters");
     /* A start that fails before m11_pd_begin leaves send NULL: retire must only close. */
