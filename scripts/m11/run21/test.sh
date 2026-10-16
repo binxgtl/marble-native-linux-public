@@ -53,7 +53,7 @@ nmutant() { # name old new expect: a runner.c mutant must fail the control-flow 
   mutate runner.c "$old" "$new" "$dir"
   cp "$here/test-runner.c" "$dir/test-runner.c"
   build test-runner "$out/mutant-$name-$mode.bin" test-runner.c "$dir/test-runner.c"
-  if "$out/mutant-$name-$mode.bin" > "$out/mutant-$name-$mode.log" 2>&1; then
+  if timeout 120 "$out/mutant-$name-$mode.bin" > "$out/mutant-$name-$mode.log" 2>&1; then
     echo "ERROR: Run21 suite did not detect mutant $name" >&2; exit 1
   fi
   grep -m1 -F -- "$expect" "$out/mutant-$name-$mode.log"
@@ -72,7 +72,7 @@ for mode in gcc clang sanitize; do
   # The control-flow test longjmps out of wrapped syscalls and a signal handler; no sanitizers.
   [[ "$mode" == sanitize ]] && continue
   build test-runner "$out/test-runner-$mode"
-  "$out/test-runner-$mode" | tee "$out/test-runner-$mode.log"
+  timeout 300 "$out/test-runner-$mode" | tee "$out/test-runner-$mode.log"
   # (awk -v expands backslash escapes: patterns avoid them; the gate stays referenced so
   # -Werror=unused-function cannot mask the mutant.)
   nmutant no-amp-gate 'if (amp_gate()) hold(' '    if (0 && amp_gate()) hold("mutant");' 'gate>=0 && gate<spawn'

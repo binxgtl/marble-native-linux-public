@@ -31,6 +31,13 @@ static int crumb_at(const char *name) {
     for (unsigned i=0;i<ncrumbs;i++) if (!strcmp(crumbs_seen[i],name)) return (int)i;
     return -1;
 }
+/* candidate_main installs PID1 fatal-signal hold handlers (getpid is wrapped to 1); restore the
+ * default actions before any test assertion so a failing assert aborts instead of looping. */
+static void default_fatal(void) {
+    static const int sigs[]={SIGSEGV,SIGBUS,SIGILL,SIGFPE,SIGABRT,SIGSYS,SIGTRAP};
+    struct sigaction d; memset(&d,0,sizeof(d)); d.sa_handler=SIG_DFL;
+    for (unsigned i=0;i<sizeof(sigs)/sizeof(*sigs);i++) (void)sigaction(sigs[i],&d,NULL);
+}
 static const char *last_crumb(void) { return ncrumbs ? crumbs_seen[ncrumbs-1] : ""; }
 
 /* ------------------------------- syscall boundaries ------------------------------- */
@@ -187,7 +194,8 @@ int main(void) {
         ncrumbs=0; fatal_logged=0; jobs_reaped=0;
         sigset_t none; sigemptyset(&none); sigprocmask(SIG_SETMASK,&none,NULL); /* after a handler longjmp */
         memset(&result,0,sizeof(result)); memset(&anchor,0,sizeof(anchor)); memset(&spawner,0,sizeof(spawner));
-        if (!setjmp(escape)) { candidate_main(1,NULL); assert(0); }
+        if (!setjmp(escape)) { candidate_main(1,NULL); default_fatal(); assert(0); }
+        default_fatal(); /* the runner's PID1 fatal-signal hold must not swallow test assertions */
         assert(held!=booted && !forks_after_seal);           /* PID1 never forks/execs after the seal */
         int spawn=at("spawner_start"), bind=at("bind_endpoint"), anch=at("anchor_bind"), seal=at("seal");
         int query=at("query"), fin=at("final_close"), retire=at("retire"), stop=at("spawn:stop_adsp");
