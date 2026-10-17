@@ -141,6 +141,49 @@ gtn_mutant close-in-detach 'never closed here' '    (void)close(fd);' \
 gtn_mutant no-held-check 'a->state != M11_ANCHOR_HELD' '    if (!a || a->anchor_fd < 0) {' \
   'm11_gpr_engine_open(&r.eng) == -EBADF' \
   'PASS peer EOF and a write after hangup are transport errors (-EPIPE), not timeouts'
+# G3: the native shmem backend against fixture syscalls (memfd dma-bufs, a recorded ION fd list),
+# then the REAL region manager and engine over the G2 transport with a SEQPACKET peer answering
+# MAP/UNMAP (no device, no driver; the ION ioctl numbers reach only the fixture).
+g3_srcs=("${tc_srcs[@]}" "$here/gpr_transport_native.c" "$here/shmem_backend_native.c" "$here/test-shmem-backend-native.c")
+for cm_cc in gcc clang; do
+  "$cm_cc" "${cm_flags[@]}" "${g3_srcs[@]}" -o "$out/shmem-backend-native-$cm_cc"
+  timeout 120 "$out/shmem-backend-native-$cm_cc" | tee "$out/shmem-backend-native-$cm_cc.log"
+done
+gcc "${cm_flags[@]}" -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer \
+  "${g3_srcs[@]}" -o "$out/shmem-backend-native-sanitize"
+timeout 120 "$out/shmem-backend-native-sanitize" | tee "$out/shmem-backend-native-sanitize.log"
+if gcc -std=c11 -DM11_ANCHOR_NATIVE -I "$own" -I "$repair" -c "$here/shmem_backend_native.c" -o "$out/sbn-refused.o" 2>/dev/null; then
+  echo "ERROR: shmem_backend_native compiled outside M11_CUSTODIAN_NATIVE" >&2; exit 1
+fi
+echo 'PASS G3 shmem backend (gcc, clang, ASan+UBSan) and refused outside M11_CUSTODIAN_NATIVE'
+g3_mutant() { # name pattern replacement assertion last-pass (same detection rule as gtn_mutant)
+  local name="$1" pat="$2" rep="$3" want="$4" last="$5" dir="$out/sbn-mutant-$1" rc=0 got
+  mkdir -p "$dir"
+  awk -v pat="$pat" -v rep="$rep" 'index($0,pat){n++; print rep; next} {print} END{if(n!=1) exit 3}' \
+    "$here/shmem_backend_native.c" > "$dir/shmem_backend_native.c"
+  cp "$here/shmem_backend_native.h" "$dir/"
+  gcc "${cm_flags[@]}" -I "$dir" "${tc_srcs[@]}" "$here/gpr_transport_native.c" "$dir/shmem_backend_native.c" \
+    "$here/test-shmem-backend-native.c" -o "$dir/bin"
+  timeout 120 "$dir/bin" > "$dir/log" 2>&1 || rc=$?
+  got="$(grep '^PASS ' "$dir/log" | tail -n1 || true)"
+  if [[ "$rc" != 134 ]] || ! grep -qF -- "Assertion \`$want' failed" "$dir/log" || [[ "$got" != "$last" ]]; then
+    echo "ERROR: G3 mutant $name not detected for the expected reason (rc=$rc, last PASS: '${got}')" >&2
+    cat "$dir/log" >&2; exit 1
+  fi
+  echo "PASS G3 test detects mutant $name: Assertion \`$want'"
+}
+g3_mutant hyp-allowed 'never issues 0x4004616D' '    (void)hyp_assign;' \
+  'b.ion_import_fd_fn(b.user, fd, true) == -EPERM' \
+  'PASS alloc/mmap/sync/import/unimport/munmap/close round trip on a memfd-backed fixture'
+g3_mutant close-while-busy 'if (b->vaddr || b->imported) { l->refused++; return -EBUSY; }' '    (void)0;' \
+  'b.close_fd_fn(b.user, fd) == -EBUSY && fd_open(fd)' \
+  'PASS foreign fd numbers refused before any syscall'
+g3_mutant no-ion-anchor-check 'a->state != M11_ANCHOR_HELD' '    if (!a || a->anchor_fd < 0) {' \
+  'b.ion_unmap_fd_fn(b.user, fd, false) == -EBADF' \
+  'PASS close refused while mmapped or imported'
+g3_mutant close-error-surfaced 'l->close_errors++; l->last_close_errno = errno;' '    if (l->sys->close_fn(fd) < 0) return -errno;' \
+  'b.close_fd_fn(b.user, fd) == 0' \
+  'PASS ION I/O refused unless the ION anchor is HELD by this process'
 
 # Unit -> sources it is built from, for the mutants below.
 build() { # name output [file-to-replace replacement-path]
