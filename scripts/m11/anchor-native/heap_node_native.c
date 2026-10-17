@@ -151,7 +151,7 @@ int m11_census_pid1_heap(const int *fds, const unsigned long long *rdevs, unsign
 int m11_heap_census_pid(pid_t pid, dev_t rdev, int heap_fd) {
     int fds[MAX_SCAN_FDS];
     unsigned long long rdevs[MAX_SCAN_FDS];
-    char path[64], item[96];
+    char path[64], item[64 + 256 + 8]; /* path + d_name[256] */
     snprintf(path, sizeof path, "/proc/%ld/fd", (long)pid);
     DIR *d = opendir(path);
     if (!d) return -1;
