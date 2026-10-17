@@ -280,7 +280,9 @@ static int find_opt(const char *cl, const char *key, char *out, size_t cap) {
         while (*p && *p!=' ' && *p!='\t' && *p!='\n') p++;
         if ((size_t)(p-tok)>kl && !strncmp(tok,key,kl) && tok[kl]=='=') {
             const char *v=tok+kl+1; size_t vl=(size_t)(p-v);
-            if (vl>=cap) vl=cap-1; memcpy(out,v,vl); out[vl]=0; return 1;
+            if (vl>=cap) vl=cap-1;
+            memcpy(out,v,vl); out[vl]=0;
+            return 1;
         }
     }
     return 0;
