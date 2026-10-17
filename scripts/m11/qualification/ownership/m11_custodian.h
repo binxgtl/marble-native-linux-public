@@ -1,8 +1,20 @@
 #ifndef M11_OFFLINE_CUSTODIAN_H
 #define M11_OFFLINE_CUSTODIAN_H
-/* Qualification ONLY. No real endpoint, DMA allocator, PID1 or recovery adapter. */
-#ifndef M11_OWNERSHIP_OFFLINE
-#error "Custodian requires explicitly offline qualification; device integration is BLOCKED"
+/* Two build modes, exactly one required:
+ *  M11_OWNERSHIP_OFFLINE  qualification against the mock engine and backends (every existing test);
+ *  M11_CUSTODIAN_NATIVE   the reviewed native integration build (docs/m11-custodian-native-integration.md,
+ *                         G1). It only selects the build: this header links no native backend, it
+ *                         requires the anchor-native build (M11_ANCHOR_NATIVE), and no never-mapped
+ *                         candidate may define it (anchor-native/test.sh checks the candidate builds).
+ * Neither or both: refused. No real endpoint, DMA allocator, PID1 or recovery adapter here. */
+#if defined(M11_OWNERSHIP_OFFLINE) && defined(M11_CUSTODIAN_NATIVE)
+#error "Custodian: M11_OWNERSHIP_OFFLINE and M11_CUSTODIAN_NATIVE are mutually exclusive"
+#endif
+#if defined(M11_CUSTODIAN_NATIVE) && !defined(M11_ANCHOR_NATIVE)
+#error "Custodian: M11_CUSTODIAN_NATIVE requires the anchor-native build (M11_ANCHOR_NATIVE)"
+#endif
+#if !defined(M11_OWNERSHIP_OFFLINE) && !defined(M11_CUSTODIAN_NATIVE)
+#error "Custodian requires M11_OWNERSHIP_OFFLINE or the reviewed M11_CUSTODIAN_NATIVE build; device integration is BLOCKED"
 #endif
 #include "../runtime-repair/m11_shmem.h"
 #include "../runtime-repair/m11_apm_protocol.h"

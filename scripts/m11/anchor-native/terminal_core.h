@@ -18,8 +18,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#if defined(M11_OWNERSHIP_OFFLINE)
-/* Offline (cross-check) build: reuse the custodian's real ledger and enums verbatim. */
+#if defined(M11_OWNERSHIP_OFFLINE) || defined(M11_CUSTODIAN_NATIVE)
+/* Offline (cross-check) and native-custodian builds: reuse the custodian's real ledger and enums. */
 #include "../qualification/ownership/m11_custodian.h"
 #else
 /* Native build: mirror m11_custodian.h's ledger/adsp_state/taints EXACTLY. Any edit here

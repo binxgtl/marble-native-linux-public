@@ -37,7 +37,8 @@
 #if !defined(M11_OWNERSHIP_OFFLINE) && !defined(M11_ANCHOR_NATIVE)
 #error "PID1 anchor adapter requires explicitly offline qualification; device integration is BLOCKED"
 #endif
-#if defined(M11_OWNERSHIP_OFFLINE)
+#if defined(M11_OWNERSHIP_OFFLINE) || defined(M11_CUSTODIAN_NATIVE)
+/* The custodian's own definition (the native custodian build shares it: one enum per program). */
 #include "m11_custodian.h"
 #else
 /* Same names and values as m11_custodian.h (anchor-native/test.sh compares both builds). */

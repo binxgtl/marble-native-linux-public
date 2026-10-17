@@ -74,6 +74,36 @@ if "$tc_mut/bin" > "$tc_mut/log" 2>&1; then
   echo "ERROR: cross-check did not detect a diverging terminal core" >&2; exit 1
 fi
 echo 'PASS cross-check detects a diverging terminal core'
+# G1 (docs/m11-custodian-native-integration.md): the reviewed M11_CUSTODIAN_NATIVE build mode. It
+# selects the build only (no native backend yet); custodian, anchor and terminal core share one
+# terminal enum and one boot ledger.
+cm_flags=(-std=c11 -O1 -Wall -Wextra -Werror -DM11_ANCHOR_NATIVE -DM11_CUSTODIAN_NATIVE -I "$own" -I "$repair" -I "$here")
+tc_srcs=(); for u in "${tc_units[@]}"; do tc_srcs+=("$repair/$u.c"); done
+for cm_cc in gcc clang; do
+  "$cm_cc" "${cm_flags[@]}" "${tc_srcs[@]}" "$own/m11_custodian.c" "$here/terminal_core.c" "$here/test-custodian-mode.c" -o "$out/custodian-mode-$cm_cc"
+  "$out/custodian-mode-$cm_cc" | tee "$out/custodian-mode-$cm_cc.log"
+  head -n 1 "$out/custodian-mode-$cm_cc.log" | cmp - "$out/enum-offline.txt"
+done
+echo 'PASS M11_CUSTODIAN_NATIVE builds and links (one enum and ledger; enum identical to the offline build)'
+custodian_refused() { # label flags...: compiling m11_custodian.c with these flags must fail
+  local label="$1"; shift
+  if gcc -std=c11 "$@" -I "$own" -I "$repair" -c "$own/m11_custodian.c" -o "$out/custodian-refused.o" 2> "$out/custodian-refused-$label.txt"; then
+    echo "ERROR: custodian compiled with $label" >&2; exit 1
+  fi
+}
+custodian_refused no-mode
+grep -qF 'device integration is BLOCKED' "$out/custodian-refused-no-mode.txt"
+custodian_refused native-without-anchor -DM11_CUSTODIAN_NATIVE
+custodian_refused offline-and-native -DM11_OWNERSHIP_OFFLINE -DM11_CUSTODIAN_NATIVE -DM11_ANCHOR_NATIVE
+custodian_refused anchor-native-alone -DM11_ANCHOR_NATIVE
+echo 'PASS custodian refused with no mode, native without anchor-native, both modes, or anchor-native alone'
+# No never-mapped candidate build may select the native custodian.
+for f in "$root"/scripts/m11/run2[0-4]/build.sh "$root"/scripts/m11/run2[0-4]/stage.py "$here/runner.c"; do
+  if [[ -f "$f" ]] && grep -qF M11_CUSTODIAN_NATIVE "$f"; then
+    echo "ERROR: candidate input $f selects M11_CUSTODIAN_NATIVE" >&2; exit 1
+  fi
+done
+echo 'PASS no candidate build input (run20-run24 build.sh/stage.py, anchor-native runner) selects M11_CUSTODIAN_NATIVE'
 
 # Unit -> sources it is built from, for the mutants below.
 build() { # name output [file-to-replace replacement-path]
