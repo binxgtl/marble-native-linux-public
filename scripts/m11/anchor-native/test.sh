@@ -184,6 +184,66 @@ g3_mutant no-ion-anchor-check 'a->state != M11_ANCHOR_HELD' '    if (!a || a->an
 g3_mutant close-error-surfaced 'l->close_errors++; l->last_close_errno = errno;' '    if (l->sys->close_fn(fd) < 0) return -errno;' \
   'b.close_fd_fn(b.user, fd) == 0' \
   'PASS ION I/O refused unless the ION anchor is HELD by this process'
+# G4: PID1's /dev/dma_heap/system node over a fake sysfs/procfs tree and a scratch /dev directory
+# (no dma-heap driver). Unprivileged it covers metadata, census and every refusal; as root (sudo)
+# it makes a real character node carrying /dev/full's number as the heap stand-in.
+g4_srcs=("$here/heap_node_native.c" "$here/test-heap-node-native.c")
+for cm_cc in gcc clang; do
+  "$cm_cc" "${cm_flags[@]}" "${g4_srcs[@]}" -o "$out/heap-node-native-$cm_cc"
+  timeout 120 "$out/heap-node-native-$cm_cc" "$out" | tee "$out/heap-node-native-$cm_cc.log"
+done
+gcc "${cm_flags[@]}" -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer \
+  "${g4_srcs[@]}" -o "$out/heap-node-native-sanitize"
+timeout 120 "$out/heap-node-native-sanitize" "$out" | tee "$out/heap-node-native-sanitize.log"
+if [[ "$sudo_ok" == 1 ]]; then
+  timeout 120 sudo -n "$out/heap-node-native-gcc" "$out" | tee "$out/heap-node-native-root.log"
+  grep -qF 'PASS G4 heap node (root sections)' "$out/heap-node-native-root.log"
+else
+  # CI must exercise the root sections; only a local run without sudo may skip them.
+  if [[ -n "${CI:-}" ]]; then echo "ERROR: G4 root sections need sudo in CI" >&2; exit 1; fi
+  echo "SKIP G4 root sections: no sudo"
+fi
+if gcc -std=c11 -DM11_ANCHOR_NATIVE -I "$own" -I "$repair" -c "$here/heap_node_native.c" -o "$out/hnn-refused.o" 2>/dev/null; then
+  echo "ERROR: heap_node_native compiled outside M11_CUSTODIAN_NATIVE" >&2; exit 1
+fi
+echo 'PASS G4 heap node (gcc, clang, ASan+UBSan, root when sudo) and refused outside M11_CUSTODIAN_NATIVE'
+g4_mutant() { # name asroot pattern replacement assertion last-pass (same detection rule as gtn_mutant)
+  local name="$1" asroot="$2" pat="$3" rep="$4" want="$5" last="$6" dir="$out/hnn-mutant-$1" rc=0 got
+  if [[ "$asroot" == 1 && "$sudo_ok" != 1 ]]; then echo "SKIP G4 mutant $name: no sudo"; return; fi
+  mkdir -p "$dir"
+  awk -v pat="$pat" -v rep="$rep" 'index($0,pat){n++; print rep; next} {print} END{if(n!=1) exit 3}' \
+    "$here/heap_node_native.c" > "$dir/heap_node_native.c"
+  cp "$here/heap_node_native.h" "$dir/"
+  gcc "${cm_flags[@]}" -I "$dir" "$dir/heap_node_native.c" "$here/test-heap-node-native.c" -o "$dir/bin"
+  if [[ "$asroot" == 1 ]]; then
+    timeout 120 sudo -n "$dir/bin" "$dir" > "$dir/log" 2>&1 || rc=$?
+    sudo -n rm -rf "$dir"/m11-heap-* # an aborted root run leaves its root-owned scratch tree
+  else
+    timeout 120 "$dir/bin" "$dir" > "$dir/log" 2>&1 || rc=$?
+    rm -rf "$dir"/m11-heap-*
+  fi
+  got="$(grep '^PASS ' "$dir/log" | tail -n1 || true)"
+  if [[ "$rc" != 134 ]] || ! grep -qF -- "Assertion \`$want' failed" "$dir/log" || [[ "$got" != "$last" ]]; then
+    echo "ERROR: G4 mutant $name not detected for the expected reason (rc=$rc, last PASS: '${got}')" >&2
+    cat "$dir/log" >&2; exit 1
+  fi
+  echo "PASS G4 test detects mutant $name: Assertion \`$want'"
+}
+g4_mutant devname-substring 0 'if (strncmp(b, HEAP_DEVNAME' '    if (!strstr(b, HEAP_DEVNAME))' \
+  'meta_with_uevent(XDEV) == -ENODEV' \
+  'PASS metadata: exact MAJ:MIN, DEVNAME=dma_heap/system by number, one dma_heap character major'
+g4_mutant census-allows-dup 0 'fds[i] == heap_fd && !seen' '        if (heap_fd >= 0 && fds[i] == heap_fd) seen = 1;' \
+  'm11_census_pid1_heap(f3, r2, 2, H, 5) == -1' \
+  'PASS metadata refused: zero major, padded or unterminated number, wrong or prefixed DEVNAME, duplicate/mismatched/block-only major, missing file, non-kernel filesystems'
+g4_mutant no-one-shot 0 'if (heap_attempted) return -EALREADY;' '    (void)0;' \
+  'second == -EALREADY && h.fd == -1 && absent(p_node)' \
+  'PASS open refused: existing node, symlinked or world-writable directory, bad arguments; nothing made'
+g4_mutant world-writable-dir 1 '(dir.st_mode & 022) ||' '    if (p->require_root && (dir.st_uid || dir.st_gid)) { rc = -EPERM; goto fail; }' \
+  'm11_heap_node_open(&P, full_rdev(), &h) == -EPERM' \
+  'PASS census scan of /proc/<pid>/fd: self and a child holder'
+g4_mutant no-unlink 1 'if (unlink(p->node)) { rc = -errno; goto fail; }' '    (void)0;' \
+  'rc == 0 && h.fd >= 0' \
+  'PASS open is one-shot: a second attempt is refused after a failure'
 
 # Unit -> sources it is built from, for the mutants below.
 build() { # name output [file-to-replace replacement-path]
