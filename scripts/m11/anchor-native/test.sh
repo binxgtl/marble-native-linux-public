@@ -118,20 +118,29 @@ if gcc -std=c11 -DM11_ANCHOR_NATIVE -I "$own" -I "$repair" -c "$here/gpr_transpo
   echo "ERROR: gpr_transport_native compiled outside M11_CUSTODIAN_NATIVE" >&2; exit 1
 fi
 echo 'PASS G2 transport (gcc, clang, ASan+UBSan) and refused outside M11_CUSTODIAN_NATIVE'
-gtn_mutant() { # name pattern replacement: a transport mutant must fail the stand-in test
-  local name="$1" pat="$2" rep="$3" dir="$out/gtn-mutant-$1"
+gtn_mutant() { # name pattern replacement assertion last-pass
+  # A transport mutant counts as detected only if the stand-in test aborts (SIGABRT from assert,
+  # status 134; never a timeout, crash or build error) on the named assertion, after exactly the
+  # expected sections passed ("" = it must fail in the first section).
+  local name="$1" pat="$2" rep="$3" want="$4" last="$5" dir="$out/gtn-mutant-$1" rc=0 got
   mkdir -p "$dir"
   awk -v pat="$pat" -v rep="$rep" 'index($0,pat){n++; print rep; next} {print} END{if(n!=1) exit 3}' \
     "$here/gpr_transport_native.c" > "$dir/gpr_transport_native.c"
   cp "$here/gpr_transport_native.h" "$dir/"
   gcc "${cm_flags[@]}" -I "$dir" "${tc_srcs[@]}" "$dir/gpr_transport_native.c" "$here/test-gpr-transport-native.c" -o "$dir/bin"
-  if timeout 120 "$dir/bin" > "$dir/log" 2>&1; then
-    echo "ERROR: G2 test did not detect mutant $name" >&2; exit 1
+  timeout 120 "$dir/bin" > "$dir/log" 2>&1 || rc=$?
+  got="$(grep '^PASS ' "$dir/log" | tail -n1 || true)"
+  if [[ "$rc" != 134 ]] || ! grep -qF -- "Assertion \`$want' failed" "$dir/log" || [[ "$got" != "$last" ]]; then
+    echo "ERROR: G2 mutant $name not detected for the expected reason (rc=$rc, last PASS: '${got}')" >&2
+    cat "$dir/log" >&2; exit 1
   fi
-  echo "PASS G2 test detects mutant $name"
+  echo "PASS G2 test detects mutant $name: Assertion \`$want'"
 }
-gtn_mutant close-in-detach 'never closed here' '    (void)close(fd);'
-gtn_mutant no-held-check 'a->state != M11_ANCHOR_HELD' '    if (!a || a->anchor_fd < 0) {'
+gtn_mutant close-in-detach 'never closed here' '    (void)close(fd);' \
+  'fcntl(r.sv[0], F_GETFD) != -1' ''
+gtn_mutant no-held-check 'a->state != M11_ANCHOR_HELD' '    if (!a || a->anchor_fd < 0) {' \
+  'm11_gpr_engine_open(&r.eng) == -EBADF' \
+  'PASS peer EOF and a write after hangup are transport errors (-EPIPE), not timeouts'
 
 # Unit -> sources it is built from, for the mutants below.
 build() { # name output [file-to-replace replacement-path]
