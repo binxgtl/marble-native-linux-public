@@ -21,6 +21,7 @@
 enum peer_mode { READY, SILENT, CLOSE_AFTER_READ, HANGUP };
 
 static void peer(int fd, enum peer_mode mode) {
+    alarm(10); /* a peer can never hang the suite */
     if (mode == HANGUP) _exit(0);
     uint8_t rx[M11_GPR_MAX_PKT_BYTES];
     ssize_t n = recv(fd, rx, sizeof rx, 0);
@@ -53,8 +54,9 @@ static void start(struct rig *r, enum peer_mode mode) {
     assert(m11_gpr_engine_init(&r->eng, &r->t, 0x0100u) == 0);
 }
 static void stop(struct rig *r) {
-    int st; assert(waitpid(r->pid, &st, 0) == r->pid);
+    /* Close our end FIRST: a peer still blocked in recv (nothing was ever sent) then sees EOF. */
     close(r->sv[0]);
+    int st; assert(waitpid(r->pid, &st, 0) == r->pid);
 }
 static int open_fds(void) {
     DIR *d = opendir("/proc/self/fd"); assert(d); int n = 0;
@@ -67,6 +69,7 @@ static long ms_since(struct timespec s) {
 }
 
 int main(void) {
+    setvbuf(stdout, NULL, _IONBF, 0); /* progress survives a timeout kill (stdout is a pipe in CI) */
     signal(SIGPIPE, SIG_IGN); /* the socket stand-in raises SIGPIPE; the endpoint device does not */
     struct rig r; uint32_t state = 0, dsp = 0;
 
