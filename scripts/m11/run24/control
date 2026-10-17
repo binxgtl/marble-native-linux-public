@@ -1,0 +1,118 @@
+#!/bin/busybox sh
+# Run24 fixed synchronous PID1 control jobs. No endpoint open, PCM or mixer access except the
+# Disable-only amp gate (amp-gate, amp-switch) before the endpoint node exists.
+set -eu
+BB=/bin/busybox
+exec 0</dev/null 1>/dev/null 2>&1
+log() { return 0; }
+hold() { exit 1; }
+read_value() { $BB cat "$1"; }
+poll_value() {
+ n=0
+ while [ "$n" -lt 300 ]; do
+  [ "$(read_value "$1")" = "$2" ] && return 0
+  $BB sleep 0.1; n=$((n+1))
+ done
+ return 1
+}
+case "$1" in
+ journal)
+  . /m11/instrumentation/journal.sh
+  journal_init "$(read_value /m11/instrumentation/nonce)" "$(read_value /m11/instrumentation/identity)"
+  for key in runtime_transport graph_topology amp_disabled runtime_route calibration_applied protection_active gain_valid teardown; do
+   journal_record "$key" unsupported metadata 95 'Engineering diagnostic only; amplifier_enable_permitted=0'
+  done
+  printf '%s\n' "$J_SEQ" > /run/m11/jseq
+  # Only helper markers/logs are writable by reduced-privilege helpers.
+  $BB chown 65534:65534 /run/m11 /run/m11-instrumentation
+  $BB chmod 0700 /run/m11 /run/m11-instrumentation
+  $BB chmod 0644 /run/m11-instrumentation/journal
+  $BB chown 65534:65534 /dev/kmsg
+  $BB chmod 0400 /dev/kmsg
+  ;;
+ probe) exec /sbin/m11-pd-mapper --probe;;
+ start)
+  adsp=$(read_value /run/m11/adsp-node)
+  [ "$(read_value "$adsp/state")" = offline ]
+  printf '%s' adsp2.mdt > "$adsp/firmware"
+  [ "$(read_value "$adsp/firmware")" = adsp2.mdt ]
+  printf '%s' start > "$adsp/state"
+  poll_value "$adsp/state" running
+  ;;
+ amp_gate)
+  # Run24: registration wait plus the Run19 Disable-only amp-switch stage, before the
+  # endpoint node exists. The runner admits the GPR query only for switches-disabled.
+  . /m11/amp-gate
+  amp_gate
+  ;;
+ usb_start)
+  # The unprivileged relay reads usb.ready; publish it readable from creation.
+  umask 022
+  . /m11/usb
+  usb_start
+  # TTY permissions are established inside usb_start before usb.ready.
+  ;;
+ stop_adsp)
+  adsp=$(read_value /run/m11/adsp-node)
+  case "$(read_value "$adsp/state")" in
+   running) printf '%s' stop > "$adsp/state"; poll_value "$adsp/state" offline;;
+   offline) :;;
+   *) exit 1;;
+  esac
+  printf '%s' "$(read_value /run/m11/original-firmware)" > "$adsp/firmware"
+  [ "$(read_value "$adsp/firmware")" = "$(read_value /run/m11/original-firmware)" ]
+  ;;
+ common)
+  adsp=$(read_value /run/m11/adsp-node)
+  [ "$(read_value "$adsp/state")" = offline ]
+  fwparam=/sys/module/firmware_class/parameters/path
+  original=$(read_value /run/m11/original-path)
+  if [ -n "$original" ]; then printf '%s' "$original" > "$fwparam"; else printf '\000' > "$fwparam"; fi
+  [ "$(read_value "$fwparam")" = "$original" ]
+  $BB umount /m11/modem
+  $BB rm /dev/m11-modem
+  ;;
+ seal)
+  # logger.stop.tmp must be readable BEFORE rename makes the stop visible.
+  umask 022
+  . /m11/instrumentation/journal.sh
+  J=/run/m11-instrumentation/journal
+  J_SEQ=$(read_value /run/m11/jseq)
+  J_CLOSED=0
+  journal_finish
+  ;;
+ usb_stop)
+  relay_pid=
+  . /m11/usb
+  usb_stop
+  ;;
+ unmount)
+  $BB umount /sys/fs/cgroup
+  $BB umount /dev/shm
+  $BB umount /dev/pts
+  $BB umount /proc
+  $BB umount /sys
+  ;;
+ iommu_capture)
+  # Run24 read-only terminal-boundary capture: the effective IOMMU group -> type map and each
+  # group's device basenames, for offline identification of the audio-SMMU domain. No write to
+  # any device; no serial (group ids, domain types and SoC device basenames only).
+  out=/run/m11/iommu.txt
+  : > "$out"
+  if [ -d /sys/kernel/iommu_groups ]; then
+   for g in /sys/kernel/iommu_groups/*; do
+    [ -d "$g" ] || continue
+    gid=$($BB basename "$g")
+    t='?'; [ -r "$g/type" ] && t=$(read_value "$g/type")
+    devs=''
+    if [ -d "$g/devices" ]; then
+     for d in "$g/devices"/*; do [ -e "$d" ] && devs="$devs $($BB basename "$d")"; done
+    fi
+    printf 'group %s type=%s devices=%s\n' "$gid" "$t" "$devs" >> "$out"
+   done
+  else
+   printf 'iommu_groups unavailable\n' >> "$out"
+  fi
+  ;;
+ *) exit 2;;
+esac

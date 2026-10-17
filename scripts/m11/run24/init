@@ -1,0 +1,78 @@
+#!/bin/busybox sh
+# M11 Run 12 ADSP registration diagnostic bootstrap; corrected stdio/hold from Run 3.
+set -eu
+BB=/bin/busybox
+
+# Logging must never be a prerequisite for holding PID1 alive. This also
+# covers failures before /dev exists, when inherited descriptors may be closed.
+hold() {
+    set +e
+    trap - 0
+    ( printf 'M11R24: HOLD: %s\n' "$*" >&2 ) || :
+    while :; do $BB sleep 60 || :; done
+}
+trap 'hold "unexpected PID1 shell exit"' 0
+
+[ "$$" = 1 ] || hold "bootstrap is not PID 1"
+$BB mkdir -p /proc /sys /run /newroot /dev
+$BB mount -t proc -o nosuid,nodev,noexec proc /proc || hold "proc mount failed"
+$BB mount -t sysfs -o nosuid,nodev,noexec sysfs /sys || hold "sysfs mount failed"
+# Pre-mount /dev before systemd 257: its early devtmpfs mount is fatal if
+# devtmpfs is unavailable, while an already-mounted /dev is accepted.
+$BB mount -t tmpfs -o mode=0755,nosuid,size=16m tmpfs /dev || hold "dev tmpfs failed"
+$BB mkdir -p /dev/pts /dev/shm /dev/dri /run /newroot /m10
+$BB mknod -m 666 /dev/null c 1 3 || hold "null node failed"
+# Do not depend on a registered initial console. Set all three descriptors
+# explicitly before any diagnostic child inherits them.
+exec 0</dev/null 1>/dev/null 2>&1
+$BB mknod -m 600 /dev/console c 5 1 || hold "console node failed"
+$BB mknod -m 666 /dev/zero c 1 5 || hold "zero node failed"
+$BB mknod -m 666 /dev/random c 1 8 || hold "random node failed"
+$BB mknod -m 666 /dev/urandom c 1 9 || hold "urandom node failed"
+$BB mknod -m 600 /dev/kmsg c 1 11 || hold "kmsg node failed"
+$BB mknod -m 666 /dev/tty c 5 0 || hold "tty node failed"
+$BB ln -s /proc/self/fd /dev/fd
+$BB ln -s /proc/self/fd/0 /dev/stdin
+$BB ln -s /proc/self/fd/1 /dev/stdout
+$BB ln -s /proc/self/fd/2 /dev/stderr
+$BB mount -t devpts -o mode=0620,nosuid,noexec devpts /dev/pts || hold "devpts mount failed"
+$BB mount -t tmpfs -o mode=1777,nosuid,nodev tmpfs /dev/shm || hold "dev/shm tmpfs failed"
+$BB mount -t tmpfs -o mode=0755,nosuid,nodev tmpfs /run || hold "run tmpfs failed"
+[ -d /sys/fs/cgroup ] || hold "kernel cgroup mountpoint absent"
+$BB mount -t cgroup2 -o nosuid,nodev,noexec cgroup2 /sys/fs/cgroup || hold "cgroup2 mount failed"
+
+# Load exactly the proven 95-module M7 closure before root handoff. The loader
+# is an independent freestanding tool; no M9 monolithic /init is invoked.
+/sbin/m10-load-phase0 || hold "M7 Phase-0 module loader failed"
+
+# Revalidate the same MDSS card0 identity used by M9, then create the node from
+# the kernel-published major:minor value. This path writes only to /dev tmpfs.
+link=
+devno=
+waited=0
+# Match the proven M7 three-second settle, then allow asynchronous DRM probe
+# publication a bounded additional 30 seconds before failing closed.
+$BB sleep 3
+while [ "$waited" -lt 30000 ]; do
+	link="$($BB readlink -f /sys/class/drm/card0/device 2>/dev/null || true)"
+	case "/$link/" in
+		*/ae00000.qcom,mdss_mdp/*)
+			devno="$($BB cat /sys/class/drm/card0/dev 2>/dev/null || true)"
+			case "$devno" in
+				[0-9]*:[0-9]*)
+					major=${devno%%:*}
+					minor=${devno#*:}
+					case "$major:$minor" in *[!0-9:]*|:|*:) ;; *) break ;; esac
+					;;
+			esac
+			;;
+	esac
+	$BB sleep 1
+	waited=$((waited + 1000))
+done
+[ "$waited" -lt 30000 ] || hold "MDSS card0/dev readiness timeout"
+$BB mknod -m 600 /dev/dri/card0 c "$major" "$minor" || hold "card0 node create failed"
+
+/sbin/m11-checkpoint blue || hold "M11 Run 12 BLUE failed"
+exec /sbin/m11-run24
+hold "native Run24 exec returned"
