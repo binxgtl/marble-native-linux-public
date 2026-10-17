@@ -8,6 +8,7 @@
 #define _GNU_SOURCE
 #include "heap_node_native.h"
 #include <assert.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <ftw.h>
@@ -196,10 +197,27 @@ int main(int argc, char **argv) {
     close(y);
     int go[2], ack[2]; assert(pipe(go) == 0 && pipe(ack) == 0);
     pid_t c = fork(); assert(c >= 0);
-    if (c == 0) { char b; if (read(go[0], &b, 1) != 1) _exit(1); close(x); _exit(write(ack[1], "k", 1) == 1 ? 0 : 1); }
-    assert(m11_heap_census_pid(c, full, -1) == -1);   /* the child inherited the heap fd */
-    char b; assert(write(go[1], "g", 1) == 1 && read(ack[0], &b, 1) == 1);
-    assert(m11_heap_census_pid(c, full, -1) == 0);
+    if (c == 0) { /* stays alive until the parent's last scan: an exiting process scans as -1 */
+        char b; if (read(go[0], &b, 1) != 1) _exit(1);
+        close(x);
+        if (write(ack[1], "k", 1) != 1 || read(go[0], &b, 1) != 1) _exit(1);
+        _exit(0);
+    }
+    char cfd[64]; snprintf(cfd, sizeof cfd, "/proc/%ld/fd", (long)c);
+    DIR *probe = opendir(cfd);
+    if (probe) closedir(probe);
+    else printf("INFO /proc/<child>/fd not readable here: errno=%d\n", errno);
+    assert(probe || !as_root); /* PID1 scans as root; the root run must cover the child case */
+    char b;
+    if (probe) {
+        assert(m11_heap_census_pid(c, full, -1) == -1);   /* the child inherited the heap fd */
+        assert(write(go[1], "g", 1) == 1 && read(ack[0], &b, 1) == 1);
+        assert(m11_heap_census_pid(c, full, -1) == 0);
+    } else {
+        assert(m11_heap_census_pid(c, full, -1) == -1);   /* unreadable: fail closed */
+        assert(write(go[1], "g", 1) == 1 && read(ack[0], &b, 1) == 1);
+    }
+    assert(write(go[1], "x", 1) == 1);
     int st; assert(waitpid(c, &st, 0) == c && WIFEXITED(st) && WEXITSTATUS(st) == 0);
     close(x);
     printf("PASS census scan of /proc/<pid>/fd: self and a child holder\n");
