@@ -104,6 +104,34 @@ for f in "$root"/scripts/m11/run2[0-4]/build.sh "$root"/scripts/m11/run2[0-4]/st
   fi
 done
 echo 'PASS no candidate build input (run20-run24 build.sh/stage.py, anchor-native runner) selects M11_CUSTODIAN_NATIVE'
+# G2: the native GPR transport over the endpoint anchor, driven by the REAL engine against a
+# SOCK_SEQPACKET stand-in peer (no device).
+gtn_srcs=("${tc_srcs[@]}" "$here/gpr_transport_native.c" "$here/test-gpr-transport-native.c")
+for cm_cc in gcc clang; do
+  "$cm_cc" "${cm_flags[@]}" "${gtn_srcs[@]}" -o "$out/gpr-transport-native-$cm_cc"
+  timeout 120 "$out/gpr-transport-native-$cm_cc" | tee "$out/gpr-transport-native-$cm_cc.log"
+done
+gcc "${cm_flags[@]}" -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer \
+  "${gtn_srcs[@]}" -o "$out/gpr-transport-native-sanitize"
+timeout 120 "$out/gpr-transport-native-sanitize" | tee "$out/gpr-transport-native-sanitize.log"
+if gcc -std=c11 -DM11_ANCHOR_NATIVE -I "$own" -I "$repair" -c "$here/gpr_transport_native.c" -o "$out/gtn-refused.o" 2>/dev/null; then
+  echo "ERROR: gpr_transport_native compiled outside M11_CUSTODIAN_NATIVE" >&2; exit 1
+fi
+echo 'PASS G2 transport (gcc, clang, ASan+UBSan) and refused outside M11_CUSTODIAN_NATIVE'
+gtn_mutant() { # name pattern replacement: a transport mutant must fail the stand-in test
+  local name="$1" pat="$2" rep="$3" dir="$out/gtn-mutant-$1"
+  mkdir -p "$dir"
+  awk -v pat="$pat" -v rep="$rep" 'index($0,pat){n++; print rep; next} {print} END{if(n!=1) exit 3}' \
+    "$here/gpr_transport_native.c" > "$dir/gpr_transport_native.c"
+  cp "$here/gpr_transport_native.h" "$dir/"
+  gcc "${cm_flags[@]}" -I "$dir" "${tc_srcs[@]}" "$dir/gpr_transport_native.c" "$here/test-gpr-transport-native.c" -o "$dir/bin"
+  if timeout 120 "$dir/bin" > "$dir/log" 2>&1; then
+    echo "ERROR: G2 test did not detect mutant $name" >&2; exit 1
+  fi
+  echo "PASS G2 test detects mutant $name"
+}
+gtn_mutant close-in-detach 'never closed here' '    (void)close(fd);'
+gtn_mutant no-held-check 'a->state != M11_ANCHOR_HELD' '    if (!a || a->anchor_fd < 0) {'
 
 # Unit -> sources it is built from, for the mutants below.
 build() { # name output [file-to-replace replacement-path]
