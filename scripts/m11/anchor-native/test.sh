@@ -39,6 +39,42 @@ if gcc -std=c11 -DM11_OWNERSHIP_OFFLINE -DM11_ANCHOR_NATIVE_ION -I "$own" -I "$r
 fi
 echo 'PASS M11_ANCHOR_NATIVE_ION refused outside the native integration build'
 
+# Terminal core (docs/m11-run24.md): the boot-ledger + terminal-decision subset of the
+# offline custodian, linkable into native PID1 with NO custodian/shmem/apm/gpr-engine dep.
+gcc -std=c11 -Wall -Wextra -Werror -DM11_ANCHOR_NATIVE -I "$own" -c "$here/terminal_core.c" -o "$out/terminal_core-native.o"
+echo 'PASS terminal_core compiles under M11_ANCHOR_NATIVE (no custodian/shmem/apm/gpr-engine)'
+# It must not compile without an explicit build mode (device integration stays gated).
+if gcc -std=c11 -I "$own" -I "$repair" -c "$here/terminal_core.c" -o "$out/terminal_core-nomode.o" 2>/dev/null; then
+  echo "ERROR: terminal_core compiled with no build mode" >&2; exit 1
+fi
+echo 'PASS terminal_core refuses to build without M11_ANCHOR_NATIVE or M11_OWNERSHIP_OFFLINE'
+# Cross-check: the native terminal core decides a boot's end IDENTICALLY to the frozen,
+# CI-qualified offline custodian over the never-mapped state space (terminal decisions and
+# the cmdline gate). Offline mode links both in one program; the custodian is unchanged.
+tc_units=(m11_gpr_engine m11_shmem m11_apm_protocol m11_aw_protection m11_strict_mock)
+for tc_mode in gcc clang sanitize; do
+  tc_cc=gcc
+  tc_flags=(-std=c11 -O1 -g -Wall -Wextra -Werror -DM11_OWNERSHIP_OFFLINE -I "$own" -I "$repair" -I "$here")
+  [[ "$tc_mode" == clang ]] && tc_cc=clang
+  [[ "$tc_mode" == sanitize ]] && tc_flags+=(-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer)
+  tc_srcs=(); for u in "${tc_units[@]}"; do tc_srcs+=("$repair/$u.c"); done
+  "$tc_cc" "${tc_flags[@]}" "${tc_srcs[@]}" "$own/m11_custodian.c" "$here/terminal_core.c" "$here/test-terminal-core.c" -o "$out/terminal-core-$tc_mode"
+  "$out/terminal-core-$tc_mode" | tee "$out/terminal-core-$tc_mode.log"
+done
+echo 'PASS terminal core matches the frozen custodian (terminal decisions + cmdline gate)'
+# Detection power: a terminal core that diverges from the custodian must fail the cross-check.
+tc_mut="$out/terminal-core-mutant"; mkdir -p "$tc_mut"
+awk 'index($0,"return M11_TERMINAL_ORDERLY_SHUTDOWN;"){n++; if(n==1){print "    return M11_TERMINAL_HOLD;"; next}} {print}
+     END{if(n<1) exit 3}' "$here/terminal_core.c" > "$tc_mut/terminal_core.c"
+cmp -s "$here/terminal_core.c" "$tc_mut/terminal_core.c" && { echo "ERROR: terminal_core mutant changed nothing" >&2; exit 1; }
+tc_srcs=(); for u in "${tc_units[@]}"; do tc_srcs+=("$repair/$u.c"); done
+gcc -std=c11 -O1 -Wall -Wextra -Werror -DM11_OWNERSHIP_OFFLINE -I "$own" -I "$repair" -I "$here" \
+  "${tc_srcs[@]}" "$own/m11_custodian.c" "$tc_mut/terminal_core.c" "$here/test-terminal-core.c" -o "$tc_mut/bin"
+if "$tc_mut/bin" > "$tc_mut/log" 2>&1; then
+  echo "ERROR: cross-check did not detect a diverging terminal core" >&2; exit 1
+fi
+echo 'PASS cross-check detects a diverging terminal core'
+
 # Unit -> sources it is built from, for the mutants below.
 build() { # name output [file-to-replace replacement-path]
   local name="$1" output="$2" from="${3:-}" to="${4:-}" srcs=()
