@@ -244,6 +244,55 @@ g4_mutant world-writable-dir 1 '(dir.st_mode & 022) ||' '    if (p->require_root
 g4_mutant no-unlink 1 'if (unlink(p->node)) { rc = -errno; goto fail; }' '    (void)0;' \
   'rc == 0 && h.fd >= 0' \
   'PASS open is one-shot: a second attempt is refused after a failure'
+# G5: dma-buf pool anchors (memfd buffers from a fixture heap ioctl), the real seccomp pool seal,
+# the dma-buf census and the G3 backend in pooled mode (unprivileged; no dma-heap or ION driver).
+g5_srcs=("$here/shmem_backend_native.c" "$here/dmabuf_pool_native.c" "$here/test-dmabuf-pool-native.c")
+for cm_cc in gcc clang; do
+  "$cm_cc" "${cm_flags[@]}" "${g5_srcs[@]}" -o "$out/dmabuf-pool-native-$cm_cc"
+  timeout 120 "$out/dmabuf-pool-native-$cm_cc" | tee "$out/dmabuf-pool-native-$cm_cc.log"
+done
+gcc "${cm_flags[@]}" -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer \
+  "${g5_srcs[@]}" -o "$out/dmabuf-pool-native-sanitize"
+timeout 120 "$out/dmabuf-pool-native-sanitize" | tee "$out/dmabuf-pool-native-sanitize.log"
+if gcc -std=c11 -DM11_ANCHOR_NATIVE -I "$own" -I "$repair" -I "$here" -c "$here/dmabuf_pool_native.c" -o "$out/dpn-refused.o" 2>/dev/null; then
+  echo "ERROR: dmabuf_pool_native compiled outside M11_CUSTODIAN_NATIVE" >&2; exit 1
+fi
+echo 'PASS G5 dma-buf pool (gcc, clang, ASan+UBSan) and refused outside M11_CUSTODIAN_NATIVE'
+g5_mutant() { # name file pattern replacement assertion last-pass (same detection rule as gtn_mutant)
+  local name="$1" file="$2" pat="$3" rep="$4" want="$5" last="$6" dir="$out/dpn-mutant-$1" rc=0 got
+  mkdir -p "$dir"
+  awk -v pat="$pat" -v rep="$rep" 'index($0,pat){n++; print rep; next} {print} END{if(n!=1) exit 3}' \
+    "$here/$file" > "$dir/$file"
+  local srcs=() s
+  for s in "${g5_srcs[@]}"; do [[ "$(basename "$s")" == "$file" ]] && srcs+=("$dir/$file") || srcs+=("$s"); done
+  gcc "${cm_flags[@]}" "${srcs[@]}" -o "$dir/bin"
+  timeout 120 "$dir/bin" > "$dir/log" 2>&1 || rc=$?
+  got="$(grep '^PASS ' "$dir/log" | tail -n1 || true)"
+  if [[ "$rc" != 134 ]] || ! grep -qF -- "Assertion \`$want' failed" "$dir/log" || [[ "$got" != "$last" ]]; then
+    echo "ERROR: G5 mutant $name not detected for the expected reason (rc=$rc, last PASS: '${got}')" >&2
+    cat "$dir/log" >&2; exit 1
+  fi
+  echo "PASS G5 test detects mutant $name: Assertion \`$want'"
+}
+g5_mutant census-ignores-inode dmabuf_pool_native.c \
+  'if (seen[off] || e[i].ino != (unsigned long long)pool->ino[off / 2]) return -1;' '        if (seen[off]) return -1;' \
+  'm11_census_dmabuf(&p, wrong, 4, 1) == -1' ''
+g5_mutant census-allows-others dmabuf_pool_native.c 'if (!pid1) return -1;' '        (void)0;' \
+  'm11_census_dmabuf(&p, full, 5, 0) == -1' ''
+g5_mutant bind-unsealed shmem_backend_native.c 'if (!pool->sealed || pool->owner_pid != getpid() || !pool->count ||' \
+  '    if (pool->owner_pid != getpid() || !pool->count ||' \
+  'm11_shmem_native_backend_pool(&l, &ion, &p, &fx_sys, &b) == -EPERM' \
+  'PASS pool: 4 buffers pinned at anchor/guard pairs from 200 (one inode per pair, one device, CLOEXEC); census holds'
+g5_mutant pool-close-allowed dmabuf_pool_native.c 'reserved(p, __NR_close, 0, r, k);' '    (void)0;' \
+  'denied(close(BASE))' \
+  'PASS pooled backend refuses an unsealed pool; the pool seal rejects overlap and installs once'
+g5_mutant pool-close-range-allowed dmabuf_pool_native.c '/* every other close_range: refused */' \
+  '    STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW);' \
+  'denied(syscall(SYS_close_range, BASE, BASE + 1, 0))' \
+  'PASS pooled backend refuses an unsealed pool; the pool seal rejects overlap and installs once'
+g5_mutant pooled-close-closes shmem_backend_native.c 'if (l->pool) { /* G5: back to the pool' '    if (0) {' \
+  'l.pool_returns == 1 && l.closes == 0 && fx_closes == closes && l.close_errors == 0' \
+  'PASS census: a post-seal fork holds pool buffers (refused) and cannot drop them'
 
 # Unit -> sources it is built from, for the mutants below.
 build() { # name output [file-to-replace replacement-path]

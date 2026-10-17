@@ -1,6 +1,7 @@
 /* G3 native shmem backend — see shmem_backend_native.h. */
 #define _GNU_SOURCE
 #include "shmem_backend_native.h"
+#include "dmabuf_pool_native.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <string.h>
@@ -45,6 +46,20 @@ static int b_alloc(void *user, size_t aligned_bytes, int *out_dma_fd) {
     for (size_t i = 0; !slot && i < M11_SHMEM_NATIVE_MAX_BUFS; i++)
         if (l->bufs[i].fd < 0) slot = &l->bufs[i];
     if (!slot) return -ENOSPC;
+    if (l->pool) { /* G5: hand out a free sealed pool buffer; never an ioctl */
+        if (aligned_bytes != l->pool->len) { l->refused++; return -EINVAL; }
+        for (unsigned i = 0; i < l->pool->count; i++) {
+            if (l->pool_busy & (1u << i)) continue;
+            int fd = m11_dmabuf_pool_fd(l->pool, i);
+            if (find(l, fd)) { l->refused++; return -EPROTO; }
+            l->pool_busy |= 1u << i;
+            *slot = (m11_shmem_native_buf){.fd = fd, .len = aligned_bytes, .vaddr = NULL, .imported = 0};
+            l->allocs++;
+            *out_dma_fd = fd;
+            return 0;
+        }
+        return -ENOSPC;
+    }
     m11_dma_heap_allocation_data d = {.len = aligned_bytes, .fd = 0,
                                       .fd_flags = O_RDWR | O_CLOEXEC, .heap_flags = 0};
     int rc;
@@ -143,6 +158,12 @@ static int b_close(void *user, int dma_fd) {
     if (b->vaddr || b->imported) { l->refused++; return -EBUSY; }
     int fd = b->fd;
     *b = (m11_shmem_native_buf){.fd = -1};
+    if (l->pool) { /* G5: back to the pool; the anchor pair keeps the backing (pool returns) */
+        unsigned i = (unsigned)(fd - l->pool->base) / 2u;
+        l->pool_busy &= ~(1u << i);
+        l->pool_returns++;
+        return 0;
+    }
     /* consumed: the descriptor is released whatever close(2) reports; never retried */
     if (l->sys->close_fn(fd) < 0) { l->close_errors++; l->last_close_errno = errno; }
     l->closes++;
@@ -164,6 +185,20 @@ int m11_shmem_native_backend(m11_shmem_native_link *link, const m11_pid1_anchor 
         .close_fd_fn = b_close, .dma_buf_sync_fn = b_sync,
         .ion_import_fd_fn = b_import, .ion_unmap_fd_fn = b_unimport, .user = link,
     };
+    return 0;
+}
+
+int m11_shmem_native_backend_pool(m11_shmem_native_link *link, const m11_pid1_anchor *ion_anchor,
+                                  const struct m11_dmabuf_pool *pool, const m11_shmem_native_sys *sys,
+                                  m11_shmem_backend_t *out) {
+    if (!link || !ion_anchor || !pool || !out) return -EINVAL;
+    if (!pool->sealed || pool->owner_pid != getpid() || !pool->count ||
+        pool->count > M11_SHMEM_NATIVE_MAX_BUFS) return -EPERM;
+    /* heap fd 0 only satisfies the shared binder; the pooled path never issues the ioctl */
+    int rc = m11_shmem_native_backend(link, ion_anchor, 0, sys, out);
+    if (rc) return rc;
+    link->heap_fd = -1;
+    link->pool = pool;
     return 0;
 }
 

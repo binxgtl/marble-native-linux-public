@@ -76,6 +76,10 @@ typedef struct {
     uint32_t allocs, maps, unmaps, syncs, imports, unimports, closes;
     uint32_t refused, hyp_refused, close_errors;
     int last_close_errno;
+    /* G5 pooled mode: buffers come from a sealed PID1 pool and are never closed here. */
+    const struct m11_dmabuf_pool *pool;
+    unsigned pool_busy;                  /* bit i: pool buffer i is handed out */
+    uint32_t pool_returns;
 } m11_shmem_native_link;
 
 /* Bind a link and fill the manager backend (user = link). sys NULL = libc. -EINVAL on NULLs or a
@@ -83,6 +87,15 @@ typedef struct {
 int m11_shmem_native_backend(m11_shmem_native_link *link, const m11_pid1_anchor *ion_anchor,
                              int heap_fd, const m11_shmem_native_sys *sys,
                              m11_shmem_backend_t *out);
+
+/* G5 pooled mode (dmabuf_pool_native.h): the pool must be sealed and owned by the caller and hold
+ * at most M11_SHMEM_NATIVE_MAX_BUFS buffers. Allocation hands out a free pool buffer of exactly the
+ * pool's size (its anchor fd; no ioctl); close refuses while mmapped or imported, else returns the
+ * buffer to the pool WITHOUT close(2): the anchor pair keeps the backing until PID1 exits. */
+struct m11_dmabuf_pool;
+int m11_shmem_native_backend_pool(m11_shmem_native_link *link, const m11_pid1_anchor *ion_anchor,
+                                  const struct m11_dmabuf_pool *pool, const m11_shmem_native_sys *sys,
+                                  m11_shmem_backend_t *out);
 
 /* 1 when `fd` is a dma-buf this link allocated and the ION fd list holds it, else 0. */
 int m11_shmem_native_imported(const m11_shmem_native_link *link, int fd);
