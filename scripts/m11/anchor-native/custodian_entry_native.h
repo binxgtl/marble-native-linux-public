@@ -3,8 +3,14 @@
  * the G8 terminal with production ops. Built only in the reviewed M11_CUSTODIAN_NATIVE build; never
  * part of a candidate; no frozen Run source is used or changed.
  *
- * m11_entry_run, in this order; any failure before the runner exists ends the boot through
- * exit_fn without closing anything (a START_FAILED record names the phase):
+ * m11_entry_run, in this order. Any failure before the runner exists closes nothing and writes a
+ * START_FAILED record naming the phase and the end (B4, readiness review): while nothing audio was
+ * ever opened (no bind attempted on either anchor, no heap fd) the end is reboot_fn, as Run23
+ * rebooted a boot whose PD never came UP; once a bind was attempted, or if reboot_fn returns, the
+ * end is exit_fn (retaining). B6: each phase writes one compact "<6>M11ENTRY" record (journal,
+ * cmdline verdict with the gate tokens, length and CRC32 but never the text, which carries the
+ * device serial; PD READY; boot stage and numbers; runner; session; the first HOLD). A
+ * never-mapped boot writes 6 of them plus the G8 record, under the /dev/kmsg per-fd burst of 10:
  *   1. arguments, then PID1 (production), then one-shot per process;
  *   2. the journal sink: one fd (production /dev/kmsg, char 1:11 checked), opened before the
  *      spawner is forked (the spawner closes every fd it inherits);
@@ -76,8 +82,9 @@ struct m11_entry {
     m11_pdmon pdmon;
     m11_boot boot;
     m11_crunner runner;
-    int session_rc;
+    int session_rc, reboot_rc;
     unsigned hold_rounds;
+    unsigned records, record_failures; /* entry records written / refused by the sink */
     char record[M11_INTENT_RECORD_MAX + 96];
 };
 

@@ -720,15 +720,25 @@ p3_mutant() { # name asroot pattern replacement assertion last-pass (same detect
   fi
   echo "PASS P3 test detects mutant $name: Assertion \`$want'"
 }
-p3_mutant cmdline-gate-late 0 'if (!m11_custodian_cmdline_allowed(e->cmdline)) return entry_fail(e, "cmdline", 3, -EPERM);' '    (void)0;' \
+p3_mutant cmdline-gate-late 0 'if (!allowed) return entry_fail(e, "cmdline", 3, -EPERM);' '    (void)0;' \
   'st == 0 && strstr(rep, "CALLS perm=-1 inval=-22 first=-14 second=-114 phase=1/1 fail_step=3/3")' \
   'PASS default entry: PID1 only, /dev/kmsg (1:11) journal, /proc/cmdline, the AF_QIPCRTR monitor (10 s bring-up), the real nodes, no session (never maps), production terminal ops'
 p3_mutant kmsg-identity-unchecked 0 'if (cfg->journal_require_kmsg && (!S_ISCHR(st.st_mode) || st.st_rdev != makedev(1, 11))) {' '    if (0) {' \
-  'st == 42 && strstr(rep, "EXIT phase=0 fail_step=2 fail_rc=-19 ") && strstr(rep, "sockets=0 spawner=0") && strstr(rep, "rec=none")' \
+  'st == 43 && strstr(rep, "REBOOT phase=0 fail_step=2 fail_rc=-19 ") && strstr(rep, "sockets=0 spawner=0") && strstr(rep, "phases=- lines=0 ")' \
   'PASS entry calls: not PID1 and a bad configuration touch nothing and do not count; the first real call does, a second is refused and changes nothing'
-p3_mutant pd-not-awaited 0 'if ((rc = m11_pdmon_wait_up(&e->pdmon, cfg->pd_ready_budget_ms))) return entry_fail(e, "pd_up", 4, rc);' '    (void)0;' \
-  'st == 42 && strstr(rep, "EXIT phase=2 fail_step=4 fail_rc=-102 ") && strstr(rep, "regs=1 sockets=1 spawner=0 anchors_open=0/4 ep_node=0")' \
-  'PASS entry refused by the effective cmdline before anything is opened: no PD socket, no spawner, no node; START_FAILED journaled, PID1 exit'
+p3_mutant pd-not-awaited 0 'rc = m11_pdmon_wait_up(&e->pdmon, cfg->pd_ready_budget_ms);' '        (void)0;' \
+  'st == 43 && strstr(rep, "REBOOT phase=2 fail_step=4 fail_rc=-102 ") && strstr(rep, "regs=1 sockets=1 spawner=0 anchors_open=0/4 ep_node=0")' \
+  'PASS entry refused by the effective cmdline before anything is opened: no PD socket, no spawner, no node; the verdict, gate tokens, length and CRC journaled (never the text); START_FAILED, reboot'
+# B4: a failure before any bind reboots, a failure after one never does; B6: the cmdline record.
+p3_mutant prebind-exits 0 'const int reboot = nothing_opened(e);' '    const int reboot = 0; (void)nothing_opened;' \
+  'st == 43 && strstr(rep, "REBOOT phase=0 fail_step=2 fail_rc=-19 ") && strstr(rep, "sockets=0 spawner=0") && strstr(rep, "phases=- lines=0 ")' \
+  'PASS entry calls: not PID1 and a bad configuration touch nothing and do not count; the first real call does, a second is refused and changes nothing'
+p3_mutant reboot-after-bind 1 'const int reboot = nothing_opened(e);' '    const int reboot = 1; (void)nothing_opened;' \
+  'st == 42 && strstr(rep, "EXIT phase=3 fail_step=4 fail_rc=-17 ") && strstr(rep, "spawner=1 anchors_open=2/4") && !strstr(rep, "REBOOT")' \
+  'PASS entry with the PD DOWN before any MAP: acknowledged at once (nothing mapped), retaining end (a PD DOWN loses the kernel imports)'
+p3_mutant no-cmdline-record 0 'phase_record(e, "phase=cmdline allowed=%d' '    (void)strict; (void)passthrough; (void)crc32_text;' \
+  'strstr(rep, "action=START_FAILED end=reboot phase=cmdline step=3 rc=-1 anchors_held=0/2 boot_stage=0") && strstr(rep, "phases=journal,cmdline lines=3 ")' \
+  'PASS entry refused when the journal is not the kernel log: nothing written to it, no socket, no spawner; nothing audio opened, so reboot'
 p3_mutant map-intent-not-busy 1 'm11_pds_resources_busy(&e->pdmon.pds);' '    (void)e;' \
   'strstr(rep, "MAP rc=0 busy=1 intents=1") && strstr(rep, "PEER n=1") && strstr(rep, "PEER down_sent") && !strstr(rep, "PEER_VIOLATION")' \
   'PASS entry, production shape (no session): P1 UP, P2 boot (nodes made, bound, sealed, removed), runner start, close, G8 orderly end: both anchors final-closed, reboot; nothing sent'
