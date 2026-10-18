@@ -405,6 +405,52 @@ g7_mutant no-ledger-check 'if ((h.opcode == M11_APM_CMD_SHARED_MEM_MAP_REGIONS &
   'PASS sink failure: no TX; the region stays unresolved (unknown TX, fail closed)'
 g7_mutant close-all-allowed "return -EPERM; /* outside the custodian's set" '        break;' \
   'm11_intent_format(rec, sizeof rec, 7, 3, pkt, pl) == -EPERM' ''
+# G8: the native end of a custodian boot over real adapters (stand-ins), the real owner seal and the
+# real custodian, manager and engine; test exit/reboot hooks report the fds at the moment of the end.
+g8_srcs=("${tc_srcs[@]}" "$own/m11_custodian.c" "$here/gpr_transport_native.c" "$here/shmem_backend_native.c"
+         "$here/dmabuf_pool_native.c" "$here/intent_journal_native.c" "$here/terminal_native.c"
+         "$here/test-terminal-native.c" "${anchor[@]}")
+g8_flags=("${cm_flags[@]}" -DM11_ANCHOR_NATIVE_ION)
+for cm_cc in gcc clang; do
+  "$cm_cc" "${g8_flags[@]}" "${g8_srcs[@]}" -o "$out/terminal-native-$cm_cc"
+  timeout 120 "$out/terminal-native-$cm_cc" | tee "$out/terminal-native-$cm_cc.log"
+done
+gcc "${g8_flags[@]}" -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer \
+  "${g8_srcs[@]}" -o "$out/terminal-native-sanitize"
+timeout 120 "$out/terminal-native-sanitize" | tee "$out/terminal-native-sanitize.log"
+if gcc -std=c11 -DM11_ANCHOR_NATIVE -I "$own" -I "$repair" -I "$here" -c "$here/terminal_native.c" -o "$out/tn-refused.o" 2>/dev/null; then
+  echo "ERROR: terminal_native compiled outside M11_CUSTODIAN_NATIVE" >&2; exit 1
+fi
+echo 'PASS G8 native terminal (gcc, clang, ASan+UBSan) and refused outside M11_CUSTODIAN_NATIVE'
+g8_mutant() { # name pattern replacement assertion last-pass (same detection rule as gtn_mutant)
+  local name="$1" pat="$2" rep="$3" want="$4" last="$5" dir="$out/tn-mutant-$1" rc=0 got file=terminal_native.c
+  mkdir -p "$dir"
+  awk -v pat="$pat" -v rep="$rep" 'index($0,pat){n++; print rep; next} {print} END{if(n!=1) exit 3}' \
+    "$here/$file" > "$dir/$file"
+  local srcs=() s
+  for s in "${g8_srcs[@]}"; do [[ "$(basename "$s")" == "$file" ]] && srcs+=("$dir/$file") || srcs+=("$s"); done
+  gcc "${g8_flags[@]}" "${srcs[@]}" -o "$dir/bin"
+  timeout 120 "$dir/bin" > "$dir/log" 2>&1 || rc=$?
+  got="$(grep '^PASS ' "$dir/log" | tail -n1 || true)"
+  if [[ "$rc" != 134 ]] || ! grep -qF -- "Assertion \`$want' failed" "$dir/log" || [[ "$got" != "$last" ]]; then
+    echo "ERROR: G8 mutant $name not detected for the expected reason (rc=$rc, last PASS: '${got}')" >&2
+    cat "$dir/log" >&2; exit 1
+  fi
+  echo "PASS G8 test detects mutant $name: Assertion \`$want'"
+}
+g8_mutant reset-taken-as-orderly 'if (t->action == M11_TERMINAL_ORDERLY_SHUTDOWN && m11_custodian_reboot_permitted(t->c) &&' \
+  '    if ((1) ||' \
+  'st == 42 && strstr(rep, "EXIT fds_open=4/4 pool_open=2") && strstr(rep, "end=pid1_exit anchors_held=2/2 pool=held")' \
+  'PASS never-mapped boot: both anchors final-closed, then reboot; panic sysctl unreadable is recorded'
+g8_mutant no-final-close 'if (a->state == M11_ANCHOR_HELD && m11_anchor_final_close(a) != 0) ok = 0;' '            (void)0;' \
+  'st == 43 && strstr(rep, "REBOOT fds_open=0/4") && strstr(rep, "action=ORDERLY_SHUTDOWN end=reboot anchors_held=0/2")' ''
+g8_mutant reboot-failure-returns 'if (t->ops.reboot_fn(t->ops.user) != 0) { t->reboot_failed = 1;' \
+  '            if (t->ops.reboot_fn(t->ops.user) != 0) return -EIO;' \
+  'st == 42 && strstr(rep, "EXIT fds_open=0/4") && strstr(rep, "note=reboot_failed")' \
+  'PASS orderly end with a refused final close: falls to the reset end, nothing closed, no reboot'
+g8_mutant hold-not-refused 'if (t->action == M11_TERMINAL_HOLD || t->action == M11_TERMINAL_HOLD_RECONCILE) return -EBUSY;' '    (void)0;' \
+  'st == 0 && strstr(rep, "RET=-16 fds_open=4/4")' \
+  'PASS mapped boot (even fully torn down): PID1 exit with all four anchor fds and the pool held; no reboot'
 
 # Unit -> sources it is built from, for the mutants below.
 build() { # name output [file-to-replace replacement-path]
