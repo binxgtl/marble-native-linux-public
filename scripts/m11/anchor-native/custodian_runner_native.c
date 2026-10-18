@@ -174,7 +174,10 @@ int m11_crunner_start(m11_crunner *r, const m11_crunner_config *cfg, uint64_t no
 int m11_crunner_map(m11_crunner *r, size_t bytes, uint64_t now_ms, unsigned *slot) {
     if (!r || !r->started || !slot) return -EINVAL;
     *slot = (unsigned)-1;
+    if (!r->cfg.map_intent_fn) return -EPERM; /* no MAP without the PD's resources-busy wiring */
     if (r->census_failed || m11_crunner_census(r)) return -EOWNERDEAD; /* census before MAP */
+    r->cfg.map_intent_fn(r->cfg.map_intent_user); /* MAP intent: from here a PD DOWN is not acknowledged */
+    r->map_intents++;
     int rc = m11_custodian_map(&r->cust, bytes, now_ms, slot);
     (void)m11_pdr_loop_settle(&r->loop, now_ms); /* settle after MAP */
     if (m11_crunner_census(r) && !rc) rc = -EOWNERDEAD;

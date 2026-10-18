@@ -188,6 +188,8 @@ static void stdio_off_null(void) {
 }
 static unsigned cfg_pool_count = POOL_K;
 static const char *cfg_proc_root; /* NULL: the real /proc */
+static int cfg_no_intent; static unsigned intents; /* the MAP-intent hook (P3 wires the PD session's busy latch) */
+static void count_intent(void *u) { assert(u == &intents); intents++; }
 /* returns start's rc; *step the failing step */
 static int world(enum mode m, const char *cmdline, int *step) {
     stdio_off_null();
@@ -222,7 +224,7 @@ static int world(enum mode m, const char *cmdline, int *step) {
         .pool_count = cfg_pool_count, .pool_len = 4096, .pool_base = POOL_BASE, .sys = &fx_sys, .pd = &mon, .journal = &jsink,
         .terminal_ops = {.exit_fn = t_exit, .reboot_fn = t_reboot, .user = NULL, .panic_path = "/nonexistent-m11/panic"},
         .cmdline = cmdline, .boot_epoch = 11, .timeout_ms = 300, .recovery_budget_ms = 2000, .src_port = 0x0100u,
-        .proc_root = cfg_proc_root};
+        .proc_root = cfg_proc_root, .map_intent_fn = cfg_no_intent ? NULL : count_intent, .map_intent_user = &intents};
     return m11_crunner_start(&R, &C, ms(), step);
 }
 static const char *GOOD = "console=ttyMSM0 iommu.strict=1 rdinit=/init";
@@ -232,6 +234,7 @@ static void c_happy(void) {
     char b[96]; snprintf(b, sizeof b, "START rc=%d step=%d heap_open=%d\n", rc, step, is_open(fx_heap)); say(b);
     assert(rc == 0 && step == 0);
     unsigned s; assert(m11_crunner_map(&R, 4096, ms(), &s) == 0);
+    assert(intents == 1 && R.map_intents == 1); /* the intent hook ran once, before the MAP */
     region_fd = R.cust.regions[s].dma_buf_fd;
     assert(m11_crunner_idle(&R, 50, ms()) == 0);
     assert(m11_crunner_retire(&R, s, ms()) == 0 && m11_crunner_close(&R) == 0);
@@ -379,6 +382,18 @@ static void c_sink_fails(void) {
     say(b); _exit(0);
 }
 
+/* No MAP-intent hook: every MAP is refused before the census, the import or any TX. */
+static void c_no_intent(void) {
+    cfg_no_intent = 1;
+    int step; assert(world(ANSWER, GOOD, &step) == 0);
+    unsigned s; int rc = m11_crunner_map(&R, 4096, ms(), &s);
+    char b[160]; snprintf(b, sizeof b, "MAP rc=%d slot=%d intents=%u attempted=%d\n", rc, (int)s, R.map_intents,
+                          (int)R.boot.dsp_map_attempted); say(b);
+    assert(m11_crunner_close(&R) == 0);
+    (void)m11_crunner_end(&R, ms());
+    _exit(99);
+}
+
 static int peer_count(const char *rep) {
     int best = -1;
     for (const char *p = rep; (p = strstr(p, "PEER n=")); p += 7) { int n = atoi(p + 7); if (n > best) best = n; }
@@ -500,6 +515,12 @@ int main(void) {
     printf("INFO %s", rep);
     assert(st == 0 && strstr(rep, "unresolved=1 END=-16 records=0") && peer_count(rep) == 0);
     printf("PASS composed journal failure: no TX, region unresolved, the end is held (HOLD_RECONCILE)\n");
+
+    st = run(c_no_intent, rep, sizeof rep);
+    printf("INFO %s", rep);
+    assert(strstr(rep, "MAP rc=-1 slot=-1 intents=0 attempted=0") && peer_count(rep) == 0);
+    assert(st == 43 && strstr(rep, "action=ORDERLY_SHUTDOWN end=reboot"));
+    printf("PASS composed MAP without the MAP-intent hook: refused before any import or TX; the boot stays never-mapped\n");
 
     printf("PASS composed native custodian runner core (G1-G8 together over stand-ins)\n");
     return 0;

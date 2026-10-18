@@ -546,6 +546,11 @@ cr_mutant read-ppid-skip 'if (rc) { closedir(d); return -1; }       /* exists bu
 cr_mutant not-one-shot 'if (crunner_started_once) return -EALREADY;' '    (void)0;' \
   'st == 0 && strstr(rep, "SECOND rc=-114 pool_count=2 started=1 stage=6")' \
   'PASS composed tree census: a process gone between readdir and read is not counted'
+cr_mutant map-intent-not-required 'if (!r->cfg.map_intent_fn) return -EPERM;' '    (void)0;' \
+  'strstr(rep, "MAP rc=-1 slot=-1 intents=0 attempted=0") && peer_count(rep) == 0' \
+  'PASS composed journal failure: no TX, region unresolved, the end is held (HOLD_RECONCILE)'
+cr_mutant map-intent-not-called 'r->cfg.map_intent_fn(r->cfg.map_intent_user);' '    (void)0;' \
+  'intents == 1 && R.map_intents == 1' ''
 # Production P1: the long-session SERVREG listener and its QRTR adapter (the G6 PD monitor) over a
 # fixture QRTR; the frozen one-query codec (runtime/audio_pd.c) is not used and stays unchanged.
 p1_srcs=("$here/pd_session_native.c" "$here/gpr_transport_native.c" "$here/test-pd-session-native.c")
@@ -656,6 +661,80 @@ p2_mutant cma-node-allowed 1 '(rc = !lstat(c->ion_cma.node, &st) ? -EEXIST : err
 p2_mutant nodes-left-on-heap-failure 1 '(void)unlink(c->ion.node); (void)unlink(c->endpoint.node); /* nodes go; the anchors stay held */' '        (void)0;' \
   'st == 0 && strstr(rep, "BOOT rc=-19 step=5 stage=4 ep=HELD ion=HELD ep_node=0 ion_node=0 cma_node=0 heap_fd=0 heap_dir=0 sealed=0")' \
   'PASS boot refused when the ION CMA twin has a node: the endpoint stays held, its node removed, no ION node; a retry is refused and leaves the held endpoint intact'
+# Production P3: the PID1 entry (P1 monitor + P2 boot + composed runner + G8 terminal) over a fake
+# sysfs/procfs tree, a scratch /dev and a fixture QRTR crossing processes. Unprivileged refusals; the
+# full boots (never-mapped orderly, mapped HOLD then DOWN, DOWN during MAP, DOWN before MAP) as root.
+p3_srcs=(); p3_main=()
+for s in "${p2_srcs[@]}"; do
+  if [[ "$s" == "$here/test-boot-native.c" ]]; then p3_srcs+=("$here/test-entry-native.c"); p3_main+=("$here/custodian_entry_main.c")
+  else p3_srcs+=("$s"); p3_main+=("$s"); fi
+done
+p3_srcs+=("$here/pd_session_native.c" "$here/custodian_entry_native.c")
+p3_main+=("$here/pd_session_native.c" "$here/custodian_entry_native.c")
+for cm_cc in gcc clang; do
+  "$cm_cc" "${p2_flags[@]}" "${p3_srcs[@]}" -o "$out/entry-native-$cm_cc"
+  timeout 180 "$out/entry-native-$cm_cc" "$out" | tee "$out/entry-native-$cm_cc.log"
+done
+gcc "${p2_flags[@]}" -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer \
+  "${p3_srcs[@]}" -o "$out/entry-native-sanitize"
+timeout 180 "$out/entry-native-sanitize" "$out" | tee "$out/entry-native-sanitize.log"
+if [[ "$sudo_ok" == 1 ]]; then
+  timeout 180 sudo -n "$out/entry-native-gcc" "$out" | tee "$out/entry-native-root.log"
+  grep -qF 'PASS production P3 PID1 entry (root sections)' "$out/entry-native-root.log"
+else
+  if [[ -n "${CI:-}" ]]; then echo "ERROR: P3 root sections need sudo in CI" >&2; exit 1; fi
+  echo "SKIP P3 root sections: no sudo"
+fi
+# The PID1 binary links (production defaults, libc QRTR and syscalls) and refuses to act outside PID1.
+for cm_cc in gcc clang; do
+  "$cm_cc" "${p2_flags[@]}" "${p3_main[@]}" -o "$out/custodian-entry-$cm_cc"
+  rc=0; "$out/custodian-entry-$cm_cc" || rc=$?
+  if [[ "$rc" != 2 ]]; then echo "ERROR: custodian entry binary ($cm_cc) did not refuse outside PID1 (rc=$rc)" >&2; exit 1; fi
+done
+for f in custodian_entry_native.c custodian_entry_main.c; do
+  if gcc -std=c11 -DM11_ANCHOR_NATIVE -I "$own" -I "$repair" -I "$here" -c "$here/$f" -o "$out/cen-refused.o" 2>/dev/null; then
+    echo "ERROR: $f compiled outside M11_CUSTODIAN_NATIVE" >&2; exit 1
+  fi
+done
+echo 'PASS production P3 PID1 entry (gcc, clang, ASan+UBSan, root when sudo); the PID1 binary links and returns 2 outside PID1; refused outside M11_CUSTODIAN_NATIVE'
+p3_mutant() { # name asroot pattern replacement assertion last-pass (same detection rule as gtn_mutant)
+  local name="$1" asroot="$2" pat="$3" rep="$4" want="$5" last="$6" dir="$out/cen-mutant-$1" rc=0 got file=custodian_entry_native.c
+  if [[ "$asroot" == 1 && "$sudo_ok" != 1 ]]; then echo "SKIP P3 mutant $name: no sudo"; return; fi
+  mkdir -p "$dir"
+  awk -v pat="$pat" -v rep="$rep" 'index($0,pat){n++; print rep; next} {print} END{if(n!=1) exit 3}' \
+    "$here/$file" > "$dir/$file"
+  local srcs=() s
+  for s in "${p3_srcs[@]}"; do [[ "$(basename "$s")" == "$file" ]] && srcs+=("$dir/$file") || srcs+=("$s"); done
+  gcc "${p2_flags[@]}" "${srcs[@]}" -o "$dir/bin"
+  if [[ "$asroot" == 1 ]]; then
+    timeout 180 sudo -n "$dir/bin" "$dir" > "$dir/log" 2>&1 || rc=$?
+    sudo -n rm -rf "$dir"/m11-entry-*
+  else
+    timeout 180 "$dir/bin" "$dir" > "$dir/log" 2>&1 || rc=$?
+    rm -rf "$dir"/m11-entry-*
+  fi
+  got="$(grep '^PASS ' "$dir/log" | tail -n1 || true)"
+  if [[ "$rc" != 134 ]] || ! grep -qF -- "Assertion \`$want' failed" "$dir/log" || [[ "$got" != "$last" ]]; then
+    echo "ERROR: P3 mutant $name not detected for the expected reason (rc=$rc, last PASS: '${got}')" >&2
+    cat "$dir/log" >&2; exit 1
+  fi
+  echo "PASS P3 test detects mutant $name: Assertion \`$want'"
+}
+p3_mutant cmdline-gate-late 0 'if (!m11_custodian_cmdline_allowed(e->cmdline)) return entry_fail(e, "cmdline", 3, -EPERM);' '    (void)0;' \
+  'st == 0 && strstr(rep, "CALLS perm=-1 inval=-22 first=-14 second=-114 phase=1/1 fail_step=3/3")' \
+  'PASS default entry: PID1 only, /dev/kmsg (1:11) journal, /proc/cmdline, the AF_QIPCRTR monitor (10 s bring-up), the real nodes, no session (never maps), production terminal ops'
+p3_mutant kmsg-identity-unchecked 0 'if (cfg->journal_require_kmsg && (!S_ISCHR(st.st_mode) || st.st_rdev != makedev(1, 11))) {' '    if (0) {' \
+  'st == 42 && strstr(rep, "EXIT phase=0 fail_step=2 fail_rc=-19 ") && strstr(rep, "sockets=0 spawner=0") && strstr(rep, "rec=none")' \
+  'PASS entry calls: not PID1 and a bad configuration touch nothing and do not count; the first real call does, a second is refused and changes nothing'
+p3_mutant pd-not-awaited 0 'if ((rc = m11_pdmon_wait_up(&e->pdmon, cfg->pd_ready_budget_ms))) return entry_fail(e, "pd_up", 4, rc);' '    (void)0;' \
+  'st == 42 && strstr(rep, "EXIT phase=2 fail_step=4 fail_rc=-102 ") && strstr(rep, "regs=1 sockets=1 spawner=0 anchors_open=0/4 ep_node=0")' \
+  'PASS entry refused by the effective cmdline before anything is opened: no PD socket, no spawner, no node; START_FAILED journaled, PID1 exit'
+p3_mutant map-intent-not-busy 1 'm11_pds_resources_busy(&e->pdmon.pds);' '    (void)e;' \
+  'strstr(rep, "MAP rc=0 busy=1 intents=1") && strstr(rep, "PEER n=1") && strstr(rep, "PEER down_sent") && !strstr(rep, "PEER_VIOLATION")' \
+  'PASS entry, production shape (no session): P1 UP, P2 boot (nodes made, bound, sealed, removed), runner start, close, G8 orderly end: both anchors final-closed, reboot; nothing sent'
+p3_mutant hold-not-waited 1 'if (rc != -EBUSY) return rc;' '        return rc;' \
+  'st == 42 && strstr(rep, "EXIT phase=7 ") && strstr(rep, "busy=1 deferred=1 acks_sent=0") && strstr(rep, "anchors_open=4/4")' \
+  'PASS entry, production shape (no session): P1 UP, P2 boot (nodes made, bound, sealed, removed), runner start, close, G8 orderly end: both anchors final-closed, reboot; nothing sent'
 
 # Unit -> sources it is built from, for the mutants below.
 build() { # name output [file-to-replace replacement-path]

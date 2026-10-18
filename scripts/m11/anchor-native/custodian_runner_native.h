@@ -26,7 +26,8 @@
  * latches for the boot, refuses every later MAP, UNMAP and close (-EOWNERDEAD), leaves the custodian's
  * ledger untouched, and forces the G8 end to the retaining one ("foreign_holder_why=<census_why>"),
  * whatever the custodian decided (HOLD included).
- * Every custodian call is followed by m11_pdr_loop_settle. m11_crunner_end hands the boot to the G8
+ * Every custodian call is followed by m11_pdr_loop_settle. Every MAP is preceded by map_intent_fn
+ * (required; P3 wires the PD session's resources-busy latch there). m11_crunner_end hands the boot to the G8
  * terminal with both anchors, the pool and the journal sink. A start that failed before the custodian
  * enrolled has no G8 decision: m11_crunner_end then journals START_FAILED with the failing step and
  * ends through exit_fn without closing anything (fail closed). Start is one-shot per process.
@@ -57,6 +58,12 @@ typedef struct {
     uint32_t timeout_ms, recovery_budget_ms;
     uint16_t src_port;
     const char *proc_root;             /* NULL = "/proc"; the tree census reads it (tests point it elsewhere) */
+    /* MAP intent (P3): called before every custodian MAP, once the census before it passed, whether or
+     * not the MAP then reaches a TX (the ION import comes first). The PID1 entry wires the P1 session's
+     * m11_pds_resources_busy here, so a PD DOWN is no longer acknowledged once the ADSP may reach our
+     * pages. Required: without it every MAP is refused (-EPERM) and nothing is called. */
+    void (*map_intent_fn)(void *user);
+    void *map_intent_user;
 } m11_crunner_config;
 
 /* census_why bits: which part of the composed census failed (accumulated over the boot) */
@@ -71,6 +78,7 @@ typedef struct {
     int stage;                 /* last completed start step (0..6) */
     int started, census_failed; /* started: the custodian is enrolled (step 5 done) */
     unsigned census_why;
+    unsigned map_intents;      /* map_intent_fn calls */
     char force_note[48];
     m11_dmabuf_pool pool;
     m11_boot_ledger boot;
