@@ -512,23 +512,23 @@ cr_mutant no-settle-after-map '/* settle after MAP */' '    (void)0;' \
   'strstr(rep, "MAP rc=-102 unresolved=1 imports_lost=1")' \
   'PASS composed never-mapped boot: both anchors final-closed, terminal journaled, reboot; nothing sent'
 cr_mutant census-no-taint 'if (r->started) m11_custodian_global_cleanup(&r->cust, r->boot.last_ms);' '        (void)0;' \
-  'strstr(rep, "CLOSE rc=-130 closed=0 census_failed=1 imports_lost=1 MAP rc=-130") && peer_count(rep) == 0' \
+  'strstr(rep, "CLOSE rc=-130 closed=0 census_failed=1 imports_lost=1 MAP rc=-130 why=19") && peer_count(rep) == 0' \
   'PASS composed PD DOWN during MAP: -ENETRESET, region unresolved, custodian told at once, PID1 exit holding everything'
 cr_mutant close-without-census '/* census before close */' '    (void)0;' \
-  'strstr(rep, "CLOSE rc=-130 closed=0 census_failed=1 imports_lost=1 MAP rc=-130") && peer_count(rep) == 0' \
+  'strstr(rep, "CLOSE rc=-130 closed=0 census_failed=1 imports_lost=1 MAP rc=-130 why=19") && peer_count(rep) == 0' \
   'PASS composed PD DOWN during MAP: -ENETRESET, region unresolved, custodian told at once, PID1 exit holding everything'
 cr_mutant no-census-before-map '/* census before MAP */' '    (void)0;' \
-  'strstr(rep, "MAP rc=-130 census_failed=1 imports_lost=1 anchor_check=1") && peer_count(rep) == 0' \
+  'strstr(rep, "MAP rc=-130 census_failed=1 imports_lost=1 anchor_check=1 why=16") && peer_count(rep) == 0' \
   'PASS composed census on close: a foreign holder refuses the close (custodian stays open), taints the boot, refuses the MAP; PID1 exit holding everything'
 cr_mutant no-tree-census 'if (desc[i] && holds_forbidden(r, pids[i]) != 0) return -1;' \
   '        if (desc[i] && holds_forbidden(r, pids[i]) < -1) return -1;' \
-  'strstr(rep, "MAP rc=-130 census_failed=1 imports_lost=1 anchor_check=1") && peer_count(rep) == 0' \
-  'PASS composed census on close: a foreign holder refuses the close (custodian stays open), taints the boot, refuses the MAP; PID1 exit holding everything'
+  'strstr(rep, "CLOSE rc=-130 closed=0 census_failed=1 imports_lost=1 MAP rc=-130 why=19") && peer_count(rep) == 0' \
+  'PASS composed PD DOWN during MAP: -ENETRESET, region unresolved, custodian told at once, PID1 exit holding everything'
 cr_mutant idle-without-census '/* census after idle */' '    (void)0;' \
-  'strstr(rep, "IDLE rc=-130 census_failed=1 imports_lost=1") && st == 42 && strstr(rep, "action=RESET_RETAINING_ANCHORS")' \
+  'strstr(rep, "IDLE rc=-130 census_failed=1 imports_lost=1 why=19") && st == 42 && strstr(rep, "action=RESET_RETAINING_ANCHORS")' \
   'PASS composed tree census: a descendant holding only pool buffers (anchors dropped) fails the census before any TX'
 cr_mutant end-without-census '/* a foreign holder now still turns the end' '    (void)0;' \
-  'st == 42 && strstr(rep, "EXIT anchors=4/4") && strstr(rep, "action=RESET_RETAINING_ANCHORS") && strstr(rep, "note=tainted")' \
+  'st == 42 && strstr(rep, "EXIT anchors=4/4") && strstr(rep, "why=19") && strstr(rep, "action=RESET_RETAINING_ANCHORS") && strstr(rep, "note=tainted")' \
   'PASS composed census after idle: a foreign holder found while idle taints the boot'
 cr_mutant no-cmdline-gate 'if (!ct.strict_iommu) FAIL(1, -EPERM);' '    (void)0;' \
   'strstr(rep, "START rc=-1 step=1 started=0 heap_open=1") && peer_count(rep) == 0 && !strstr(rep, "END returned")' \

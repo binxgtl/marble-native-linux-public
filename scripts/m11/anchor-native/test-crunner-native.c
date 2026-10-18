@@ -171,8 +171,8 @@ static void report(const char *what) {
     int anchors = is_open(ep_a) + is_open(ep_g) + is_open(io_a) + is_open(io_g), pool = 0;
     for (int f = POOL_BASE; f < POOL_BASE + 2 * POOL_K; f++) pool += is_open(f);
     int rp = region_fd >= POOL_BASE && region_fd < POOL_BASE + 2 * POOL_K && (region_fd - POOL_BASE) % 2 == 0;
-    int n = snprintf(b, sizeof b, "%s anchors=%d/4 pool=%d/%d region_in_pool=%d records=%u map=%d unmap=%d terminal=%d rec=%s\n",
-                     what, anchors, pool, 2 * POOL_K, rp, nrec, saw_map, saw_unmap, saw_terminal,
+    int n = snprintf(b, sizeof b, "%s anchors=%d/4 pool=%d/%d region_in_pool=%d records=%u map=%d unmap=%d terminal=%d why=%u rec=%s\n",
+                     what, anchors, pool, 2 * POOL_K, rp, nrec, saw_map, saw_unmap, saw_terminal, R.census_why,
                      R.term.record[0] ? R.term.record : last_rec);
     if (n > 0) (void)!write(report_fd, b, (size_t)n < sizeof b ? (size_t)n : sizeof b - 1);
 }
@@ -259,7 +259,9 @@ static void foreign(int drop_anchors) {
     int go[2]; assert(pipe(go) == 0);
     pid_t f = fork(); assert(f >= 0);
     if (f == 0) {
-        prctl(PR_SET_PDEATHSIG, SIGKILL); close(report_fd); close(go[0]);
+        /* PID1's seal made it non-dumpable; an unprivileged harness could not read this child's fds
+         * and the census would fail as inconclusive. Readable, it must fail for what it holds. */
+        prctl(PR_SET_PDEATHSIG, SIGKILL); prctl(PR_SET_DUMPABLE, 1, 0, 0, 0); close(report_fd); close(go[0]);
         int ok = 1;
         if (drop_anchors)
             ok = syscall(SYS_close_range, (unsigned)ep_a, (unsigned)ep_g, 0u) == 0 &&
@@ -273,8 +275,8 @@ static void c_foreign_holder(void) {
     foreign(0);
     int crc = m11_crunner_close(&R);
     unsigned s; int mrc = m11_crunner_map(&R, 4096, ms(), &s);
-    char b[160]; snprintf(b, sizeof b, "CLOSE rc=%d closed=%d census_failed=%d imports_lost=%d MAP rc=%d\n",
-                          crc, R.cust.closed, R.census_failed, R.cust.kernel_imports_lost, mrc); say(b);
+    char b[160]; snprintf(b, sizeof b, "CLOSE rc=%d closed=%d census_failed=%d imports_lost=%d MAP rc=%d why=%u\n",
+                          crc, R.cust.closed, R.census_failed, R.cust.kernel_imports_lost, mrc, R.census_why); say(b);
     (void)m11_crunner_end(&R, ms());
     _exit(99);
 }
@@ -282,8 +284,8 @@ static void c_pool_only_holder(void) {
     int step; assert(world(ANSWER, GOOD, &step) == 0);
     foreign(1);
     unsigned s; int rc = m11_crunner_map(&R, 4096, ms(), &s);
-    char b[160]; snprintf(b, sizeof b, "MAP rc=%d census_failed=%d imports_lost=%d anchor_check=%d\n", rc, R.census_failed,
-                          R.cust.kernel_imports_lost, m11_anchor_check(&ep) == 0 && m11_anchor_check(&io) == 0); say(b);
+    char b[160]; snprintf(b, sizeof b, "MAP rc=%d census_failed=%d imports_lost=%d anchor_check=%d why=%u\n", rc, R.census_failed,
+                          R.cust.kernel_imports_lost, m11_anchor_check(&ep) == 0 && m11_anchor_check(&io) == 0, R.census_why); say(b);
     (void)m11_crunner_end(&R, ms());
     _exit(99);
 }
@@ -291,7 +293,7 @@ static void c_idle_census(void) {
     int step; assert(world(ANSWER, GOOD, &step) == 0);
     foreign(0);
     int rc = m11_crunner_idle(&R, 20, ms());
-    char b[128]; snprintf(b, sizeof b, "IDLE rc=%d census_failed=%d imports_lost=%d\n", rc, R.census_failed, R.cust.kernel_imports_lost); say(b);
+    char b[128]; snprintf(b, sizeof b, "IDLE rc=%d census_failed=%d imports_lost=%d why=%u\n", rc, R.census_failed, R.cust.kernel_imports_lost, R.census_why); say(b);
     (void)m11_crunner_end(&R, ms());
     _exit(99);
 }
@@ -379,24 +381,24 @@ int main(void) {
 
     st = run(c_foreign_holder, rep, sizeof rep);
     printf("INFO %s", rep);
-    assert(strstr(rep, "CLOSE rc=-130 closed=0 census_failed=1 imports_lost=1 MAP rc=-130") && peer_count(rep) == 0);
+    assert(strstr(rep, "CLOSE rc=-130 closed=0 census_failed=1 imports_lost=1 MAP rc=-130 why=19") && peer_count(rep) == 0);
     assert(st == 42 && strstr(rep, "EXIT anchors=4/4") && strstr(rep, "action=RESET_RETAINING_ANCHORS") && strstr(rep, "note=tainted"));
     printf("PASS composed census on close: a foreign holder refuses the close (custodian stays open), taints the boot, refuses the MAP; PID1 exit holding everything\n");
 
     st = run(c_pool_only_holder, rep, sizeof rep);
     printf("INFO %s", rep);
-    assert(strstr(rep, "MAP rc=-130 census_failed=1 imports_lost=1 anchor_check=1") && peer_count(rep) == 0);
+    assert(strstr(rep, "MAP rc=-130 census_failed=1 imports_lost=1 anchor_check=1 why=16") && peer_count(rep) == 0);
     assert(st == 42 && strstr(rep, "EXIT anchors=4/4 pool=4/4") && strstr(rep, "action=RESET_RETAINING_ANCHORS"));
     printf("PASS composed tree census: a descendant holding only pool buffers (anchors dropped) fails the census before any TX\n");
 
     st = run(c_idle_census, rep, sizeof rep);
     printf("INFO %s", rep);
-    assert(strstr(rep, "IDLE rc=-130 census_failed=1 imports_lost=1") && st == 42 && strstr(rep, "action=RESET_RETAINING_ANCHORS"));
+    assert(strstr(rep, "IDLE rc=-130 census_failed=1 imports_lost=1 why=19") && st == 42 && strstr(rep, "action=RESET_RETAINING_ANCHORS"));
     printf("PASS composed census after idle: a foreign holder found while idle taints the boot\n");
 
     st = run(c_end_census, rep, sizeof rep);
     printf("INFO %s", rep);
-    assert(st == 42 && strstr(rep, "EXIT anchors=4/4") && strstr(rep, "action=RESET_RETAINING_ANCHORS") && strstr(rep, "note=tainted"));
+    assert(st == 42 && strstr(rep, "EXIT anchors=4/4") && strstr(rep, "why=19") && strstr(rep, "action=RESET_RETAINING_ANCHORS") && strstr(rep, "note=tainted"));
     printf("PASS composed census in end: a foreign holder after a clean close turns the orderly end into the retaining one\n");
 
     st = run(c_cmdline_refused, rep, sizeof rep);

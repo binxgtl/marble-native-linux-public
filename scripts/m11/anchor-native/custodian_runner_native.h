@@ -56,10 +56,18 @@ typedef struct {
     uint16_t src_port;
 } m11_crunner_config;
 
+/* census_why bits: which part of the composed census failed (accumulated over the boot) */
+#define M11_CRUNNER_CENSUS_ENDPOINT 1u /* endpoint anchor not HELD or its check failed */
+#define M11_CRUNNER_CENSUS_ION      2u /* ION anchor not HELD or its check failed */
+#define M11_CRUNNER_CENSUS_HEAP     4u /* this process holds the heap device */
+#define M11_CRUNNER_CENSUS_POOL     8u /* this process does not hold the pool exactly */
+#define M11_CRUNNER_CENSUS_TREE    16u /* a descendant holds a pool buffer or the heap, or is unreadable */
+
 typedef struct {
     m11_crunner_config cfg;
     int stage;                 /* last completed start step (0..6) */
     int started, census_failed; /* started: the custodian is enrolled (step 5 done) */
+    unsigned census_why;
     m11_dmabuf_pool pool;
     m11_boot_ledger boot;
     m11_gpr_native_link link;

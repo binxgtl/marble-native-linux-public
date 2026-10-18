@@ -101,13 +101,15 @@ static void census_failed(m11_crunner *r) {
 
 int m11_crunner_census(m11_crunner *r) {
     if (!r || r->stage < 5) return -1;
-    int ok = r->cfg.endpoint->state == M11_ANCHOR_HELD && m11_anchor_check(r->cfg.endpoint) == 0 &&
-             r->cfg.ion->state == M11_ANCHOR_HELD && m11_anchor_check(r->cfg.ion) == 0 &&
-             m11_heap_census_pid(getpid(), r->cfg.heap_rdev, -1) == 0 &&
-             m11_dmabuf_census_pid(&r->pool, getpid(), 1) == 0 &&
-             tree_census(r) == 0;
-    if (!ok) census_failed(r);
-    return ok ? 0 : -1;
+    unsigned why = 0;
+    if (r->cfg.endpoint->state != M11_ANCHOR_HELD || m11_anchor_check(r->cfg.endpoint) != 0) why |= M11_CRUNNER_CENSUS_ENDPOINT;
+    if (r->cfg.ion->state != M11_ANCHOR_HELD || m11_anchor_check(r->cfg.ion) != 0) why |= M11_CRUNNER_CENSUS_ION;
+    if (m11_heap_census_pid(getpid(), r->cfg.heap_rdev, -1) != 0) why |= M11_CRUNNER_CENSUS_HEAP;
+    if (m11_dmabuf_census_pid(&r->pool, getpid(), 1) != 0) why |= M11_CRUNNER_CENSUS_POOL;
+    if (tree_census(r) != 0) why |= M11_CRUNNER_CENSUS_TREE;
+    r->census_why |= why; /* every reason seen in this boot */
+    if (why) census_failed(r);
+    return why ? -1 : 0;
 }
 
 int m11_crunner_start(m11_crunner *r, const m11_crunner_config *cfg, uint64_t now_ms, int *step) {
