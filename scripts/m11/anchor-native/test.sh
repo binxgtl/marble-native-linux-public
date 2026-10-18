@@ -501,7 +501,7 @@ cr_mutant() { # name pattern replacement assertion last-pass (same detection rul
   fi
   echo "PASS composed-runner test detects mutant $name: Assertion \`$want'"
 }
-cr_mutant heap-left-open 'if (close(cfg->heap_fd)) FAIL(3, -EIO);' '    (void)0;' \
+cr_mutant heap-left-open 'int crc = sys->close_fn(cfg->heap_fd);' '    int crc = 0;' \
   'rc == 0 && step == 0' ''
 cr_mutant pool-unsealed 'if ((rc = m11_dmabuf_pool_seal(&r->pool, base, 2))) FAIL(3, rc);' '    (void)base;' \
   'rc == 0 && step == 0' ''
@@ -511,12 +511,38 @@ cr_mutant journal-bypassed 'if ((rc = m11_gpr_engine_init(&r->eng, &r->transport
 cr_mutant no-settle-after-map '/* settle after MAP */' '    (void)0;' \
   'strstr(rep, "MAP rc=-102 unresolved=1 imports_lost=1")' \
   'PASS composed never-mapped boot: both anchors final-closed, terminal journaled, reboot; nothing sent'
-cr_mutant no-census-before-map '/* census before MAP */' '    (void)0;' \
-  'strstr(rep, "MAP rc=-130 census_failed=1") && peer_count(rep) == 0' \
+cr_mutant census-no-taint 'if (r->started) m11_custodian_global_cleanup(&r->cust, r->boot.last_ms);' '        (void)0;' \
+  'strstr(rep, "CLOSE rc=-130 closed=0 census_failed=1 imports_lost=1 MAP rc=-130") && peer_count(rep) == 0' \
   'PASS composed PD DOWN during MAP: -ENETRESET, region unresolved, custodian told at once, PID1 exit holding everything'
+cr_mutant close-without-census '/* census before close */' '    (void)0;' \
+  'strstr(rep, "CLOSE rc=-130 closed=0 census_failed=1 imports_lost=1 MAP rc=-130") && peer_count(rep) == 0' \
+  'PASS composed PD DOWN during MAP: -ENETRESET, region unresolved, custodian told at once, PID1 exit holding everything'
+cr_mutant no-census-before-map '/* census before MAP */' '    (void)0;' \
+  'strstr(rep, "MAP rc=-130 census_failed=1 imports_lost=1 anchor_check=1") && peer_count(rep) == 0' \
+  'PASS composed census on close: a foreign holder refuses the close (custodian stays open), taints the boot, refuses the MAP; PID1 exit holding everything'
+cr_mutant no-tree-census 'if (desc[i] && holds_forbidden(r, pids[i]) != 0) return -1;' \
+  '        if (desc[i] && holds_forbidden(r, pids[i]) < -1) return -1;' \
+  'strstr(rep, "MAP rc=-130 census_failed=1 imports_lost=1 anchor_check=1") && peer_count(rep) == 0' \
+  'PASS composed census on close: a foreign holder refuses the close (custodian stays open), taints the boot, refuses the MAP; PID1 exit holding everything'
+cr_mutant idle-without-census '/* census after idle */' '    (void)0;' \
+  'strstr(rep, "IDLE rc=-130 census_failed=1 imports_lost=1") && st == 42 && strstr(rep, "action=RESET_RETAINING_ANCHORS")' \
+  'PASS composed tree census: a descendant holding only pool buffers (anchors dropped) fails the census before any TX'
+cr_mutant end-without-census '/* a foreign holder now still turns the end' '    (void)0;' \
+  'st == 42 && strstr(rep, "EXIT anchors=4/4") && strstr(rep, "action=RESET_RETAINING_ANCHORS") && strstr(rep, "note=tainted")' \
+  'PASS composed census after idle: a foreign holder found while idle taints the boot'
 cr_mutant no-cmdline-gate 'if (!ct.strict_iommu) FAIL(1, -EPERM);' '    (void)0;' \
-  'st == 0 && strstr(rep, "START rc=-1 step=1 heap_open=1 pool_fd=0") && peer_count(rep) == 0' \
-  'PASS composed census: a foreign holder (post-seal fork) refuses the MAP before any TX and keeps every anchor at the end'
+  'strstr(rep, "START rc=-1 step=1 started=0 heap_open=1") && peer_count(rep) == 0 && !strstr(rep, "END returned")' \
+  'PASS composed census in end: a foreign holder after a clean close turns the orderly end into the retaining one'
+cr_mutant no-partial-end 'if (!r->started) return end_partial(r);' '    if (!r->started) { (void)end_partial; return -EINVAL; }' \
+  'strstr(rep, "START rc=-1 step=1 started=0 heap_open=1") && peer_count(rep) == 0 && !strstr(rep, "END returned")' \
+  'PASS composed census in end: a foreign holder after a clean close turns the orderly end into the retaining one'
+cr_mutant heap-fd-stale 'if (crc) FAIL(3, -EIO); /* nothing allocates after the pool */' \
+  '    if (crc) { r->cfg.heap_fd = cfg->heap_fd; FAIL(3, -EIO); }' \
+  'strstr(rep, "START rc=-5 step=3 started=0 heap_open=0 heapfd=-1 pool_fd=1")' \
+  'PASS composed pool build failure: START_FAILED step=3 with the heap fd untouched'
+cr_mutant not-one-shot 'if (crunner_started_once) return -EALREADY;' '    (void)0;' \
+  'st == 0 && strstr(rep, "SECOND rc=-114 pool_count=2 started=1 stage=6")' \
+  'PASS composed start failing after the sealed pool (engine open at PD DOWN): START_FAILED step=4, PID1 exit holding anchors and pool'
 
 # Unit -> sources it is built from, for the mutants below.
 build() { # name output [file-to-replace replacement-path]

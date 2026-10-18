@@ -24,6 +24,7 @@
 #include <sys/mman.h>
 #include <sys/prctl.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/sysmacros.h>
 #include <sys/wait.h>
 #include <termios.h>
@@ -49,7 +50,13 @@ static int fx_ioctl(int fd, unsigned long req, void *arg) {
     errno = ENOTTY; return -1;
 }
 static int fx_munmap(void *a, size_t l) { return munmap(a, l); }
-static const m11_shmem_native_sys fx_sys = {fx_ioctl, mmap, fx_munmap, close};
+static int fx_fail_heap_close;
+static int fx_close(int fd) { /* close(2) that reports EIO for the heap fd (released anyway, like Linux) */
+    int rc = close(fd);
+    if (fx_fail_heap_close && fd == fx_heap) { errno = EIO; return -1; }
+    return rc;
+}
+static const m11_shmem_native_sys fx_sys = {fx_ioctl, mmap, fx_munmap, fx_close};
 
 /* ---- the ADSP + PD + journal stand-in on the pty slave ---- */
 enum mode { ANSWER, DOWN_ON_MAP, PRE_DOWN };
@@ -116,9 +123,11 @@ static void peer(const char *slave, int journal, int mon, int ready, enum mode m
 }
 
 /* ---- PD monitor (any 'D' or EOF is not UP) and the tee journal sink ---- */
+static int pump_up_once, pump_calls;
 static int pump(void *user, uint64_t now) {
     (void)now;
     int fd = *(int *)user;
+    if (pump_up_once && pump_calls++ >= 1) return 0; /* UP for the start's check, DOWN afterwards */
     for (;;) {
         char b[16]; ssize_t n = read(fd, b, sizeof b);
         if (n < 0) return errno == EAGAIN ? 1 : 0;
@@ -128,12 +137,14 @@ static int pump(void *user, uint64_t now) {
 }
 static m11_intent_fd_sink jfd; static m11_intent_sink jfd_sink;
 static int sink_fail; static unsigned nrec; static int saw_map, saw_unmap, saw_terminal;
+static char last_rec[400];
 static int tee_append(void *u, const char *rec, size_t len) {
     (void)u;
     if (sink_fail) return -EIO;
     int rc = jfd_sink.append_fn(jfd_sink.user, rec, len);
     if (!rc) {
         nrec++;
+        if (len < sizeof last_rec) { memcpy(last_rec, rec, len); last_rec[len] = 0; }
         if (strstr(rec, " op=0100100c ")) saw_map = 1;
         if (strstr(rec, " op=0100100d ")) saw_unmap = 1;
         if (!strncmp(rec, "<6>M11TERMINAL", 14)) saw_terminal = 1;
@@ -161,7 +172,8 @@ static void report(const char *what) {
     for (int f = POOL_BASE; f < POOL_BASE + 2 * POOL_K; f++) pool += is_open(f);
     int rp = region_fd >= POOL_BASE && region_fd < POOL_BASE + 2 * POOL_K && (region_fd - POOL_BASE) % 2 == 0;
     int n = snprintf(b, sizeof b, "%s anchors=%d/4 pool=%d/%d region_in_pool=%d records=%u map=%d unmap=%d terminal=%d rec=%s\n",
-                     what, anchors, pool, 2 * POOL_K, rp, nrec, saw_map, saw_unmap, saw_terminal, R.term.record);
+                     what, anchors, pool, 2 * POOL_K, rp, nrec, saw_map, saw_unmap, saw_terminal,
+                     R.term.record[0] ? R.term.record : last_rec);
     if (n > 0) (void)!write(report_fd, b, (size_t)n < sizeof b ? (size_t)n : sizeof b - 1);
 }
 static void t_exit(void *u) { (void)u; report("EXIT"); _exit(42); }
@@ -174,6 +186,7 @@ static void stdio_off_null(void) {
         int p[2]; assert(!pipe(p)); assert(dup2(fd == 0 ? p[0] : p[1], fd) == fd); close(p[0]); close(p[1]);
     }
 }
+static unsigned cfg_pool_count = POOL_K;
 /* returns start's rc; *step the failing step */
 static int world(enum mode m, const char *cmdline, int *step) {
     stdio_off_null();
@@ -205,7 +218,7 @@ static int world(enum mode m, const char *cmdline, int *step) {
     mon_fd = mp[0]; assert(fcntl(mon_fd, F_SETFL, O_NONBLOCK) == 0);
     mon = (m11_pd_monitor){.fd = mon_fd, .pump_fn = pump, .user = &mon_fd};
     C = (m11_crunner_config){.endpoint = &ep, .ion = &io, .heap_fd = fx_heap, .heap_rdev = zs.st_rdev,
-        .pool_count = POOL_K, .pool_len = 4096, .pool_base = POOL_BASE, .sys = &fx_sys, .pd = &mon, .journal = &jsink,
+        .pool_count = cfg_pool_count, .pool_len = 4096, .pool_base = POOL_BASE, .sys = &fx_sys, .pd = &mon, .journal = &jsink,
         .terminal_ops = {.exit_fn = t_exit, .reboot_fn = t_reboot, .user = NULL, .panic_path = "/nonexistent-m11/panic"},
         .cmdline = cmdline, .boot_epoch = 11, .timeout_ms = 300, .recovery_budget_ms = 2000, .src_port = 0x0100u};
     return m11_crunner_start(&R, &C, ms(), step);
@@ -240,29 +253,73 @@ static void c_down_on_map(void) {
     (void)m11_crunner_end(&R, ms());
     _exit(99);
 }
-static void c_foreign_holder(void) {
-    int step; assert(world(ANSWER, GOOD, &step) == 0);
+/* A post-seal fork of PID1. drop_anchors: it gives up both anchor pairs with the one close each seal
+ * permits, close_range(anchor, guard, 0), and so holds only the pool buffers it cannot close. */
+static void foreign(int drop_anchors) {
     int go[2]; assert(pipe(go) == 0);
     pid_t f = fork(); assert(f >= 0);
-    if (f == 0) { /* a post-seal fork: holds every inherited anchor and pool fd */
+    if (f == 0) {
         prctl(PR_SET_PDEATHSIG, SIGKILL); close(report_fd); close(go[0]);
-        (void)!write(go[1], "f", 1); for (;;) pause();
+        int ok = 1;
+        if (drop_anchors)
+            ok = syscall(SYS_close_range, (unsigned)ep_a, (unsigned)ep_g, 0u) == 0 &&
+                 syscall(SYS_close_range, (unsigned)io_a, (unsigned)io_g, 0u) == 0 && is_open(POOL_BASE);
+        (void)!write(go[1], ok ? "y" : "n", 1); for (;;) pause();
     }
-    close(go[1]); char c; assert(read(go[0], &c, 1) == 1);
-    unsigned s; int rc = m11_crunner_map(&R, 4096, ms(), &s);
-    char b[96]; snprintf(b, sizeof b, "MAP rc=%d census_failed=%d\n", rc, R.census_failed); say(b);
-    (void)m11_crunner_close(&R);
+    close(go[1]); char c; assert(read(go[0], &c, 1) == 1 && c == 'y'); close(go[0]);
+}
+static void c_foreign_holder(void) {
+    int step; assert(world(ANSWER, GOOD, &step) == 0);
+    foreign(0);
+    int crc = m11_crunner_close(&R);
+    unsigned s; int mrc = m11_crunner_map(&R, 4096, ms(), &s);
+    char b[160]; snprintf(b, sizeof b, "CLOSE rc=%d closed=%d census_failed=%d imports_lost=%d MAP rc=%d\n",
+                          crc, R.cust.closed, R.census_failed, R.cust.kernel_imports_lost, mrc); say(b);
     (void)m11_crunner_end(&R, ms());
     _exit(99);
 }
-static void c_cmdline_refused(void) {
-    int step; int rc = world(ANSWER, "console=ttyMSM0 iommu.strict=0", &step);
-    char b[128]; snprintf(b, sizeof b, "START rc=%d step=%d heap_open=%d pool_fd=%d\n", rc, step, is_open(fx_heap), is_open(POOL_BASE));
-    say(b); _exit(0);
+static void c_pool_only_holder(void) {
+    int step; assert(world(ANSWER, GOOD, &step) == 0);
+    foreign(1);
+    unsigned s; int rc = m11_crunner_map(&R, 4096, ms(), &s);
+    char b[160]; snprintf(b, sizeof b, "MAP rc=%d census_failed=%d imports_lost=%d anchor_check=%d\n", rc, R.census_failed,
+                          R.cust.kernel_imports_lost, m11_anchor_check(&ep) == 0 && m11_anchor_check(&io) == 0); say(b);
+    (void)m11_crunner_end(&R, ms());
+    _exit(99);
 }
-static void c_pd_down_at_start(void) {
-    int step; int rc = world(PRE_DOWN, GOOD, &step);
-    char b[128]; snprintf(b, sizeof b, "START rc=%d step=%d heap_open=%d pool_fd=%d\n", rc, step, is_open(fx_heap), is_open(POOL_BASE));
+static void c_idle_census(void) {
+    int step; assert(world(ANSWER, GOOD, &step) == 0);
+    foreign(0);
+    int rc = m11_crunner_idle(&R, 20, ms());
+    char b[128]; snprintf(b, sizeof b, "IDLE rc=%d census_failed=%d imports_lost=%d\n", rc, R.census_failed, R.cust.kernel_imports_lost); say(b);
+    (void)m11_crunner_end(&R, ms());
+    _exit(99);
+}
+static void c_end_census(void) {
+    int step; assert(world(ANSWER, GOOD, &step) == 0);
+    assert(m11_crunner_close(&R) == 0);
+    foreign(0); /* appears after a clean close, before the end */
+    (void)m11_crunner_end(&R, ms());
+    _exit(99);
+}
+static void partial(enum mode m, const char *cmdline) {
+    int step; int rc = world(m, cmdline, &step);
+    char b[160]; snprintf(b, sizeof b, "START rc=%d step=%d started=%d heap_open=%d heapfd=%d pool_fd=%d\n", rc, step,
+                          R.started, is_open(fx_heap), R.cfg.heap_fd, is_open(POOL_BASE));
+    say(b);
+    (void)m11_crunner_end(&R, ms());
+    say("END returned\n");
+    _exit(0);
+}
+static void c_cmdline_refused(void) { partial(ANSWER, "console=ttyMSM0 iommu.strict=0"); }
+static void c_pd_down_at_start(void) { partial(PRE_DOWN, GOOD); }
+static void c_build_fails(void) { cfg_pool_count = 0; partial(ANSWER, GOOD); }
+static void c_heap_close_fails(void) { fx_fail_heap_close = 1; partial(ANSWER, GOOD); }
+static void c_step4_fails(void) { pump_up_once = 1; partial(ANSWER, GOOD); }
+static void c_second_start(void) {
+    int step; assert(world(ANSWER, GOOD, &step) == 0);
+    int rc = m11_crunner_start(&R, &C, ms(), &step);
+    char b[128]; snprintf(b, sizeof b, "SECOND rc=%d pool_count=%u started=%d stage=%d\n", rc, R.pool.count, R.started, R.stage);
     say(b); _exit(0);
 }
 static void c_sink_fails(void) {
@@ -322,19 +379,58 @@ int main(void) {
 
     st = run(c_foreign_holder, rep, sizeof rep);
     printf("INFO %s", rep);
-    assert(strstr(rep, "MAP rc=-130 census_failed=1") && peer_count(rep) == 0);
-    assert(st == 42 && strstr(rep, "EXIT anchors=4/4") && strstr(rep, "note=anchor_not_held"));
-    printf("PASS composed census: a foreign holder (post-seal fork) refuses the MAP before any TX and keeps every anchor at the end\n");
+    assert(strstr(rep, "CLOSE rc=-130 closed=0 census_failed=1 imports_lost=1 MAP rc=-130") && peer_count(rep) == 0);
+    assert(st == 42 && strstr(rep, "EXIT anchors=4/4") && strstr(rep, "action=RESET_RETAINING_ANCHORS") && strstr(rep, "note=tainted"));
+    printf("PASS composed census on close: a foreign holder refuses the close (custodian stays open), taints the boot, refuses the MAP; PID1 exit holding everything\n");
+
+    st = run(c_pool_only_holder, rep, sizeof rep);
+    printf("INFO %s", rep);
+    assert(strstr(rep, "MAP rc=-130 census_failed=1 imports_lost=1 anchor_check=1") && peer_count(rep) == 0);
+    assert(st == 42 && strstr(rep, "EXIT anchors=4/4 pool=4/4") && strstr(rep, "action=RESET_RETAINING_ANCHORS"));
+    printf("PASS composed tree census: a descendant holding only pool buffers (anchors dropped) fails the census before any TX\n");
+
+    st = run(c_idle_census, rep, sizeof rep);
+    printf("INFO %s", rep);
+    assert(strstr(rep, "IDLE rc=-130 census_failed=1 imports_lost=1") && st == 42 && strstr(rep, "action=RESET_RETAINING_ANCHORS"));
+    printf("PASS composed census after idle: a foreign holder found while idle taints the boot\n");
+
+    st = run(c_end_census, rep, sizeof rep);
+    printf("INFO %s", rep);
+    assert(st == 42 && strstr(rep, "EXIT anchors=4/4") && strstr(rep, "action=RESET_RETAINING_ANCHORS") && strstr(rep, "note=tainted"));
+    printf("PASS composed census in end: a foreign holder after a clean close turns the orderly end into the retaining one\n");
 
     st = run(c_cmdline_refused, rep, sizeof rep);
     printf("INFO %s", rep);
-    assert(st == 0 && strstr(rep, "START rc=-1 step=1 heap_open=1 pool_fd=0") && peer_count(rep) == 0);
-    printf("PASS composed start refused by the effective cmdline (iommu.strict=0): no pool, heap untouched, nothing sent\n");
+    assert(strstr(rep, "START rc=-1 step=1 started=0 heap_open=1") && peer_count(rep) == 0 && !strstr(rep, "END returned"));
+    assert(st == 42 && strstr(rep, "EXIT anchors=4/4 pool=0/4") && strstr(rep, "action=START_FAILED end=pid1_exit step=1") && strstr(rep, "pool=none heap_open=1"));
+    printf("PASS composed start refused by the effective cmdline: no pool, heap untouched, nothing sent; the end is START_FAILED step=1, PID1 exit\n");
 
     st = run(c_pd_down_at_start, rep, sizeof rep);
     printf("INFO %s", rep);
-    assert(st == 0 && strstr(rep, "START rc=-102 step=2 heap_open=1 pool_fd=0") && peer_count(rep) == 0);
-    printf("PASS composed start refused while the PD is not UP: no pool, nothing sent\n");
+    assert(strstr(rep, "START rc=-102 step=2 started=0") && st == 42 && strstr(rep, "action=START_FAILED end=pid1_exit step=2"));
+    printf("PASS composed start refused while the PD is not UP: START_FAILED step=2, PID1 exit\n");
+
+    st = run(c_build_fails, rep, sizeof rep);
+    printf("INFO %s", rep);
+    assert(strstr(rep, "START rc=-22 step=3 started=0 heap_open=1") && st == 42 && strstr(rep, "step=3 anchor_fds_open=4/4 pool=none heap_open=1"));
+    printf("PASS composed pool build failure: START_FAILED step=3 with the heap fd untouched\n");
+
+    st = run(c_heap_close_fails, rep, sizeof rep);
+    printf("INFO %s", rep);
+    assert(strstr(rep, "START rc=-5 step=3 started=0 heap_open=0 heapfd=-1 pool_fd=1"));
+    assert(st == 42 && strstr(rep, "EXIT anchors=4/4 pool=4/4") && strstr(rep, "step=3 anchor_fds_open=4/4 pool=held heap_open=0"));
+    printf("PASS composed heap close error: the fd is treated as released (never reused), START_FAILED step=3 holding the pool\n");
+
+    st = run(c_step4_fails, rep, sizeof rep);
+    printf("INFO %s", rep);
+    assert(strstr(rep, "START rc=-102 step=4 started=0 heap_open=0") && peer_count(rep) == 0);
+    assert(st == 42 && strstr(rep, "EXIT anchors=4/4 pool=4/4") && strstr(rep, "action=START_FAILED end=pid1_exit step=4 anchor_fds_open=4/4 pool=held"));
+    printf("PASS composed start failing after the sealed pool (engine open at PD DOWN): START_FAILED step=4, PID1 exit holding anchors and pool\n");
+
+    st = run(c_second_start, rep, sizeof rep);
+    printf("INFO %s", rep);
+    assert(st == 0 && strstr(rep, "SECOND rc=-114 pool_count=2 started=1 stage=6"));
+    printf("PASS composed start is one-shot: a second start is refused and leaves the running state intact\n");
 
     st = run(c_sink_fails, rep, sizeof rep);
     printf("INFO %s", rep);

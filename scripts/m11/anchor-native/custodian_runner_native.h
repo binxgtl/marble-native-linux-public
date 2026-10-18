@@ -17,12 +17,17 @@
  *   5. the region manager runs over the pooled G3 backend with the ION anchor; the custodian (G1)
  *      enrols with the model contract; the PDR loop (G6) is bound;
  *   6. the composed census must pass.
- * The composed census (before and after every custodian call): both anchors HELD and passing
- * m11_anchor_check (identity, CLOEXEC, holders), the heap device held by nobody (closed in step 3),
- * and the dma-buf pool held exactly at its pairs by this process (G5 census). A failed census
- * latches for the boot: no further MAP or UNMAP is attempted (-EOWNERDEAD).
+ * The composed census (before and after MAP, UNMAP and close, after idle, and once more in end):
+ * both anchors HELD and passing m11_anchor_check (identity, CLOEXEC, holders), the heap device held by
+ * nobody (closed in step 3), the dma-buf pool held exactly at its pairs by this process (G5 census),
+ * and no descendant of this process holding a pool buffer or the heap device (an unreadable or
+ * exiting descendant is inconclusive and fails). A failed census is a foreign holder: it latches for
+ * the boot, refuses every later MAP, UNMAP and close (-EOWNERDEAD), and is reported to the custodian
+ * as an uncontrolled global cleanup, so the boot's only end becomes RESET_RETAINING_ANCHORS.
  * Every custodian call is followed by m11_pdr_loop_settle. m11_crunner_end hands the boot to the G8
- * terminal with both anchors, the pool and the journal sink.
+ * terminal with both anchors, the pool and the journal sink. A start that failed before the custodian
+ * enrolled has no G8 decision: m11_crunner_end then journals START_FAILED with the failing step and
+ * ends through exit_fn without closing anything (fail closed). Start is one-shot per process.
  */
 #ifndef M11_CUSTODIAN_RUNNER_NATIVE_H
 #define M11_CUSTODIAN_RUNNER_NATIVE_H
@@ -53,7 +58,8 @@ typedef struct {
 
 typedef struct {
     m11_crunner_config cfg;
-    int started, census_failed;
+    int stage;                 /* last completed start step (0..6) */
+    int started, census_failed; /* started: the custodian is enrolled (step 5 done) */
     m11_dmabuf_pool pool;
     m11_boot_ledger boot;
     m11_gpr_native_link link;
