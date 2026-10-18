@@ -187,6 +187,7 @@ static void stdio_off_null(void) {
     }
 }
 static unsigned cfg_pool_count = POOL_K;
+static const char *cfg_proc_root; /* NULL: the real /proc */
 /* returns start's rc; *step the failing step */
 static int world(enum mode m, const char *cmdline, int *step) {
     stdio_off_null();
@@ -220,7 +221,8 @@ static int world(enum mode m, const char *cmdline, int *step) {
     C = (m11_crunner_config){.endpoint = &ep, .ion = &io, .heap_fd = fx_heap, .heap_rdev = zs.st_rdev,
         .pool_count = cfg_pool_count, .pool_len = 4096, .pool_base = POOL_BASE, .sys = &fx_sys, .pd = &mon, .journal = &jsink,
         .terminal_ops = {.exit_fn = t_exit, .reboot_fn = t_reboot, .user = NULL, .panic_path = "/nonexistent-m11/panic"},
-        .cmdline = cmdline, .boot_epoch = 11, .timeout_ms = 300, .recovery_budget_ms = 2000, .src_port = 0x0100u};
+        .cmdline = cmdline, .boot_epoch = 11, .timeout_ms = 300, .recovery_budget_ms = 2000, .src_port = 0x0100u,
+        .proc_root = cfg_proc_root};
     return m11_crunner_start(&R, &C, ms(), step);
 }
 static const char *GOOD = "console=ttyMSM0 iommu.strict=1 rdinit=/init";
@@ -318,6 +320,49 @@ static void c_pd_down_at_start(void) { partial(PRE_DOWN, GOOD); }
 static void c_build_fails(void) { cfg_pool_count = 0; partial(ANSWER, GOOD); }
 static void c_heap_close_fails(void) { fx_fail_heap_close = 1; partial(ANSWER, GOOD); }
 static void c_step4_fails(void) { pump_up_once = 1; partial(ANSWER, GOOD); }
+/* A clean, never-mapped boot whose census fails only through a descendant holding pool buffers: the
+ * custodian alone would choose the orderly reboot (anchors pass their checks). */
+static void c_pool_holder_after_close(void) {
+    int step; assert(world(ANSWER, GOOD, &step) == 0);
+    assert(m11_crunner_close(&R) == 0);
+    foreign(1);
+    (void)m11_crunner_end(&R, ms());
+    _exit(99);
+}
+/* A fake proc tree for the tree census: one readable unrelated process, plus (unreadable) a process
+ * that exists but whose stat cannot be read, or (gone) an entry whose directory no longer exists. */
+static char fake_proc[64];
+static void make_fake_proc(int unreadable) {
+    snprintf(fake_proc, sizeof fake_proc, "/tmp/m11-proc-XXXXXX");
+    assert(mkdtemp(fake_proc));
+    char p[160];
+    snprintf(p, sizeof p, "%s/1", fake_proc); assert(mkdir(p, 0755) == 0);
+    snprintf(p, sizeof p, "%s/1/stat", fake_proc);
+    FILE *f = fopen(p, "w"); assert(f && fputs("1 (init) S 0 1 1 0 -1\n", f) >= 0 && fclose(f) == 0);
+    if (unreadable) {
+        snprintf(p, sizeof p, "%s/4242", fake_proc); assert(mkdir(p, 0755) == 0);
+        snprintf(p, sizeof p, "%s/4242/stat", fake_proc);
+        f = fopen(p, "w"); assert(f && fputs("4242 (x) S 1 1 1 0 -1\n", f) >= 0 && fclose(f) == 0);
+        assert(chmod(p, 0) == 0);
+    } else {
+        char t[160]; snprintf(t, sizeof t, "%s/no-such-dir", fake_proc);
+        snprintf(p, sizeof p, "%s/4243", fake_proc); assert(symlink(t, p) == 0);
+    }
+    cfg_proc_root = fake_proc;
+}
+static void c_proc_unreadable(void) {
+    make_fake_proc(1);
+    int step; int rc = world(ANSWER, GOOD, &step);
+    char b[128]; snprintf(b, sizeof b, "START rc=%d step=%d started=%d why=%u\n", rc, step, R.started, R.census_why); say(b);
+    (void)m11_crunner_end(&R, ms());
+    _exit(99);
+}
+static void c_proc_gone(void) {
+    make_fake_proc(0);
+    int step; int rc = world(ANSWER, GOOD, &step);
+    char b[128]; snprintf(b, sizeof b, "START rc=%d step=%d started=%d why=%u\n", rc, step, R.started, R.census_why); say(b);
+    _exit(0);
+}
 static void c_second_start(void) {
     int step; assert(world(ANSWER, GOOD, &step) == 0);
     int rc = m11_crunner_start(&R, &C, ms(), &step);
@@ -381,25 +426,30 @@ int main(void) {
 
     st = run(c_foreign_holder, rep, sizeof rep);
     printf("INFO %s", rep);
-    assert(strstr(rep, "CLOSE rc=-130 closed=0 census_failed=1 imports_lost=1 MAP rc=-130 why=19") && peer_count(rep) == 0);
-    assert(st == 42 && strstr(rep, "EXIT anchors=4/4") && strstr(rep, "action=RESET_RETAINING_ANCHORS") && strstr(rep, "note=tainted"));
-    printf("PASS composed census on close: a foreign holder refuses the close (custodian stays open), taints the boot, refuses the MAP; PID1 exit holding everything\n");
+    assert(strstr(rep, "CLOSE rc=-130 closed=0 census_failed=1 imports_lost=0 MAP rc=-130 why=19") && peer_count(rep) == 0);
+    assert(st == 42 && strstr(rep, "EXIT anchors=4/4") && strstr(rep, "action=HOLD end=pid1_exit") && strstr(rep, "note=foreign_holder_why=19"));
+    printf("PASS composed census on close: a foreign holder refuses the close (custodian stays open, ledger untainted) and the MAP; the end is forced retaining\n");
 
     st = run(c_pool_only_holder, rep, sizeof rep);
     printf("INFO %s", rep);
-    assert(strstr(rep, "MAP rc=-130 census_failed=1 imports_lost=1 anchor_check=1 why=16") && peer_count(rep) == 0);
-    assert(st == 42 && strstr(rep, "EXIT anchors=4/4 pool=4/4") && strstr(rep, "action=RESET_RETAINING_ANCHORS"));
+    assert(strstr(rep, "MAP rc=-130 census_failed=1 imports_lost=0 anchor_check=1 why=16") && peer_count(rep) == 0);
+    assert(st == 42 && strstr(rep, "EXIT anchors=4/4 pool=4/4") && strstr(rep, "note=foreign_holder_why=16"));
     printf("PASS composed tree census: a descendant holding only pool buffers (anchors dropped) fails the census before any TX\n");
 
     st = run(c_idle_census, rep, sizeof rep);
     printf("INFO %s", rep);
-    assert(strstr(rep, "IDLE rc=-130 census_failed=1 imports_lost=1 why=19") && st == 42 && strstr(rep, "action=RESET_RETAINING_ANCHORS"));
-    printf("PASS composed census after idle: a foreign holder found while idle taints the boot\n");
+    assert(strstr(rep, "IDLE rc=-130 census_failed=1 imports_lost=0 why=19") && st == 42 && strstr(rep, "note=foreign_holder_why=19"));
+    printf("PASS composed census after idle: a foreign holder found while idle forces the retaining end\n");
 
     st = run(c_end_census, rep, sizeof rep);
     printf("INFO %s", rep);
-    assert(st == 42 && strstr(rep, "EXIT anchors=4/4") && strstr(rep, "why=19") && strstr(rep, "action=RESET_RETAINING_ANCHORS") && strstr(rep, "note=tainted"));
+    assert(st == 42 && strstr(rep, "EXIT anchors=4/4") && strstr(rep, "why=19") && strstr(rep, "action=ORDERLY_SHUTDOWN end=pid1_exit") && strstr(rep, "note=foreign_holder_why=19"));
     printf("PASS composed census in end: a foreign holder after a clean close turns the orderly end into the retaining one\n");
+
+    st = run(c_pool_holder_after_close, rep, sizeof rep);
+    printf("INFO %s", rep);
+    assert(st == 42 && strstr(rep, "EXIT anchors=4/4 pool=4/4") && strstr(rep, "action=ORDERLY_SHUTDOWN end=pid1_exit") && strstr(rep, "note=foreign_holder_why=16"));
+    printf("PASS composed census in end: a descendant holding only pool buffers after a clean close prevents the orderly reboot the custodian alone would choose\n");
 
     st = run(c_cmdline_refused, rep, sizeof rep);
     printf("INFO %s", rep);
@@ -428,6 +478,18 @@ int main(void) {
     assert(strstr(rep, "START rc=-102 step=4 started=0 heap_open=0") && peer_count(rep) == 0);
     assert(st == 42 && strstr(rep, "EXIT anchors=4/4 pool=4/4") && strstr(rep, "action=START_FAILED end=pid1_exit step=4 anchor_fds_open=4/4 pool=held"));
     printf("PASS composed start failing after the sealed pool (engine open at PD DOWN): START_FAILED step=4, PID1 exit holding anchors and pool\n");
+
+    if (geteuid() != 0) { /* root reads a mode-0 file: the unreadable case needs an unprivileged harness */
+        st = run(c_proc_unreadable, rep, sizeof rep);
+        printf("INFO %s", rep);
+        assert(strstr(rep, "START rc=-130 step=6 started=1 why=16") && st == 42 && strstr(rep, "note=foreign_holder_why=16"));
+        printf("PASS composed tree census: a process that exists but whose /proc stat cannot be read fails the census (fail closed)\n");
+    } else printf("SKIP unreadable /proc entry case: running as root\n");
+
+    st = run(c_proc_gone, rep, sizeof rep);
+    printf("INFO %s", rep);
+    assert(st == 0 && strstr(rep, "START rc=0 step=0 started=1 why=0"));
+    printf("PASS composed tree census: a process gone between readdir and read is not counted\n");
 
     st = run(c_second_start, rep, sizeof rep);
     printf("INFO %s", rep);

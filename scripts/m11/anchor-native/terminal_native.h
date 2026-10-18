@@ -45,6 +45,10 @@ typedef struct {
     const m11_dmabuf_pool *pool;   /* NULL: no pool */
     const m11_intent_sink *sink;   /* NULL: no record */
     m11_terminal_ops ops;
+    /* Non-NULL: end retaining whatever the custodian decided (HOLD included), with this note. Set by
+     * the composed runner after an ownership violation (a failed census): the custodian ledger is
+     * left as it is (no fake taint), the end is forced conservative here. */
+    const char *force_retain_note;
     /* what the last call did, for the caller's journal and tests */
     m11_terminal_action action;
     int orderly_failed, reboot_failed, sink_failed;

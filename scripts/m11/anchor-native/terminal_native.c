@@ -123,6 +123,10 @@ int m11_terminal_native_end(m11_terminal_native *t, uint64_t now_ms) {
     t->orderly_failed = t->reboot_failed = t->sink_failed = t->saved = 0;
     (void)m11_custodian_tick(t->c, now_ms);
     t->action = m11_custodian_terminal_action(t->c);
+    if (t->force_retain_note) { /* an ownership violation: the record keeps the custodian's own decision */
+        t->panic = read_panic(t->ops.panic_path);
+        return end_retaining(t, t->force_retain_note);
+    }
     if (t->action == M11_TERMINAL_HOLD || t->action == M11_TERMINAL_HOLD_RECONCILE) return -EBUSY;
     t->panic = read_panic(t->ops.panic_path);
 

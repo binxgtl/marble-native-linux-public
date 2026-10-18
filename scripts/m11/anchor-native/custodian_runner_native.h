@@ -20,10 +20,12 @@
  * The composed census (before and after MAP, UNMAP and close, after idle, and once more in end):
  * both anchors HELD and passing m11_anchor_check (identity, CLOEXEC, holders), the heap device held by
  * nobody (closed in step 3), the dma-buf pool held exactly at its pairs by this process (G5 census),
- * and no descendant of this process holding a pool buffer or the heap device (an unreadable or
- * exiting descendant is inconclusive and fails). A failed census is a foreign holder: it latches for
- * the boot, refuses every later MAP, UNMAP and close (-EOWNERDEAD), and is reported to the custodian
- * as an uncontrolled global cleanup, so the boot's only end becomes RESET_RETAINING_ANCHORS.
+ * and no descendant of this process holding a pool buffer or the heap device (a process that exists
+ * but whose /proc entry cannot be read, or an exiting descendant, is inconclusive and fails; one that
+ * is gone is not counted). A failed census proves an ownership violation, not a global cleanup: it
+ * latches for the boot, refuses every later MAP, UNMAP and close (-EOWNERDEAD), leaves the custodian's
+ * ledger untouched, and forces the G8 end to the retaining one ("foreign_holder_why=<census_why>"),
+ * whatever the custodian decided (HOLD included).
  * Every custodian call is followed by m11_pdr_loop_settle. m11_crunner_end hands the boot to the G8
  * terminal with both anchors, the pool and the journal sink. A start that failed before the custodian
  * enrolled has no G8 decision: m11_crunner_end then journals START_FAILED with the failing step and
@@ -54,6 +56,7 @@ typedef struct {
     uint64_t boot_epoch;
     uint32_t timeout_ms, recovery_budget_ms;
     uint16_t src_port;
+    const char *proc_root;             /* NULL = "/proc"; the tree census reads it (tests point it elsewhere) */
 } m11_crunner_config;
 
 /* census_why bits: which part of the composed census failed (accumulated over the boot) */
@@ -68,6 +71,7 @@ typedef struct {
     int stage;                 /* last completed start step (0..6) */
     int started, census_failed; /* started: the custodian is enrolled (step 5 done) */
     unsigned census_why;
+    char force_note[48];
     m11_dmabuf_pool pool;
     m11_boot_ledger boot;
     m11_gpr_native_link link;

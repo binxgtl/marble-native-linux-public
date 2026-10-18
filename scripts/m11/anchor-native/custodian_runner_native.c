@@ -20,14 +20,21 @@ static int is_open(int fd) { return fd >= 0 && fcntl(fd, F_GETFD) != -1; }
 
 /* ---- the tree-wide part of the census: no descendant of this process holds a pool buffer or the
  * heap device. An unreadable or exiting descendant is inconclusive and fails the census. ---- */
-static int read_ppid(pid_t pid, pid_t *ppid) {
-    char path[64], b[512];
-    snprintf(path, sizeof path, "/proc/%ld/stat", (long)pid);
+static const char *proc_root(const m11_crunner *r) { return r->cfg.proc_root ? r->cfg.proc_root : "/proc"; }
+/* 0 with *ppid; 1 when the process is gone (its /proc directory no longer exists); -1 when it exists
+ * but its stat cannot be read or parsed (inconclusive: the census fails closed). */
+static int read_ppid(const m11_crunner *r, pid_t pid, pid_t *ppid) {
+    char path[300], dir[300], b[512];
+    snprintf(dir, sizeof dir, "%s/%ld", proc_root(r), (long)pid);
+    snprintf(path, sizeof path, "%s/stat", dir);
     int fd = open(path, O_RDONLY | O_CLOEXEC);
-    if (fd < 0) return -1;
-    ssize_t n = read(fd, b, sizeof b - 1);
-    close(fd);
-    if (n <= 0) return -1;
+    ssize_t n = -1;
+    if (fd >= 0) { n = read(fd, b, sizeof b - 1); close(fd); }
+    if (n <= 0) {
+        struct stat st;
+        if (stat(dir, &st) && errno == ENOENT) return 1; /* gone between readdir and read */
+        return -1;                                       /* exists, unreadable */
+    }
     b[n] = 0;
     char *rp = strrchr(b, ')'); /* comm may contain spaces and parentheses */
     char state; long pp;
@@ -36,8 +43,8 @@ static int read_ppid(pid_t pid, pid_t *ppid) {
     return 0;
 }
 static int holds_forbidden(const m11_crunner *r, pid_t pid) {
-    char path[64], item[64 + 256 + 8];
-    snprintf(path, sizeof path, "/proc/%ld/fd", (long)pid);
+    char path[300], item[300 + 256 + 8];
+    snprintf(path, sizeof path, "%s/%ld/fd", proc_root(r), (long)pid);
     DIR *d = opendir(path);
     if (!d) return -1;
     int bad = 0;
@@ -61,7 +68,7 @@ static int tree_census(const m11_crunner *r) {
     static pid_t pids[MAX_PROCS], ppids[MAX_PROCS];
     static unsigned char desc[MAX_PROCS];
     unsigned n = 0;
-    DIR *d = opendir("/proc");
+    DIR *d = opendir(proc_root(r));
     if (!d) return -1;
     for (;;) {
         errno = 0;
@@ -70,8 +77,10 @@ static int tree_census(const m11_crunner *r) {
         char *end; long v = strtol(e->d_name, &end, 10);
         if (e->d_name[0] < '0' || e->d_name[0] > '9' || *end || v <= 0) continue;
         if (n == MAX_PROCS) { closedir(d); return -1; }
-        pid_t pp;
-        if (read_ppid((pid_t)v, &pp)) continue; /* gone between readdir and read: not in the tree now */
+        pid_t pp = 0;
+        int rc = read_ppid(r, (pid_t)v, &pp);
+        if (rc == 1) continue;                    /* gone: not in the tree any more */
+        if (rc) { closedir(d); return -1; }       /* exists but unreadable: its ancestry is unknown */
         pids[n] = (pid_t)v; ppids[n] = pp; desc[n] = 0; n++;
     }
     closedir(d);
@@ -90,13 +99,11 @@ static int tree_census(const m11_crunner *r) {
     return 0;
 }
 
-/* A failed census is a foreign holder: modelled as an uncontrolled global cleanup (imports lost),
- * so the boot's only end becomes RESET_RETAINING_ANCHORS. Latched for the boot. */
+/* A failed census proves an ownership violation (a foreign or unknowable holder), not that a global
+ * cleanup ran: the custodian's ledger is NOT tainted with one. The runner latches it, refuses every
+ * later MAP, UNMAP and close, and forces the retaining end itself (m11_crunner_end). */
 static void census_failed(m11_crunner *r) {
-    if (!r->census_failed) {
-        r->census_failed = 1;
-        if (r->started) m11_custodian_global_cleanup(&r->cust, r->boot.last_ms);
-    }
+    r->census_failed = 1;
 }
 
 int m11_crunner_census(m11_crunner *r) {
@@ -223,5 +230,9 @@ int m11_crunner_end(m11_crunner *r, uint64_t now_ms) {
     if (!r->started) return end_partial(r);
     (void)m11_crunner_census(r); /* a foreign holder now still turns the end into the retaining one */
     (void)m11_pdr_loop_settle(&r->loop, now_ms);
+    if (r->census_failed) { /* ownership violation: forced conservative end, custodian ledger untouched */
+        snprintf(r->force_note, sizeof r->force_note, "foreign_holder_why=%u", r->census_why);
+        r->term.force_retain_note = r->force_note;
+    }
     return m11_terminal_native_end(&r->term, now_ms);
 }
