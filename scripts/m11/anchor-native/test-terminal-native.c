@@ -1,9 +1,10 @@
 /* G8 stand-in test: the native end of a custodian boot. Each case runs in a child that binds two
  * real anchor adapters on stand-ins (/dev/ptmx endpoint, /dev/null ION; actual Linux backend), seals
- * them with the real owner seal, and drives the REAL custodian, manager and engine (G2 transport to a
- * forked ADSP stand-in, G3 backend over fixture syscalls with the real ION anchor). The test's
- * exit_fn / reboot_fn report, at the moment the boot ends, which fds are still open and the terminal
- * record. No device, driver or reboot. */
+ * them with the real owner seal, builds and seals a dma-buf pool where the case needs one, and drives
+ * the REAL custodian, manager and engine (G2 transport to a forked ADSP stand-in; G3 backend, pooled
+ * or not, with the real ION anchor). The terminal record goes through the production fd sink to a
+ * pipe. The test's exit_fn / reboot_fn report, at the moment the boot ends, which anchor and pool
+ * fds are still open, what the journal pipe already holds, and the record. No device or reboot. */
 #ifndef M11_CUSTODIAN_NATIVE
 #error "test-terminal-native.c builds only with M11_CUSTODIAN_NATIVE"
 #endif
@@ -69,6 +70,8 @@ static void peer(int ep) {
 }
 
 /* ---- per-case world ---- */
+#define POOL_BASE 200
+#define POOL_K 2
 static const m11_anchor_contract evidence = {.endpoint_has_no_flush = true,
     .release_on_last_fput_only = true, .owner_single_threaded = true};
 static m11_anchor_linux le, li;
@@ -76,8 +79,9 @@ static m11_pid1_anchor ep, io, tep;
 static m11_gpr_native_link glink; static m11_gpr_transport_t gt; static m11_gpr_engine_t eng;
 static m11_shmem_native_link slink; static m11_shmem_backend_t sb; static m11_shmem_mgr_t mgr;
 static m11_boot_ledger boot; static m11_custodian cust; static m11_dmabuf_pool pool;
+static m11_intent_fd_sink jfd; static m11_intent_sink jsink; static int jp[2] = {-1, -1};
 static m11_terminal_native term;
-static int report_fd = -1, ep_a, ep_g, io_a, io_g;
+static int report_fd = -1, ep_a, ep_g, io_a, io_g, region_fd = -1;
 static char panic_path[300];
 
 static int is_open(int fd) { return fd >= 0 && fcntl(fd, F_GETFD) != -1; }
@@ -86,10 +90,12 @@ static uint64_t ms(void) {
     return (uint64_t)t.tv_sec * 1000u + (uint64_t)t.tv_nsec / 1000000u;
 }
 static void report(const char *what) {
-    char b[512];
-    int open_now = is_open(ep_a) + is_open(ep_g) + is_open(io_a) + is_open(io_g);
-    int pool_open = pool.count ? is_open(pool.base) + is_open(pool.base + 1) : -1;
-    int n = snprintf(b, sizeof b, "%s fds_open=%d/4 pool_open=%d %s", what, open_now, pool_open, term.record);
+    char j[400] = "", b[1200];
+    if (jp[0] >= 0) { ssize_t n = read(jp[0], j, sizeof j - 1); if (n > 0) { j[n] = 0; char *nl = strchr(j, '\n'); if (nl) *nl = 0; } }
+    int open_now = is_open(ep_a) + is_open(ep_g) + is_open(io_a) + is_open(io_g), pool_open = 0;
+    for (int f = POOL_BASE; pool.count && f < POOL_BASE + 2 * POOL_K; f++) pool_open += is_open(f);
+    int n = snprintf(b, sizeof b, "%s fds_open=%d/4 pool_open=%d/%d sink_writes=%u sink_failed=%d region_fd=%d journal=[%s] rec=%s",
+                     what, open_now, pool_open, pool.count ? 2 * POOL_K : 0, jfd.writes, term.sink_failed, region_fd, j, term.record);
     if (n > 0) (void)!write(report_fd, b, (size_t)n < sizeof b ? (size_t)n : sizeof b - 1);
 }
 static void t_exit(void *u) { (void)u; report("EXIT"); _exit(42); }
@@ -103,13 +109,14 @@ static void stdio_off_null(void) {
         int p[2]; assert(!pipe(p)); assert(dup2(fd == 0 ? p[0] : p[1], fd) == fd); close(p[0]); close(p[1]);
     }
 }
-static void world(int with_pool) {
+/* with_pool: build and seal a pool; pooled: the custodian's backend hands out pool buffers;
+ * base_pairs: how many owner pairs the pool seal keeps closable (2 normally, 1 for a partial close). */
+static void world(int with_pool, int pooled, unsigned base_pairs) {
     stdio_off_null();
     int sv[2]; assert(socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, sv) == 0);
     pid_t p = fork(); assert(p >= 0);
     if (p == 0) { close(sv[0]); peer(sv[1]); }
     close(sv[1]);
-    /* the real adapters, sealed */
     m11_anchor_ops oe, oi; struct stat se, si;
     assert(!stat("/dev/ptmx", &se) && !stat("/dev/null", &si));
     assert(!m11_anchor_linux_ops(&le, "/dev/ptmx", getpid(), &oe) && !m11_anchor_linux_ops(&li, "/dev/null", getpid(), &oi));
@@ -121,21 +128,23 @@ static void world(int with_pool) {
     fx_ion = io.anchor_fd;
     fx_heap = open("/dev/zero", O_RDONLY | O_CLOEXEC); assert(fx_heap >= 0);
     if (with_pool) {
-        assert(m11_dmabuf_pool_build(&pool, fx_heap, 2, 8192, 200, &fx_sys) == 0);
+        assert(m11_dmabuf_pool_build(&pool, fx_heap, POOL_K, 4096, POOL_BASE, &fx_sys) == 0);
         const int base[2] = {ep.anchor_fd, io.anchor_fd};
-        assert(m11_dmabuf_pool_seal(&pool, base, 2) == 0);
+        assert(m11_dmabuf_pool_seal(&pool, base, base_pairs) == 0);
     }
-    /* the engine's transport: the SEQPACKET stand-in (the pty anchor cannot carry GPR) */
     tep.state = M11_ANCHOR_HELD; tep.anchor_fd = sv[0]; tep.owner_pid = getpid();
     assert(m11_gpr_native_transport(&glink, &tep, &gt) == 0);
     assert(m11_gpr_engine_init(&eng, &gt, 0x0100u) == 0 && m11_gpr_engine_open(&eng) == 0);
-    assert(m11_shmem_native_backend(&slink, &io, fx_heap, &fx_sys, &sb) == 0);
+    if (pooled) assert(m11_shmem_native_backend_pool(&slink, &io, &pool, &fx_sys, &sb) == 0);
+    else assert(m11_shmem_native_backend(&slink, &io, fx_heap, &fx_sys, &sb) == 0);
     assert(m11_shmem_mgr_init(&mgr, &sb, &eng, 300) == 0);
     assert(m11_model_new_boot(&boot, 9, ms()) == 0);
     const m11_custodian_model_contract ct = {true, true, true, true, true, true, true};
     assert(m11_custodian_init(&cust, &boot, &mgr, &ct, 2000) == 0);
+    assert(pipe2(jp, O_CLOEXEC) == 0 && fcntl(jp[0], F_SETFL, O_NONBLOCK) == 0);
+    assert(m11_intent_sink_fd(&jfd, jp[1], &jsink) == 0);
     term = (m11_terminal_native){.c = &cust, .anchors = {&ep, &io}, .nanchors = 2,
-                                 .pool = with_pool ? &pool : NULL, .sink = NULL,
+                                 .pool = with_pool ? &pool : NULL, .sink = &jsink,
                                  .ops = {.exit_fn = t_exit, .reboot_fn = t_reboot, .user = NULL, .panic_path = panic_path}};
 }
 static void end_and_report(void) {
@@ -144,24 +153,36 @@ static void end_and_report(void) {
     report(b);
     _exit(0);
 }
+static unsigned map_one(void) {
+    unsigned s; assert(m11_custodian_map(&cust, 4096, ms(), &s) == 0);
+    region_fd = cust.regions[s].dma_buf_fd;
+    return s;
+}
 
 /* ---- cases ---- */
-static void c_never_mapped(void) { world(0); assert(m11_custodian_close(&cust) == 0); end_and_report(); }
+static void c_never_mapped(void) { world(0, 0, 2); assert(m11_custodian_close(&cust) == 0); end_and_report(); }
 static void c_mapped(void) {
-    world(1); unsigned s;
-    assert(m11_custodian_map(&cust, 4096, ms(), &s) == 0 && m11_custodian_retire(&cust, s, ms()) == 0);
-    assert(m11_custodian_close(&cust) == 0);
+    world(1, 1, 2); unsigned s = map_one();
+    assert(m11_custodian_retire(&cust, s, ms()) == 0 && m11_custodian_close(&cust) == 0);
     end_and_report();
 }
-static void c_hold(void) { world(0); unsigned s; assert(m11_custodian_map(&cust, 4096, ms(), &s) == 0); end_and_report(); }
-static void c_pd_down(void) { world(0); m11_custodian_pd_down(&cust, ms()); end_and_report(); }
-static void c_orderly_refused(void) {
-    world(0); assert(m11_custodian_close(&cust) == 0);
-    term.anchors[0] = &io; term.anchors[1] = &ep;  /* the refusing anchor first: nothing closed */
-    io.latches |= M11_ANCHOR_LATCH_SECOND_OFD;     /* a second open file description was seen */
+static void c_mapped_unresolved(void) { world(1, 1, 2); (void)map_one(); m11_custodian_pd_down(&cust, ms()); end_and_report(); }
+static void c_unpooled(void) { world(1, 0, 2); (void)map_one(); m11_custodian_pd_down(&cust, ms()); end_and_report(); }
+static void c_hold(void) { world(0, 0, 2); (void)map_one(); end_and_report(); }
+static void c_pd_down(void) { world(0, 0, 2); m11_custodian_pd_down(&cust, ms()); end_and_report(); }
+static void c_anchor_lent(void) {
+    world(0, 0, 2); assert(m11_custodian_close(&cust) == 0);
+    io.state = M11_ANCHOR_LENT;                    /* a worker would share the ION OFD */
     end_and_report();
 }
-static void c_reboot_fails(void) { world(0); assert(m11_custodian_close(&cust) == 0); reboot_mode = 1; end_and_report(); }
+static void c_partial(void) { world(1, 0, 1); assert(m11_custodian_close(&cust) == 0); end_and_report(); }
+static void c_latched_second(void) {
+    world(0, 0, 2); assert(m11_custodian_close(&cust) == 0);
+    io.latches |= M11_ANCHOR_LATCH_SECOND_OFD;     /* the SECOND anchor would refuse its close */
+    end_and_report();
+}
+static void c_reboot_fails(void) { world(0, 0, 2); assert(m11_custodian_close(&cust) == 0); reboot_mode = 1; end_and_report(); }
+static void c_sink_fails(void) { world(1, 1, 2); (void)map_one(); m11_custodian_pd_down(&cust, ms()); close(jp[0]); jp[0] = -1; end_and_report(); }
 
 static int run(void (*fn)(void), char *rep, size_t cap) {
     int p[2]; assert(pipe(p) == 0);
@@ -182,51 +203,90 @@ static void set_panic(const char *text) {
     int fd = mkstemp(panic_path); assert(fd >= 0);
     assert(write(fd, text, strlen(text)) == (ssize_t)strlen(text) && close(fd) == 0);
 }
+/* the record that reached the journal pipe equals the record the executor built */
+static int journaled(const char *rep) {
+    const char *j = strstr(rep, "journal=["), *r = strstr(rep, "rec=");
+    if (!j || !r) return 0;
+    j += 9;
+    const char *je = strchr(j, ']');
+    return je && je > j && !strncmp(j, r + 4, (size_t)(je - j)) && r[4 + (je - j)] == '\n';
+}
+static int region_in_pool(const char *rep) {
+    const char *f = strstr(rep, "region_fd="); if (!f) return 0;
+    int fd = atoi(f + 10);
+    return fd >= POOL_BASE && fd < POOL_BASE + 2 * POOL_K && (fd - POOL_BASE) % 2 == 0;
+}
 
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
     signal(SIGPIPE, SIG_IGN);
-    char rep[1024]; int st;
+    char rep[2048]; int st;
 
     set_panic(NULL);
     st = run(c_never_mapped, rep, sizeof rep);
     printf("INFO %s", rep);
-    assert(st == 43 && strstr(rep, "REBOOT fds_open=0/4") && strstr(rep, "action=ORDERLY_SHUTDOWN end=reboot anchors_held=0/2"));
-    assert(strstr(rep, "panic=unknown reset_path=unknown map_attempted=0"));
-    printf("PASS never-mapped boot: both anchors final-closed, then reboot; panic sysctl unreadable is recorded\n");
+    assert(st == 43 && strstr(rep, "REBOOT fds_open=0/4") && strstr(rep, "action=ORDERLY_SHUTDOWN end=reboot anchors_held=0/2 anchor_fds_open=0/4"));
+    assert(strstr(rep, "panic=unknown reset_path=unknown map_attempted=0") && strstr(rep, "sink_writes=1") && journaled(rep));
+    printf("PASS never-mapped boot: both anchors final-closed, the record journaled, then reboot\n");
 
     set_panic("-1\n");
     st = run(c_mapped, rep, sizeof rep);
     printf("INFO %s", rep);
-    assert(st == 42 && strstr(rep, "EXIT fds_open=4/4 pool_open=2") && strstr(rep, "end=pid1_exit anchors_held=2/2 pool=held"));
-    assert(strstr(rep, "action=RESET_RETAINING_ANCHORS") && strstr(rep, "reset_path=immediate map_attempted=1 unmap_attempted=1 note=mapped_boot"));
-    printf("PASS mapped boot (even fully torn down): PID1 exit with all four anchor fds and the pool held; no reboot\n");
+    assert(st == 42 && strstr(rep, "EXIT fds_open=4/4 pool_open=4/4") && strstr(rep, "end=pid1_exit anchors_held=2/2 anchor_fds_open=4/4 pool=held"));
+    assert(region_in_pool(rep) && strstr(rep, "reset_path=immediate map_attempted=1 unmap_attempted=1 regions=0 in_pool=0 note=mapped_boot"));
+    assert(journaled(rep));
+    printf("PASS mapped boot, torn down: the mapped dma-buf was a pool buffer; PID1 exit with every anchor and pool fd held; no reboot\n");
+
+    st = run(c_mapped_unresolved, rep, sizeof rep);
+    printf("INFO %s", rep);
+    assert(st == 42 && region_in_pool(rep) && strstr(rep, "pool_open=4/4") && strstr(rep, "regions=1 in_pool=1 note=mapped_boot"));
+    printf("PASS mapped boot, region still mapped at the end: the region is a pool buffer and the pool is held at PID1 exit\n");
+
+    st = run(c_unpooled, rep, sizeof rep);
+    printf("INFO %s", rep);
+    assert(st == 42 && !region_in_pool(rep) && strstr(rep, "regions=1 in_pool=0 note=mapped_boot"));
+    printf("PASS a mapped dma-buf outside the pool is reported (regions=1 in_pool=0)\n");
 
     st = run(c_hold, rep, sizeof rep);
     printf("INFO %s", rep);
-    assert(st == 0 && strstr(rep, "RET=-16 fds_open=4/4"));
-    printf("PASS HOLD (a region still mapped): the end is refused, nothing closed\n");
+    assert(st == 0 && strstr(rep, "RET=-16 fds_open=4/4") && strstr(rep, "sink_writes=0"));
+    printf("PASS HOLD (a region still mapped, PD up): the end is refused, nothing closed, nothing journaled\n");
 
     set_panic("0\n");
     st = run(c_pd_down, rep, sizeof rep);
     printf("INFO %s", rep);
-    assert(st == 42 && strstr(rep, "EXIT fds_open=4/4") && strstr(rep, "anchors_held=2/2 pool=none panic=0 reset_path=hang map_attempted=0"));
+    assert(st == 42 && strstr(rep, "EXIT fds_open=4/4") && strstr(rep, "anchors_held=2/2 anchor_fds_open=4/4 pool=none panic=0 reset_path=hang map_attempted=0"));
     printf("PASS PD DOWN on a never-mapped boot: reset end holding the anchors; panic=0 recorded as a hang\n");
 
-    st = run(c_orderly_refused, rep, sizeof rep);
+    st = run(c_anchor_lent, rep, sizeof rep);
     printf("INFO %s", rep);
-    assert(st == 42 && strstr(rep, "EXIT fds_open=4/4") && strstr(rep, "note=orderly_failed"));
-    printf("PASS orderly end with a refused final close: falls to the reset end, nothing closed, no reboot\n");
+    assert(st == 42 && strstr(rep, "EXIT fds_open=4/4") && strstr(rep, "note=anchor_not_held"));
+    printf("PASS orderly end with an anchor no longer HELD (lent): nothing closed, PID1 exit, no reboot\n");
+
+    st = run(c_partial, rep, sizeof rep);
+    printf("INFO %s", rep);
+    assert(st == 42 && strstr(rep, "EXIT fds_open=2/4") && strstr(rep, "anchor_fds_open=2/4") && strstr(rep, "note=partial_final_close"));
+    printf("PASS partial final close (the second close refused): PID1 exit, the record states the two fds still open\n");
+
+    st = run(c_latched_second, rep, sizeof rep);
+    printf("INFO %s", rep);
+    assert(st == 42 && strstr(rep, "EXIT fds_open=4/4") && strstr(rep, "note=anchor_not_held"));
+    printf("PASS a refusing latch on the second anchor is caught before the first close: nothing closed\n");
 
     st = run(c_reboot_fails, rep, sizeof rep);
     printf("INFO %s", rep);
     assert(st == 42 && strstr(rep, "EXIT fds_open=0/4") && strstr(rep, "note=reboot_failed"));
     printf("PASS reboot(2) failing after the orderly closes: PID1 exit, never a retry\n");
 
+    st = run(c_sink_fails, rep, sizeof rep);
+    printf("INFO %s", rep);
+    assert(st == 42 && strstr(rep, "EXIT fds_open=4/4 pool_open=4/4") && strstr(rep, "sink_writes=0 sink_failed=1"));
+    printf("PASS terminal journal sink failing: the end still happens, holding every anchor and pool fd\n");
+
     m11_terminal_native bad; memset(&bad, 0, sizeof bad);
     assert(m11_terminal_native_end(&bad, 0) == -EINVAL);
     m11_terminal_ops d = m11_terminal_ops_default();
     assert(d.exit_fn && d.reboot_fn && !strcmp(d.panic_path, "/proc/sys/kernel/panic"));
-    printf("PASS G8 native terminal (real adapters, owner seal, custodian, manager and engine)\n");
+    printf("PASS G8 native terminal (real adapters, owner and pool seals, custodian, manager and engine, fd journal sink)\n");
     return 0;
 }

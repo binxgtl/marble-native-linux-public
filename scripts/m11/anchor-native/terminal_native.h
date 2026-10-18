@@ -4,9 +4,12 @@
  * m11_terminal_native_end executes the custodian's terminal decision, nothing else:
  *  - HOLD / HOLD_RECONCILE: refused (-EBUSY); nothing is closed and the boot does not end;
  *  - ORDERLY_SHUTDOWN, only when reboot is permitted AND the ledger never attempted a DSP MAP:
- *    each held anchor gets its one final close, m11_anchor_end_boot must then say REBOOT for every
- *    anchor, a terminal record is written, and reboot_fn runs. Any failing step, or a reboot_fn
- *    that returns, falls through to the reset end below (never a retry);
+ *    first EVERY anchor must be HELD and pass m11_anchor_check, or be legitimately finished
+ *    (dropped without close error or hidden reference, or never bound); otherwise nothing is closed
+ *    ("anchor_not_held"). Then each held anchor gets its one final close, m11_anchor_end_boot must
+ *    say REBOOT for every anchor, a terminal record is written, and reboot_fn runs. A final close
+ *    refused after an earlier one succeeded ends as "partial_final_close"; any failing step, or a
+ *    reboot_fn that returns, falls through to the reset end below (never a retry);
  *  - RESET_RETAINING_ANCHORS / UNSAFE_LAST_CLOSE_OCCURRED (and every fall-through): no anchor,
  *    pool or heap fd is closed and reboot_fn is never called. Each anchor is marked RETAINED
  *    (m11_anchor_end_boot), the anchors and the dma-buf pool are checked still held (recorded, not
@@ -15,6 +18,10 @@
  *    without device_shutdown(). That path is source-INFERRED (pinned ACK); Run24, which would
  *    observe it, is HARDWARE NO-GO. /proc/sys/kernel/panic is read and recorded: 0 means the panic
  *    never restarts (the device hangs with every anchor still held).
+ * The record also states the anchor fds actually still open (from the numbers captured before the
+ * first close: the adapter forgets them after a refused close_pair while they stay open) and how
+ * many custodian regions still own a dma-buf, and how many of those are sealed pool buffers: a
+ * mapped buffer outside the pool is pinned only by its own fd, which nothing seals.
  */
 #ifndef M11_TERMINAL_NATIVE_H
 #define M11_TERMINAL_NATIVE_H
@@ -42,8 +49,10 @@ typedef struct {
     m11_terminal_action action;
     int orderly_failed, reboot_failed, sink_failed;
     unsigned anchors_held;
+    unsigned regions, regions_in_pool; /* custodian regions still owning a dma-buf fd; of those, pool buffers */
     int pool_held, panic;          /* panic: INT_MIN when unreadable */
-    char record[M11_INTENT_RECORD_MAX + 64];
+    int saved, saved_fd[2][2];     /* anchor/guard numbers captured before the first close */
+    char record[M11_INTENT_RECORD_MAX + 160];
 } m11_terminal_native;
 
 /* Production ops: _exit(0), reboot(RB_AUTOBOOT), /proc/sys/kernel/panic. */

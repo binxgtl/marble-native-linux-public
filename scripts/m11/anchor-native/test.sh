@@ -440,17 +440,33 @@ g8_mutant() { # name pattern replacement assertion last-pass (same detection rul
 }
 g8_mutant reset-taken-as-orderly 'if (t->action == M11_TERMINAL_ORDERLY_SHUTDOWN && m11_custodian_reboot_permitted(t->c) &&' \
   '    if ((1) ||' \
-  'st == 42 && strstr(rep, "EXIT fds_open=4/4 pool_open=2") && strstr(rep, "end=pid1_exit anchors_held=2/2 pool=held")' \
-  'PASS never-mapped boot: both anchors final-closed, then reboot; panic sysctl unreadable is recorded'
-g8_mutant no-final-close 'if (a->state == M11_ANCHOR_HELD && m11_anchor_final_close(a) != 0) ok = 0;' '            (void)0;' \
-  'st == 43 && strstr(rep, "REBOOT fds_open=0/4") && strstr(rep, "action=ORDERLY_SHUTDOWN end=reboot anchors_held=0/2")' ''
+  'st == 42 && strstr(rep, "EXIT fds_open=4/4 pool_open=4/4") && strstr(rep, "end=pid1_exit anchors_held=2/2 anchor_fds_open=4/4 pool=held")' \
+  'PASS never-mapped boot: both anchors final-closed, the record journaled, then reboot'
+g8_mutant no-final-close 'if (m11_anchor_final_close(a) != 0) {' '            if (0) {' \
+  'st == 43 && strstr(rep, "REBOOT fds_open=0/4") && strstr(rep, "action=ORDERLY_SHUTDOWN end=reboot anchors_held=0/2 anchor_fds_open=0/4")' ''
+g8_mutant in-pool-always 'if (in_pool(t->pool, t->c->regions[i].dma_buf_fd)) t->regions_in_pool++;' '        t->regions_in_pool += 1u + 0u * (unsigned)in_pool(t->pool, 0);' \
+  'st == 42 && !region_in_pool(rep) && strstr(rep, "regions=1 in_pool=0 note=mapped_boot")' \
+  'PASS mapped boot, region still mapped at the end: the region is a pool buffer and the pool is held at PID1 exit'
+g8_mutant hold-not-refused 'if (t->action == M11_TERMINAL_HOLD || t->action == M11_TERMINAL_HOLD_RECONCILE) return -EBUSY;' '    (void)0;' \
+  'st == 0 && strstr(rep, "RET=-16 fds_open=4/4") && strstr(rep, "sink_writes=0")' \
+  'PASS a mapped dma-buf outside the pool is reported (regions=1 in_pool=0)'
+g8_mutant no-precheck 'if (!anchors_ready(t)) { t->orderly_failed = 1; return end_retaining(t, "anchor_not_held"); }' '        (void)anchors_ready;' \
+  'st == 42 && strstr(rep, "EXIT fds_open=4/4") && strstr(rep, "note=anchor_not_held")' \
+  'PASS PD DOWN on a never-mapped boot: reset end holding the anchors; panic=0 recorded as a hang'
+g8_mutant fds-from-adapter 'int a = t->saved ? t->saved_fd[i][0] : t->anchors[i]->anchor_fd;' '        int a = t->anchors[i]->anchor_fd;' \
+  'st == 42 && strstr(rep, "EXIT fds_open=2/4") && strstr(rep, "anchor_fds_open=2/4") && strstr(rep, "note=partial_final_close")' \
+  'PASS orderly end with an anchor no longer HELD (lent): nothing closed, PID1 exit, no reboot'
+g8_mutant latch-not-prechecked 'if ((a->latches & M11_ANCHOR_LATCH_REFUSE) || m11_anchor_check(a) != 0) return 0;' \
+  '            if (m11_anchor_check(a) != 0) return 0;' \
+  'st == 42 && strstr(rep, "EXIT fds_open=4/4") && strstr(rep, "note=anchor_not_held")' \
+  'PASS partial final close (the second close refused): PID1 exit, the record states the two fds still open'
 g8_mutant reboot-failure-returns 'if (t->ops.reboot_fn(t->ops.user) != 0) { t->reboot_failed = 1;' \
   '            if (t->ops.reboot_fn(t->ops.user) != 0) return -EIO;' \
   'st == 42 && strstr(rep, "EXIT fds_open=0/4") && strstr(rep, "note=reboot_failed")' \
-  'PASS orderly end with a refused final close: falls to the reset end, nothing closed, no reboot'
-g8_mutant hold-not-refused 'if (t->action == M11_TERMINAL_HOLD || t->action == M11_TERMINAL_HOLD_RECONCILE) return -EBUSY;' '    (void)0;' \
-  'st == 0 && strstr(rep, "RET=-16 fds_open=4/4")' \
-  'PASS mapped boot (even fully torn down): PID1 exit with all four anchor fds and the pool held; no reboot'
+  'PASS a refusing latch on the second anchor is caught before the first close: nothing closed'
+g8_mutant sink-failure-blocks 'record(t, "pid1_exit", note);' '    record(t, "pid1_exit", note); if (t->sink_failed) return -EIO;' \
+  'st == 42 && strstr(rep, "EXIT fds_open=4/4 pool_open=4/4") && strstr(rep, "sink_writes=0 sink_failed=1")' \
+  'PASS reboot(2) failing after the orderly closes: PID1 exit, never a retry'
 
 # Unit -> sources it is built from, for the mutants below.
 build() { # name output [file-to-replace replacement-path]
