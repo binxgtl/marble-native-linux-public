@@ -88,7 +88,7 @@ static int tee_append(void *user, const char *rec, size_t len) {
     if (!rc && jcount < 8 && len < M11_INTENT_RECORD_MAX) { memcpy(jr[jcount], rec, len); jr[jcount][len] = 0; jcount++; }
     return rc;
 }
-static const m11_intent_sink tee = {tee_append, NULL};
+static const m11_intent_sink jsink = {tee_append, NULL};
 
 static uint64_t ms(void) {
     struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t);
@@ -120,7 +120,7 @@ static void start(struct rig *r) {
     r->ion.state = M11_ANCHOR_HELD; r->ion.anchor_fd = fx_ion; r->ion.owner_pid = getpid();
     assert(m11_model_new_boot(&r->boot, 7, ms()) == 0);
     assert(m11_gpr_native_transport(&r->glink, &r->ep, &r->inner) == 0);
-    assert(m11_intent_transport(&r->ilink, &r->inner, &tee, &r->boot, &r->t) == 0);
+    assert(m11_intent_transport(&r->ilink, &r->inner, &jsink, &r->boot, &r->t) == 0);
     assert(m11_gpr_engine_init(&r->eng, &r->t, 0x0100u) == 0 && m11_gpr_engine_open(&r->eng) == 0);
     assert(m11_shmem_native_backend(&r->slink, &r->ion, fx_heap, &fx_sys, &r->b) == 0);
     assert(m11_shmem_mgr_init(&r->mgr, &r->b, &r->eng, 300) == 0);
@@ -209,7 +209,7 @@ int main(void) {
     printf("PASS opcode set: GET_SPF_STATE journaled and sent; CLOSE_ALL and an unknown opcode refused\n");
 
     m11_intent_link il; m11_gpr_transport_t out;
-    assert(m11_intent_transport(&il, NULL, &tee, &r.boot, &out) == -EINVAL);
+    assert(m11_intent_transport(&il, NULL, &jsink, &r.boot, &out) == -EINVAL);
     printf("PASS G7 intent journal (real custodian, manager and engine; G2 transport; cross-process ordering)\n");
     return 0;
 }
