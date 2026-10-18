@@ -644,7 +644,7 @@ p2_mutant() { # name asroot pattern replacement assertion last-pass (same detect
 p2_mutant devname-unchecked 0 'if (strncmp(b, line, strlen(line)) && !strstr(b, nl)) return -ENODEV;' '    (void)nl;' \
   'devname_rc == -ENODEV' \
   'PASS default config: the real node paths, minor 0, root nodes, the whole-system census, a capability-dropped spawner'
-p2_mutant pd-not-required 1 'if (pd->pump_fn(pd->user, now_ms) != 1) FAIL(2, -ENETRESET);' '    (void)0;' \
+p2_mutant pd-not-required 1 'if (pd->pump_fn(pd->user, now_ms) != 1) FAIL(2, -ENETRESET);' '    (void)now_ms;' \
   'st == 0 && strstr(rep, "BOOT rc=-102 step=2 stage=1 ep=UNBOUND ion=UNBOUND ep_node=0 ion_node=0 cma_node=0 heap_fd=0 heap_dir=0 sealed=0 spawner=1")' \
   'PASS boot metadata: exact MAJ:MIN (minor 0 in production), DEVNAME by number, exactly one matching character major'
 p2_mutant cma-node-allowed 1 '(rc = !lstat(c->ion_cma.node, &st) ? -EEXIST : errno == ENOENT ? 0 : -errno)) {' '        (rc = 0)) {' \
