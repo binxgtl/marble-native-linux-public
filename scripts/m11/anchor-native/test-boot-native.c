@@ -18,7 +18,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sched.h>
 #include <sys/mman.h>
+#include <sys/mount.h>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
 #include <sys/wait.h>
@@ -26,6 +28,7 @@
 #include <unistd.h>
 
 static char base[256], root[320];
+static int in_case; /* set in a root case child, which has its own mount namespace */
 static m11_boot_config C;
 static char p_sys[400], p_proc[400], p_ep[400], p_ion[400], p_cma[400], p_hdir[400], p_hnode[400], p_dev[400];
 
@@ -53,6 +56,12 @@ static void tree(const char *ep_devname, const char *proc) {
     put("proc_devices", proc);
     snprintf(p_sys, sizeof p_sys, "%s/sys", root); snprintf(p_proc, sizeof p_proc, "%s/proc_devices", root);
     snprintf(p_dev, sizeof p_dev, "%s/dev", root); assert(mkdir(p_dev, 0755) == 0 && chmod(p_dev, 0755) == 0);
+    if (in_case && geteuid() == 0) {
+        /* A pty multiplexer node opens only next to a devpts "pts" (the kernel looks it up beside
+         * the node); bind the real one in this case's private mount namespace. */
+        char pts[460]; snprintf(pts, sizeof pts, "%s/pts", p_dev);
+        assert(mkdir(pts, 0755) == 0 && mount("/dev/pts", pts, NULL, MS_BIND, NULL) == 0);
+    }
     snprintf(p_ep, sizeof p_ep, "%s/dev/ep_node", root); snprintf(p_ion, sizeof p_ion, "%s/dev/ion_node", root);
     snprintf(p_cma, sizeof p_cma, "%s/dev/cma_node", root);
     snprintf(p_hdir, sizeof p_hdir, "%s/dev/heap", root); snprintf(p_hnode, sizeof p_hnode, "%s/dev/heap/system", root);
@@ -157,7 +166,13 @@ static int run(void (*fn)(void), char *rep, size_t cap) {
     int p[2]; assert(pipe(p) == 0);
     fflush(stdout);
     pid_t c = fork(); assert(c >= 0);
-    if (c == 0) { close(p[0]); report_fd = p[1]; stdio_off_null(); fn(); _exit(98); }
+    if (c == 0) {
+        close(p[0]); report_fd = p[1]; stdio_off_null();
+        /* each root case in its own mount namespace: its bind mounts vanish with it */
+        if (geteuid() == 0) assert(unshare(CLONE_NEWNS) == 0 && mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL) == 0);
+        in_case = 1;
+        fn(); _exit(98);
+    }
     close(p[1]);
     size_t have = 0; ssize_t n;
     while (have + 1 < cap && (n = read(p[0], rep + have, cap - 1 - have)) > 0) have += (size_t)n;
