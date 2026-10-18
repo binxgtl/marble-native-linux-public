@@ -11,6 +11,8 @@
 
 #define FAIL(n, rc) do { if (step) *step = (n); return (rc); } while (0)
 
+static int boot_started_once;
+
 static const m11_anchor_contract evidence = {.endpoint_has_no_flush = true,
     .release_on_last_fput_only = true, .owner_single_threaded = true};
 
@@ -96,6 +98,10 @@ static int bind_anchor(const m11_boot_config *c, const char *node, dev_t rdev, m
 int m11_boot_run(m11_boot *b, const m11_boot_config *c, const m11_pd_monitor *pd, uint64_t now_ms, int *step) {
     if (step) *step = 0;
     if (!b || !c || !pd || !pd->pump_fn || !c->endpoint.node || !c->ion.node || !c->ion_cma.node) return -EINVAL;
+    /* One boot sequence per process: a second call must never wipe a struct that may hold the
+     * spawner, bound or sealed anchors and the heap fd, whether or not the first call finished. */
+    if (boot_started_once) return -EALREADY;
+    boot_started_once = 1;
     memset(b, 0, sizeof *b);
     b->heap.fd = -1;
     int rc;

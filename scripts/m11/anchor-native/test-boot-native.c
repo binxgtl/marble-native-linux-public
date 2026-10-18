@@ -102,6 +102,29 @@ static void boot_report(int rc, int step) {
              B.endpoint.ops.close_pair != NULL && B.ion.ops.close_pair != NULL, B.spawner.pid > 0);
     say(b);
 }
+/* A second call after the first (finished or stopped midway): refused, and everything the first left
+ * held is exactly as it was (stage, anchor states and numbers, heap fd, spawner pid and socket), the
+ * held fds still open and the spawner still alive. */
+static void second_call(void) {
+    const int stage = B.stage, es = (int)B.endpoint.state, ea = B.endpoint.anchor_fd, eg = B.endpoint.guard_fd;
+    const int is = (int)B.ion.state, ia = B.ion.anchor_fd, ig = B.ion.guard_fd, hf = B.heap.fd;
+    const int sp = B.spawner.pid, ss = B.spawner.sock;
+    int step = 99;
+    int rc = m11_boot_run(&B, &C, &pdm, ms(), &step);
+    int same = B.stage == stage && (int)B.endpoint.state == es && B.endpoint.anchor_fd == ea && B.endpoint.guard_fd == eg &&
+               (int)B.ion.state == is && B.ion.anchor_fd == ia && B.ion.guard_fd == ig && B.heap.fd == hf &&
+               B.spawner.pid == sp && B.spawner.sock == ss;
+    int open = (es != M11_ANCHOR_HELD || (fcntl(ea, F_GETFD) != -1 && fcntl(eg, F_GETFD) != -1)) &&
+               (is != M11_ANCHOR_HELD || (fcntl(ia, F_GETFD) != -1 && fcntl(ig, F_GETFD) != -1)) &&
+               (hf < 0 || fcntl(hf, F_GETFD) != -1) && (ss < 0 || fcntl(ss, F_GETFD) != -1) && (sp <= 0 || kill(sp, 0) == 0);
+    char b[128]; snprintf(b, sizeof b, "SECOND rc=%d step=%d same=%d open=%d\n", rc, step, same, open);
+    say(b);
+}
+static void c_partial_second(void) { /* runs unprivileged too */
+    tree("aud_pasthru_adsp", PROC_OK); pd_init(0);
+    int step; int rc = m11_boot_run(&B, &C, &pdm, ms(), &step); boot_report(rc, step);
+    second_call(); _exit(0);
+}
 static void c_pd_down(void) { tree("aud_pasthru_adsp", PROC_OK); pd_init(0); int step; int rc = m11_boot_run(&B, &C, &pdm, ms(), &step); boot_report(rc, step); _exit(0); }
 static void c_node_exists(void) {
     tree("aud_pasthru_adsp", PROC_OK); pd_init(1); put("dev/ep_node", "keep");
@@ -113,7 +136,9 @@ static void c_devname(void) { tree("something_else", PROC_OK); pd_init(1); int s
 static void c_cma_node(void) {
     tree("aud_pasthru_adsp", PROC_OK); pd_init(1);
     assert(mknod(p_cma, S_IFCHR | 0600, makedev(1, 5)) == 0);
-    int step; int rc = m11_boot_run(&B, &C, &pdm, ms(), &step); boot_report(rc, step); _exit(0);
+    int step; int rc = m11_boot_run(&B, &C, &pdm, ms(), &step); boot_report(rc, step);
+    second_call(); /* the endpoint is HELD: a retry must not wipe it */
+    _exit(0);
 }
 static void c_heap_missing(void) {
     tree("aud_pasthru_adsp", "Character devices:\n  1 msm_audio_ion\n  1 msm_audio_ion_cma\n  5 aud_pasthru_adsp\n\n"); pd_init(1);
@@ -148,6 +173,7 @@ static void c_full(void) {
     tree("aud_pasthru_adsp", PROC_OK); pd_init(1);
     int step; int rc = m11_boot_run(&B, &C, &pdm, ms(), &step); boot_report(rc, step);
     if (rc) _exit(0);
+    second_call(); /* sealed anchors and the heap fd: a retry must not wipe them */
     fx_heap = B.heap.fd; fx_ion = B.ion.anchor_fd;
     m11_crunner_config cc = {.endpoint = &B.endpoint, .ion = &B.ion, .heap_fd = B.heap.fd, .heap_rdev = B.heap.rdev,
         .pool_count = 2, .pool_len = 4096, .pool_base = 200, .sys = &fx_sys, .pd = &pdm, .journal = &sink,
@@ -213,13 +239,17 @@ int main(int argc, char **argv) {
     assert(m11_boot_cdev_meta(&C, &C.endpoint, &r) == -ENODEV);         /* a block device */
     printf("PASS boot metadata: exact MAJ:MIN (minor 0 in production), DEVNAME by number, exactly one matching character major\n");
 
+    char rep[2048]; int st;
+    st = run(c_partial_second, rep, sizeof rep); printf("INFO st=%d %s", st, rep);
+    assert(st == 0 && strstr(rep, "BOOT rc=-102 step=2 stage=1") && strstr(rep, "SECOND rc=-114 step=0 same=1 open=1"));
+    printf("PASS boot is one-shot: a second call after a stopped first one is refused and changes nothing (spawner pid and socket, stage)\n");
+
     if (geteuid() != 0) {
         printf("SKIP root cases (mknod, anchor binds, seals): not root\n");
         (void)nftw(base, rm_one, 16, FTW_DEPTH | FTW_PHYS);
         printf("PASS production P2 boot sequence (unprivileged sections)\n");
         return 0;
     }
-    char rep[2048]; int st;
     st = run(c_pd_down, rep, sizeof rep); printf("INFO st=%d %s", st, rep);
     assert(st == 0 && strstr(rep, "BOOT rc=-102 step=2 stage=1 ep=UNBOUND ion=UNBOUND ep_node=0 ion_node=0 cma_node=0 heap_fd=0 heap_dir=0 sealed=0 spawner=1"));
     printf("PASS boot refused while the PD is not UP: the spawner exists, no node, nothing opened\n");
@@ -234,7 +264,8 @@ int main(int argc, char **argv) {
 
     st = run(c_cma_node, rep, sizeof rep); printf("INFO st=%d %s", st, rep);
     assert(st == 0 && strstr(rep, "BOOT rc=-17 step=4 stage=3 ep=HELD ion=UNBOUND ep_node=0 ion_node=0 cma_node=1"));
-    printf("PASS boot refused when the ION CMA twin has a node: the endpoint stays held, its node removed, no ION node\n");
+    assert(strstr(rep, "SECOND rc=-114 step=0 same=1 open=1"));
+    printf("PASS boot refused when the ION CMA twin has a node: the endpoint stays held, its node removed, no ION node; a retry is refused and leaves the held endpoint intact\n");
 
     st = run(c_heap_missing, rep, sizeof rep); printf("INFO st=%d %s", st, rep);
     assert(st == 0 && strstr(rep, "BOOT rc=-19 step=5 stage=4 ep=HELD ion=HELD ep_node=0 ion_node=0 cma_node=0 heap_fd=0 heap_dir=0 sealed=0"));
@@ -242,6 +273,7 @@ int main(int argc, char **argv) {
 
     st = run(c_full, rep, sizeof rep); printf("INFO st=%d %s", st, rep);
     assert(strstr(rep, "BOOT rc=0 step=0 stage=6 ep=HELD ion=HELD ep_node=0 ion_node=0 cma_node=0 heap_fd=1 heap_dir=0 sealed=1 spawner=1"));
+    assert(strstr(rep, "SECOND rc=-114 step=0 same=1 open=1"));
     assert(strstr(rep, "START rc=0 step=0 why=0 heap_open=0") && st == 43 && strstr(rep, "END reboot ep_fd_open=0 ion_fd_open=0"));
     printf("PASS full boot: spawner, PD UP, both nodes made, bound and sealed (nodes gone), heap opened; the composed runner starts with a clean census (spawner included) and ends orderly\n");
 

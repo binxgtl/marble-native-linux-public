@@ -646,13 +646,16 @@ p2_mutant devname-unchecked 0 'if (strncmp(b, line, strlen(line)) && !strstr(b, 
   'PASS default config: the real node paths, minor 0, root nodes, the whole-system census, a capability-dropped spawner'
 p2_mutant pd-not-required 1 'if (pd->pump_fn(pd->user, now_ms) != 1) FAIL(2, -ENETRESET);' '    (void)now_ms;' \
   'st == 0 && strstr(rep, "BOOT rc=-102 step=2 stage=1 ep=UNBOUND ion=UNBOUND ep_node=0 ion_node=0 cma_node=0 heap_fd=0 heap_dir=0 sealed=0 spawner=1")' \
+  'PASS boot is one-shot: a second call after a stopped first one is refused and changes nothing (spawner pid and socket, stage)'
+p2_mutant no-one-shot 0 'if (boot_started_once) return -EALREADY;' '    (void)0;' \
+  'st == 0 && strstr(rep, "BOOT rc=-102 step=2 stage=1") && strstr(rep, "SECOND rc=-114 step=0 same=1 open=1")' \
   'PASS boot metadata: exact MAJ:MIN (minor 0 in production), DEVNAME by number, exactly one matching character major'
 p2_mutant cma-node-allowed 1 '(rc = !lstat(c->ion_cma.node, &st) ? -EEXIST : errno == ENOENT ? 0 : -errno)) {' '        (rc = 0)) {' \
   'st == 0 && strstr(rep, "BOOT rc=-17 step=4 stage=3 ep=HELD ion=UNBOUND ep_node=0 ion_node=0 cma_node=1")' \
   "PASS boot refused when the number's DEVNAME is not the endpoint: no node made"
 p2_mutant nodes-left-on-heap-failure 1 '(void)unlink(c->ion.node); (void)unlink(c->endpoint.node); /* nodes go; the anchors stay held */' '        (void)0;' \
   'st == 0 && strstr(rep, "BOOT rc=-19 step=5 stage=4 ep=HELD ion=HELD ep_node=0 ion_node=0 cma_node=0 heap_fd=0 heap_dir=0 sealed=0")' \
-  'PASS boot refused when the ION CMA twin has a node: the endpoint stays held, its node removed, no ION node'
+  'PASS boot refused when the ION CMA twin has a node: the endpoint stays held, its node removed, no ION node; a retry is refused and leaves the held endpoint intact'
 
 # Unit -> sources it is built from, for the mutants below.
 build() { # name output [file-to-replace replacement-path]

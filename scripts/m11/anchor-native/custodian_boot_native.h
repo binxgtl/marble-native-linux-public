@@ -15,6 +15,9 @@
  * A failure never closes an anchor already bound (its release is the terminal's decision) and never
  * leaves a node behind: a node that was made is unlinked whether or not its bind happened.
  * `stage` is the last completed step; the caller ends a failed boot through the retaining path.
+ * One-shot per process: once a call got past argument validation, every later call returns
+ * -EALREADY and touches nothing, so a retry can never wipe a struct that holds the spawner, bound or
+ * sealed anchors or the heap fd.
  */
 #ifndef M11_CUSTODIAN_BOOT_NATIVE_H
 #define M11_CUSTODIAN_BOOT_NATIVE_H
@@ -57,7 +60,8 @@ typedef struct {
 
 /* Kernel metadata of one character device (step 3/4 rules). 0 and *out, or a negative errno. */
 int m11_boot_cdev_meta(const m11_boot_config *, const m11_boot_cdev *, dev_t *out);
-/* The sequence. 0, or a negative errno with the failing step in *step (1..6). */
+/* The sequence. 0, or a negative errno with the failing step in *step (1..6); -EALREADY (step 0)
+ * on any call after the first. */
 int m11_boot_run(m11_boot *, const m11_boot_config *, const m11_pd_monitor *pd, uint64_t now_ms, int *step);
 
 #endif
