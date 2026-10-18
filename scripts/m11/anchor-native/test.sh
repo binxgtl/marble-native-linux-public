@@ -501,7 +501,7 @@ cr_mutant() { # name pattern replacement assertion last-pass (same detection rul
   fi
   echo "PASS composed-runner test detects mutant $name: Assertion \`$want'"
 }
-cr_mutant heap-left-open 'int crc = sys->close_fn(cfg->heap_fd);' '    int crc = 0;' \
+cr_mutant heap-left-open 'int crc = sys->close_fn(cfg->heap_fd);' '    int crc = 0; (void)sys;' \
   'rc == 0 && step == 0' ''
 cr_mutant pool-unsealed 'if ((rc = m11_dmabuf_pool_seal(&r->pool, base, 2))) FAIL(3, rc);' '    (void)base;' \
   'rc == 0 && step == 0' ''
