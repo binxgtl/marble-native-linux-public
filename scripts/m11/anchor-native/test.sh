@@ -467,6 +467,56 @@ g8_mutant reboot-failure-returns 'if (t->ops.reboot_fn(t->ops.user) != 0) { t->r
 g8_mutant sink-failure-blocks 'record(t, "pid1_exit", note);' '    record(t, "pid1_exit", note); if (t->sink_failed) return -EIO;' \
   'st == 42 && strstr(rep, "EXIT fds_open=4/4 pool_open=4/4") && strstr(rep, "sink_writes=0 sink_failed=1")' \
   'PASS reboot(2) failing after the orderly closes: PID1 exit, never a retry'
+# Criterion 7 composition: G1-G8 in the composed runner core under one stand-in harness (real
+# adapters, owner + pool seals, GPR over a raw pty to the ADSP stand-in, PD pipe, journal pipe).
+cr_srcs=("${tc_srcs[@]}" "$own/m11_custodian.c" "$here/gpr_transport_native.c" "$here/shmem_backend_native.c"
+         "$here/dmabuf_pool_native.c" "$here/heap_node_native.c" "$here/intent_journal_native.c"
+         "$here/pdr_loop_native.c" "$here/terminal_native.c" "$here/custodian_runner_native.c"
+         "$here/test-crunner-native.c" "${anchor[@]}")
+cr_flags=("${cm_flags[@]}" -DM11_ANCHOR_NATIVE_ION)
+for cm_cc in gcc clang; do
+  "$cm_cc" "${cr_flags[@]}" "${cr_srcs[@]}" -o "$out/crunner-native-$cm_cc"
+  timeout 180 "$out/crunner-native-$cm_cc" | tee "$out/crunner-native-$cm_cc.log"
+done
+gcc "${cr_flags[@]}" -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer \
+  "${cr_srcs[@]}" -o "$out/crunner-native-sanitize"
+timeout 180 "$out/crunner-native-sanitize" | tee "$out/crunner-native-sanitize.log"
+if gcc -std=c11 -DM11_ANCHOR_NATIVE -I "$own" -I "$repair" -I "$here" -c "$here/custodian_runner_native.c" -o "$out/crn-refused.o" 2>/dev/null; then
+  echo "ERROR: custodian_runner_native compiled outside M11_CUSTODIAN_NATIVE" >&2; exit 1
+fi
+echo 'PASS composed runner core (gcc, clang, ASan+UBSan) and refused outside M11_CUSTODIAN_NATIVE'
+cr_mutant() { # name pattern replacement assertion last-pass (same detection rule as gtn_mutant)
+  local name="$1" pat="$2" rep="$3" want="$4" last="$5" dir="$out/crn-mutant-$1" rc=0 got file=custodian_runner_native.c
+  mkdir -p "$dir"
+  awk -v pat="$pat" -v rep="$rep" 'index($0,pat){n++; print rep; next} {print} END{if(n!=1) exit 3}' \
+    "$here/$file" > "$dir/$file"
+  local srcs=() s
+  for s in "${cr_srcs[@]}"; do [[ "$(basename "$s")" == "$file" ]] && srcs+=("$dir/$file") || srcs+=("$s"); done
+  gcc "${cr_flags[@]}" "${srcs[@]}" -o "$dir/bin"
+  timeout 180 "$dir/bin" > "$dir/log" 2>&1 || rc=$?
+  got="$(grep '^PASS ' "$dir/log" | tail -n1 || true)"
+  if [[ "$rc" != 134 ]] || ! grep -qF -- "Assertion \`$want' failed" "$dir/log" || [[ "$got" != "$last" ]]; then
+    echo "ERROR: composed-runner mutant $name not detected for the expected reason (rc=$rc, last PASS: '${got}')" >&2
+    cat "$dir/log" >&2; exit 1
+  fi
+  echo "PASS composed-runner test detects mutant $name: Assertion \`$want'"
+}
+cr_mutant heap-left-open 'if (close(cfg->heap_fd)) FAIL(3, -EIO);' '    (void)0;' \
+  'rc == 0 && step == 0' ''
+cr_mutant pool-unsealed 'if ((rc = m11_dmabuf_pool_seal(&r->pool, base, 2))) FAIL(3, rc);' '    (void)base;' \
+  'rc == 0 && step == 0' ''
+cr_mutant journal-bypassed 'if ((rc = m11_gpr_engine_init(&r->eng, &r->transport,' \
+  '    if ((rc = m11_gpr_engine_init(&r->eng, &r->inner, cfg->src_port ? cfg->src_port : 0x0100u)) ||' \
+  'm11_crunner_map(&R, 4096, ms(), &s) == 0' ''
+cr_mutant no-settle-after-map '/* settle after MAP */' '    (void)0;' \
+  'strstr(rep, "MAP rc=-102 unresolved=1 imports_lost=1")' \
+  'PASS composed never-mapped boot: both anchors final-closed, terminal journaled, reboot; nothing sent'
+cr_mutant no-census-before-map '/* census before MAP */' '    (void)0;' \
+  'strstr(rep, "MAP rc=-130 census_failed=1") && strstr(rep, "PEER n=0 ok")' \
+  'PASS composed PD DOWN during MAP: -ENETRESET, region unresolved, custodian told at once, PID1 exit holding everything'
+cr_mutant no-cmdline-gate 'if (!ct.strict_iommu) FAIL(1, -EPERM);' '    (void)0;' \
+  'st == 0 && strstr(rep, "START rc=-1 step=1 heap_open=1 pool_fd=0") && strstr(rep, "PEER n=0 ok")' \
+  'PASS composed census: a foreign holder (post-seal fork) refuses the MAP before any TX and keeps every anchor at the end'
 
 # Unit -> sources it is built from, for the mutants below.
 build() { # name output [file-to-replace replacement-path]
