@@ -546,6 +546,53 @@ cr_mutant read-ppid-skip 'if (rc) { closedir(d); return -1; }       /* exists bu
 cr_mutant not-one-shot 'if (crunner_started_once) return -EALREADY;' '    (void)0;' \
   'st == 0 && strstr(rep, "SECOND rc=-114 pool_count=2 started=1 stage=6")' \
   'PASS composed tree census: a process gone between readdir and read is not counted'
+# Production P1: the long-session SERVREG listener and its QRTR adapter (the G6 PD monitor) over a
+# fixture QRTR; the frozen one-query codec (runtime/audio_pd.c) is not used and stays unchanged.
+p1_srcs=("$here/pd_session_native.c" "$here/gpr_transport_native.c" "$here/test-pd-session-native.c")
+for cm_cc in gcc clang; do
+  "$cm_cc" "${cm_flags[@]}" "${p1_srcs[@]}" -o "$out/pd-session-native-$cm_cc"
+  timeout 120 "$out/pd-session-native-$cm_cc" | tee "$out/pd-session-native-$cm_cc.log"
+done
+gcc "${cm_flags[@]}" -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer \
+  "${p1_srcs[@]}" -o "$out/pd-session-native-sanitize"
+timeout 120 "$out/pd-session-native-sanitize" | tee "$out/pd-session-native-sanitize.log"
+if gcc -std=c11 -DM11_ANCHOR_NATIVE -I "$own" -I "$repair" -I "$here" -c "$here/pd_session_native.c" -o "$out/pds-refused.o" 2>/dev/null; then
+  echo "ERROR: pd_session_native compiled outside M11_CUSTODIAN_NATIVE" >&2; exit 1
+fi
+echo 'PASS production P1 PD session (gcc, clang, ASan+UBSan) and refused outside M11_CUSTODIAN_NATIVE'
+p1_mutant() { # name pattern replacement assertion last-pass (same detection rule as gtn_mutant)
+  local name="$1" pat="$2" rep="$3" want="$4" last="$5" dir="$out/pds-mutant-$1" rc=0 got file=pd_session_native.c
+  mkdir -p "$dir"
+  awk -v pat="$pat" -v rep="$rep" 'index($0,pat){n++; print rep; next} {print} END{if(n!=1) exit 3}' \
+    "$here/$file" > "$dir/$file"
+  local srcs=() s
+  for s in "${p1_srcs[@]}"; do [[ "$(basename "$s")" == "$file" ]] && srcs+=("$dir/$file") || srcs+=("$s"); done
+  gcc "${cm_flags[@]}" "${srcs[@]}" -o "$dir/bin"
+  timeout 120 "$dir/bin" > "$dir/log" 2>&1 || rc=$?
+  got="$(grep '^PASS ' "$dir/log" | tail -n1 || true)"
+  if [[ "$rc" != 134 ]] || ! grep -qF -- "Assertion \`$want' failed" "$dir/log" || [[ "$got" != "$last" ]]; then
+    echo "ERROR: P1 mutant $name not detected for the expected reason (rc=$rc, last PASS: '${got}')" >&2
+    cat "$dir/log" >&2; exit 1
+  fi
+  echo "PASS P1 test detects mutant $name: Assertion \`$want'"
+}
+p1_mutant deadline-after-ready 'if (!s->ever_ready && now >= s->ready_deadline) return end(s, M11_PDS_DEADLINE);' \
+  '    if (now >= s->ready_deadline) return end(s, M11_PDS_DEADLINE);' \
+  'm11_pdmon_pump(&M, 1003 + 600000) == 1 && m11_pdmon_pump(&M, 1003 + 3600000) == 1' \
+  'PASS bring-up: NEW_LOOKUP (service 0x42, instance 74), registration to the announced peer, READY on an UP snapshot'
+p1_mutant reindication-drops-ready 'if (s->phase != M11_PDS_READY) settle(s); /* READY persists' '        s->phase = M11_PDS_WAIT_UP;' \
+  'm11_pdmon_pump(&M, 3601010) == 1' \
+  'PASS long session: still UP an hour after READY (the frozen codec ends at 10 s)'
+p1_mutant busy-acks-down 'if (s->resources_busy) { s->ack_deferred = 1; return -1; }' '            (void)0;' \
+  'm11_pdmon_pump(&M, 20010) == 0 && ntx == before && M.pds.ack_deferred' \
+  'PASS DOWN after READY: terminal, acknowledged, never UP again'
+p1_mutant del-client-any 'return s->peer && a == s->node && c == s->port ? end(s, M11_PDS_PEER_LOST) : 0;' \
+  '        return end(s, M11_PDS_PEER_LOST);' \
+  'm11_pdmon_pump(&M, 30011) == 1' \
+  'PASS DOWN while resources are busy: not UP at once, the ACK deferred until release'
+p1_mutant unknown-ctrl-ignored 'default: /* anything else cannot be read as UP */' '    default: return 0;' \
+  'hello == 0' \
+  'PASS DOWN while resources are busy: not UP at once, the ACK deferred until release'
 
 # Unit -> sources it is built from, for the mutants below.
 build() { # name output [file-to-replace replacement-path]
