@@ -593,6 +593,66 @@ p1_mutant del-client-any 'return s->peer && a == s->node && c == s->port ? end(s
 p1_mutant unknown-ctrl-ignored 'default: /* anything else cannot be read as UP */' '    default: return 0;' \
   'hello == 0' \
   'PASS DOWN while resources are busy: not UP at once, the ACK deferred until release'
+# Production P2: the PID1 boot sequence over a fake sysfs/procfs tree and a scratch /dev. Metadata
+# unprivileged; the refusals and a full boot handed to the composed runner as root (sudo).
+p2_srcs=("${tc_srcs[@]}" "$own/m11_custodian.c" "$here/gpr_transport_native.c" "$here/shmem_backend_native.c"
+         "$here/dmabuf_pool_native.c" "$here/heap_node_native.c" "$here/intent_journal_native.c"
+         "$here/pdr_loop_native.c" "$here/terminal_native.c" "$here/custodian_runner_native.c"
+         "$here/custodian_boot_native.c" "$here/test-boot-native.c" "${anchor[@]}")
+p2_flags=("${cm_flags[@]}" -DM11_ANCHOR_NATIVE_ION)
+for cm_cc in gcc clang; do
+  "$cm_cc" "${p2_flags[@]}" "${p2_srcs[@]}" -o "$out/boot-native-$cm_cc"
+  timeout 180 "$out/boot-native-$cm_cc" "$out" | tee "$out/boot-native-$cm_cc.log"
+done
+gcc "${p2_flags[@]}" -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer \
+  "${p2_srcs[@]}" -o "$out/boot-native-sanitize"
+timeout 180 "$out/boot-native-sanitize" "$out" | tee "$out/boot-native-sanitize.log"
+if [[ "$sudo_ok" == 1 ]]; then
+  timeout 180 sudo -n "$out/boot-native-gcc" "$out" | tee "$out/boot-native-root.log"
+  grep -qF 'PASS production P2 boot sequence (root sections)' "$out/boot-native-root.log"
+else
+  if [[ -n "${CI:-}" ]]; then echo "ERROR: P2 root sections need sudo in CI" >&2; exit 1; fi
+  echo "SKIP P2 root sections: no sudo"
+fi
+if gcc -std=c11 -DM11_ANCHOR_NATIVE -I "$own" -I "$repair" -I "$here" -c "$here/custodian_boot_native.c" -o "$out/cbn-refused.o" 2>/dev/null; then
+  echo "ERROR: custodian_boot_native compiled outside M11_CUSTODIAN_NATIVE" >&2; exit 1
+fi
+echo 'PASS production P2 boot sequence (gcc, clang, ASan+UBSan, root when sudo) and refused outside M11_CUSTODIAN_NATIVE'
+p2_mutant() { # name asroot pattern replacement assertion last-pass (same detection rule as gtn_mutant)
+  local name="$1" asroot="$2" pat="$3" rep="$4" want="$5" last="$6" dir="$out/cbn-mutant-$1" rc=0 got file=custodian_boot_native.c
+  if [[ "$asroot" == 1 && "$sudo_ok" != 1 ]]; then echo "SKIP P2 mutant $name: no sudo"; return; fi
+  mkdir -p "$dir"
+  awk -v pat="$pat" -v rep="$rep" 'index($0,pat){n++; print rep; next} {print} END{if(n!=1) exit 3}' \
+    "$here/$file" > "$dir/$file"
+  local srcs=() s
+  for s in "${p2_srcs[@]}"; do [[ "$(basename "$s")" == "$file" ]] && srcs+=("$dir/$file") || srcs+=("$s"); done
+  gcc "${p2_flags[@]}" "${srcs[@]}" -o "$dir/bin"
+  if [[ "$asroot" == 1 ]]; then
+    timeout 180 sudo -n "$dir/bin" "$dir" > "$dir/log" 2>&1 || rc=$?
+    sudo -n rm -rf "$dir"/m11-boot-*
+  else
+    timeout 180 "$dir/bin" "$dir" > "$dir/log" 2>&1 || rc=$?
+    rm -rf "$dir"/m11-boot-*
+  fi
+  got="$(grep '^PASS ' "$dir/log" | tail -n1 || true)"
+  if [[ "$rc" != 134 ]] || ! grep -qF -- "Assertion \`$want' failed" "$dir/log" || [[ "$got" != "$last" ]]; then
+    echo "ERROR: P2 mutant $name not detected for the expected reason (rc=$rc, last PASS: '${got}')" >&2
+    cat "$dir/log" >&2; exit 1
+  fi
+  echo "PASS P2 test detects mutant $name: Assertion \`$want'"
+}
+p2_mutant devname-unchecked 0 'if (strncmp(b, line, strlen(line)) && !strstr(b, nl)) return -ENODEV;' '    (void)nl;' \
+  'devname_rc == -ENODEV' \
+  'PASS default config: the real node paths, minor 0, root nodes, the whole-system census, a capability-dropped spawner'
+p2_mutant pd-not-required 1 'if (pd->pump_fn(pd->user, now_ms) != 1) FAIL(2, -ENETRESET);' '    (void)0;' \
+  'st == 0 && strstr(rep, "BOOT rc=-102 step=2 stage=1 ep=UNBOUND ion=UNBOUND ep_node=0 ion_node=0 cma_node=0 heap_fd=0 heap_dir=0 sealed=0 spawner=1")' \
+  'PASS boot metadata: exact MAJ:MIN (minor 0 in production), DEVNAME by number, exactly one matching character major'
+p2_mutant cma-node-allowed 1 '(rc = !lstat(c->ion_cma.node, &st) ? -EEXIST : errno == ENOENT ? 0 : -errno)) {' '        (rc = 0)) {' \
+  'st == 0 && strstr(rep, "BOOT rc=-17 step=4 stage=3 ep=HELD ion=UNBOUND ep_node=0 ion_node=0 cma_node=1")' \
+  "PASS boot refused when the number's DEVNAME is not the endpoint: no node made"
+p2_mutant nodes-left-on-heap-failure 1 '(void)unlink(c->ion.node); (void)unlink(c->endpoint.node); /* nodes go; the anchors stay held */' '        (void)0;' \
+  'st == 0 && strstr(rep, "BOOT rc=-19 step=5 stage=4 ep=HELD ion=HELD ep_node=0 ion_node=0 cma_node=0 heap_fd=0 heap_dir=0 sealed=0")' \
+  'PASS boot refused when the ION CMA twin has a node: the endpoint stays held, its node removed, no ION node'
 
 # Unit -> sources it is built from, for the mutants below.
 build() { # name output [file-to-replace replacement-path]
