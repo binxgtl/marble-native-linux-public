@@ -363,6 +363,48 @@ g6_mutant settle-silent pdr_loop_native.c 'm11_custodian_pd_down(l->c, now_ms);'
 g6_mutant idle-ignores-hangup pdr_loop_native.c 'if (!rc && (p.revents & (POLLHUP | POLLERR | POLLNVAL))) {' '        if (0) {' \
   'rc == -ENETRESET && r.glink.pd_down && r.loop.down_reported' \
   'PASS DOWN while idle: the idle wait reports it, MAP refused, no packet ever transmitted'
+# G7: the intent journal around the G2 transport, under the REAL custodian, manager and engine; the
+# forked ADSP stand-in reads the journal pipe and requires each packet's record to precede it.
+g7_srcs=("${tc_srcs[@]}" "$own/m11_custodian.c" "$here/gpr_transport_native.c" "$here/shmem_backend_native.c"
+         "$here/intent_journal_native.c" "$here/test-intent-journal-native.c")
+for cm_cc in gcc clang; do
+  "$cm_cc" "${cm_flags[@]}" "${g7_srcs[@]}" -o "$out/intent-journal-native-$cm_cc"
+  timeout 120 "$out/intent-journal-native-$cm_cc" | tee "$out/intent-journal-native-$cm_cc.log"
+done
+gcc "${cm_flags[@]}" -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer \
+  "${g7_srcs[@]}" -o "$out/intent-journal-native-sanitize"
+timeout 120 "$out/intent-journal-native-sanitize" | tee "$out/intent-journal-native-sanitize.log"
+if gcc -std=c11 -DM11_ANCHOR_NATIVE -I "$own" -I "$repair" -I "$here" -c "$here/intent_journal_native.c" -o "$out/ijn-refused.o" 2>/dev/null; then
+  echo "ERROR: intent_journal_native compiled outside M11_CUSTODIAN_NATIVE" >&2; exit 1
+fi
+echo 'PASS G7 intent journal (gcc, clang, ASan+UBSan) and refused outside M11_CUSTODIAN_NATIVE'
+g7_mutant() { # name pattern replacement assertion last-pass (same detection rule as gtn_mutant)
+  local name="$1" pat="$2" rep="$3" want="$4" last="$5" dir="$out/ijn-mutant-$1" rc=0 got file=intent_journal_native.c
+  mkdir -p "$dir"
+  awk -v pat="$pat" -v rep="$rep" 'index($0,pat){n++; print rep; next} {print} END{if(n!=1) exit 3}' \
+    "$here/$file" > "$dir/$file"
+  local srcs=() s
+  for s in "${g7_srcs[@]}"; do [[ "$(basename "$s")" == "$file" ]] && srcs+=("$dir/$file") || srcs+=("$s"); done
+  gcc "${cm_flags[@]}" "${srcs[@]}" -o "$dir/bin"
+  timeout 120 "$dir/bin" > "$dir/log" 2>&1 || rc=$?
+  got="$(grep '^PASS ' "$dir/log" | tail -n1 || true)"
+  if [[ "$rc" != 134 ]] || ! grep -qF -- "Assertion \`$want' failed" "$dir/log" || [[ "$got" != "$last" ]]; then
+    echo "ERROR: G7 mutant $name not detected for the expected reason (rc=$rc, last PASS: '${got}')" >&2
+    cat "$dir/log" >&2; exit 1
+  fi
+  echo "PASS G7 test detects mutant $name: Assertion \`$want'"
+}
+g7_mutant no-journal-append 'int arc = l->sink->append_fn(l->sink->user, rec, (size_t)n);' '    int arc = 0;' \
+  'm11_custodian_map(&r.cust, 4096, ms(), &slot) == 0' \
+  'PASS fd sink: one write(2) per record; a failed write is -EIO'
+g7_mutant tx-despite-sink-failure '/* no TX without its journal record */' '    (void)arc;' \
+  'rc < 0 && r.glink.writes == 0 && r.ilink.sink_failures == 1' \
+  'PASS MAP and UNMAP journaled before TX (the peer saw each record before its packet), with fd, size and handle'
+g7_mutant no-ledger-check 'if ((h.opcode == M11_APM_CMD_SHARED_MEM_MAP_REGIONS && !l->boot->dsp_map_attempted) ||' '    if ((0) ||' \
+  'rc < 0 && r.glink.writes == 0 && r.ilink.refused == 1' \
+  'PASS sink failure: no TX; the region stays unresolved (unknown TX, fail closed)'
+g7_mutant close-all-allowed "return -EPERM; /* outside the custodian's set" '        break;' \
+  'm11_intent_format(rec, sizeof rec, 7, 3, pkt, pl) == -EPERM' ''
 
 # Unit -> sources it is built from, for the mutants below.
 build() { # name output [file-to-replace replacement-path]
