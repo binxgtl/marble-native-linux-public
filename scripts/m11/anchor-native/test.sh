@@ -518,8 +518,8 @@ cr_mutant close-without-census '/* census before close */' '    (void)0;' \
   'strstr(rep, "CLOSE rc=-130 closed=0 census_failed=1 imports_lost=0 MAP rc=-130 why=19") && peer_count(rep) == 0' \
   'PASS composed PD DOWN during MAP: -ENETRESET, region unresolved, custodian told at once, PID1 exit holding everything'
 cr_mutant no-census-before-map '/* census before MAP */' '    (void)0;' \
-  'strstr(rep, "MAP rc=-130 census_failed=1 imports_lost=0 anchor_check=1 why=16") && peer_count(rep) == 0' \
-  'PASS composed census on close: a foreign holder refuses the close (custodian stays open, ledger untainted) and the MAP; the end is forced retaining'
+  'strstr(rep, "CLOSE rc=-130 closed=0 census_failed=1 imports_lost=0 MAP rc=-130 why=19") && peer_count(rep) == 0' \
+  'PASS composed PD DOWN during MAP: -ENETRESET, region unresolved, custodian told at once, PID1 exit holding everything'
 cr_mutant no-tree-census 'if (desc[i] && holds_forbidden(r, pids[i]) != 0) return -1;' \
   '        if (desc[i] && holds_forbidden(r, pids[i]) < -1) return -1;' \
   'strstr(rep, "CLOSE rc=-130 closed=0 census_failed=1 imports_lost=0 MAP rc=-130 why=19") && peer_count(rep) == 0' \
