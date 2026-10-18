@@ -24,13 +24,33 @@
 #include "../qualification/ownership/m11_pid1_anchor.h"
 #include <stdint.h>
 
+/* G6: the PD (PDR) monitor every blocking wait pumps. `fd` is readable when PD traffic is pending
+ * (the QRTR socket in production); pump_fn is non-blocking and returns 1 while the audio PD is UP,
+ * anything else once it is not (DOWN, peer lost, invalid, error): terminal for the boot. */
+typedef struct {
+    int fd;
+    int (*pump_fn)(void *user, uint64_t now_ms);
+    void *user;
+} m11_pd_monitor;
+
 typedef struct {
     const m11_pid1_anchor *anchor;   /* PID1's endpoint anchor; never owned by this link */
     uint32_t opens, detaches, refused_io, writes, reads, timeouts;
+    const m11_pd_monitor *pd;        /* G6: NULL = no monitor (G2 behaviour) */
+    int pd_down;                     /* latched for the boot once the monitor is not UP */
+    uint32_t pd_pumps, pd_downs;
 } m11_gpr_native_link;
 
 /* Bind a link to an anchor and fill the engine transport (user = link). -EINVAL on NULLs. */
 int m11_gpr_native_transport(m11_gpr_native_link *link, const m11_pid1_anchor *anchor,
                              m11_gpr_transport_t *out);
+/* G6: as above, with a PD monitor. Then: open, write and poll_read pump the monitor first and
+ * return -ENETRESET once it is not UP (the engine latches pdr_down on it); a write after DOWN never
+ * reaches write(2); a wait polls the endpoint AND the monitor, and a DOWN (or a monitor hangup)
+ * ends it at once with -ENETRESET, before any endpoint data pending at the same time. */
+int m11_gpr_native_transport_pd(m11_gpr_native_link *link, const m11_pid1_anchor *anchor,
+                                const m11_pd_monitor *pd, m11_gpr_transport_t *out);
+/* G6: pump the monitor once (non-blocking). 0 while UP, -ENETRESET once DOWN (latched). */
+int m11_gpr_native_pd_pump(m11_gpr_native_link *link);
 
 #endif

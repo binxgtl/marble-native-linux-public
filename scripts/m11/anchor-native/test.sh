@@ -319,6 +319,50 @@ if [[ "$g5s_rc" != 134 ]] || ! grep -qF -- "Assertion \`$g5s_want' failed" "$g5s
   cat "$g5s_mut/log" >&2; exit 1
 fi
 echo "PASS stacked test detects mutant pool-denies-base-pairs: Assertion \`$g5s_want'"
+# G6: the PDR event loop. The REAL custodian, region manager and engine over the G6 transport
+# (SEQPACKET endpoint stand-in, pipe PD-monitor stand-in) and the G3 backend over fixture syscalls;
+# a forked peer plays the ADSP and the PD notifier (no QRTR, no driver).
+g6_srcs=("${tc_srcs[@]}" "$own/m11_custodian.c" "$here/gpr_transport_native.c" "$here/shmem_backend_native.c"
+         "$here/pdr_loop_native.c" "$here/test-pdr-loop-native.c")
+for cm_cc in gcc clang; do
+  "$cm_cc" "${cm_flags[@]}" "${g6_srcs[@]}" -o "$out/pdr-loop-native-$cm_cc"
+  timeout 120 "$out/pdr-loop-native-$cm_cc" | tee "$out/pdr-loop-native-$cm_cc.log"
+done
+gcc "${cm_flags[@]}" -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer \
+  "${g6_srcs[@]}" -o "$out/pdr-loop-native-sanitize"
+timeout 120 "$out/pdr-loop-native-sanitize" | tee "$out/pdr-loop-native-sanitize.log"
+if gcc -std=c11 -DM11_ANCHOR_NATIVE -I "$own" -I "$repair" -I "$here" -c "$here/pdr_loop_native.c" -o "$out/pln-refused.o" 2>/dev/null; then
+  echo "ERROR: pdr_loop_native compiled outside M11_CUSTODIAN_NATIVE" >&2; exit 1
+fi
+echo 'PASS G6 PDR event loop (gcc, clang, ASan+UBSan) and refused outside M11_CUSTODIAN_NATIVE'
+g6_mutant() { # name file pattern replacement assertion last-pass (same detection rule as gtn_mutant)
+  local name="$1" file="$2" pat="$3" rep="$4" want="$5" last="$6" dir="$out/pln-mutant-$1" rc=0 got
+  mkdir -p "$dir"
+  awk -v pat="$pat" -v rep="$rep" 'index($0,pat){n++; print rep; next} {print} END{if(n!=1) exit 3}' \
+    "$here/$file" > "$dir/$file"
+  local srcs=() s
+  for s in "${g6_srcs[@]}"; do [[ "$(basename "$s")" == "$file" ]] && srcs+=("$dir/$file") || srcs+=("$s"); done
+  gcc "${cm_flags[@]}" "${srcs[@]}" -o "$dir/bin"
+  timeout 120 "$dir/bin" > "$dir/log" 2>&1 || rc=$?
+  got="$(grep '^PASS ' "$dir/log" | tail -n1 || true)"
+  if [[ "$rc" != 134 ]] || ! grep -qF -- "Assertion \`$want' failed" "$dir/log" || [[ "$got" != "$last" ]]; then
+    echo "ERROR: G6 mutant $name not detected for the expected reason (rc=$rc, last PASS: '${got}')" >&2
+    cat "$dir/log" >&2; exit 1
+  fi
+  echo "PASS G6 test detects mutant $name: Assertion \`$want'"
+}
+g6_mutant wait-ignores-monitor gpr_transport_native.c 'nfds_t nfds = l->pd ? 2 : 1;' '        nfds_t nfds = 1;' \
+  'rc == -ENETRESET && el < 250' \
+  'PASS UP throughout: PD traffic during MAP and UNMAP changes nothing; idle wait pumps the monitor'
+g6_mutant tx-after-down gpr_transport_native.c '/* no TX once DOWN */' '    rc = 0; (void)rc;' \
+  'rc == -ENETRESET && r.glink.writes == 0' \
+  'PASS DOWN before the ACK: the DOWN wins, the late ACK is not adopted'
+g6_mutant settle-silent pdr_loop_native.c 'm11_custodian_pd_down(l->c, now_ms);' '        (void)now_ms;' \
+  'term == M11_TERMINAL_RESET_RETAINING_ANCHORS && (r.boot.reasons & M11_TAINT_PD_DOWN) && r.cust.kernel_imports_lost' \
+  'PASS UP throughout: PD traffic during MAP and UNMAP changes nothing; idle wait pumps the monitor'
+g6_mutant idle-ignores-hangup pdr_loop_native.c 'if (!rc && (p.revents & (POLLHUP | POLLERR | POLLNVAL))) {' '        if (0) {' \
+  'rc == -ENETRESET && r.glink.pd_down && r.loop.down_reported' \
+  'PASS DOWN while idle: the idle wait reports it, MAP refused, no packet ever transmitted'
 
 # Unit -> sources it is built from, for the mutants below.
 build() { # name output [file-to-replace replacement-path]
