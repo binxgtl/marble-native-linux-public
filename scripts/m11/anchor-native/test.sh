@@ -293,6 +293,32 @@ g5_mutant pool-close-range-allowed dmabuf_pool_native.c '/* every other close_ra
 g5_mutant pooled-close-closes shmem_backend_native.c 'if (l->pool) { /* G5: back to the pool' '    if (0) {' \
   'l.pool_returns == 1 && l.closes == 0 && fx_closes == closes && l.close_errors == 0' \
   'PASS census: a post-seal fork holds pool buffers (refused) and cannot drop them'
+# G5 follow-up: the pool seal stacked on the REAL owner seal (m11_anchor_owner_seal_pairs over two
+# real adapters on stand-ins) in one process, in both orders, plus the intersection check.
+g5s_srcs=("$here/dmabuf_pool_native.c" "$here/shmem_backend_native.c" "$here/test-pool-stacked-native.c" "${anchor[@]}")
+g5s_flags=("${cm_flags[@]}" -DM11_ANCHOR_NATIVE_ION)
+for cm_cc in gcc clang; do
+  "$cm_cc" "${g5s_flags[@]}" "${g5s_srcs[@]}" -o "$out/pool-stacked-native-$cm_cc"
+  timeout 120 "$out/pool-stacked-native-$cm_cc" | tee "$out/pool-stacked-native-$cm_cc.log"
+done
+gcc "${g5s_flags[@]}" -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer \
+  "${g5s_srcs[@]}" -o "$out/pool-stacked-native-sanitize"
+timeout 120 "$out/pool-stacked-native-sanitize" | tee "$out/pool-stacked-native-sanitize.log"
+echo 'PASS G5 pool seal stacked on the real owner seal (gcc, clang, ASan+UBSan)'
+# Detection power: a pool seal that stops permitting the base pairs' exact close_range must break
+# the owner's final close in the stacked case (same detection rule as gtn_mutant).
+g5s_mut="$out/pool-stacked-mutant"; mkdir -p "$g5s_mut"
+awk 'index($0,"        STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW);"){n++; print "        STMT(BPF_RET | BPF_K, RET_DENY);"; next} {print} END{if(n!=1) exit 3}' \
+  "$here/dmabuf_pool_native.c" > "$g5s_mut/dmabuf_pool_native.c"
+gcc "${g5s_flags[@]}" "$g5s_mut/dmabuf_pool_native.c" "$here/shmem_backend_native.c" "$here/test-pool-stacked-native.c" \
+  "${anchor[@]}" -o "$g5s_mut/bin"
+g5s_rc=0; timeout 120 "$g5s_mut/bin" > "$g5s_mut/log" 2>&1 || g5s_rc=$?
+g5s_want='m11_anchor_final_close(&io) == 0 && io.state == M11_ANCHOR_OWNER_FDS_DROPPED'
+if [[ "$g5s_rc" != 134 ]] || ! grep -qF -- "Assertion \`$g5s_want' failed" "$g5s_mut/log" || grep -q '^PASS ' "$g5s_mut/log"; then
+  echo "ERROR: stacked test did not detect a pool seal that refuses the base pairs (rc=$g5s_rc)" >&2
+  cat "$g5s_mut/log" >&2; exit 1
+fi
+echo "PASS stacked test detects mutant pool-denies-base-pairs: Assertion \`$g5s_want'"
 
 # Unit -> sources it is built from, for the mutants below.
 build() { # name output [file-to-replace replacement-path]
