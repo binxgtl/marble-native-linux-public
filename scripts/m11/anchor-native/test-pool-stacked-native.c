@@ -136,8 +136,9 @@ static void case_owner_then_pool(void) { bind_both(); owner_seal(); pool_build()
 static void case_pool_then_owner(void) { bind_both(); pool_build(); pool_seal(1); owner_seal(); both_sealed_checks(); }
 static void case_pool_without_base(void) {
     bind_both(); owner_seal(); pool_build(); pool_seal(0);
+    const int a = io.anchor_fd, g = io.guard_fd; /* the adapter forgets them on a failed close_pair */
     int rc = m11_anchor_final_close(&io);
-    assert(rc != 0 && is_open(io.anchor_fd) && is_open(io.guard_fd));
+    assert(rc == -EPERM && is_open(a) && is_open(g) && (io.latches & M11_ANCHOR_LATCH_CLOSE_ERROR));
 }
 
 int main(void) {
