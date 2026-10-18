@@ -512,10 +512,10 @@ cr_mutant no-settle-after-map '/* settle after MAP */' '    (void)0;' \
   'strstr(rep, "MAP rc=-102 unresolved=1 imports_lost=1")' \
   'PASS composed never-mapped boot: both anchors final-closed, terminal journaled, reboot; nothing sent'
 cr_mutant no-census-before-map '/* census before MAP */' '    (void)0;' \
-  'strstr(rep, "MAP rc=-130 census_failed=1") && strstr(rep, "PEER n=0 ok")' \
+  'strstr(rep, "MAP rc=-130 census_failed=1") && peer_count(rep) == 0' \
   'PASS composed PD DOWN during MAP: -ENETRESET, region unresolved, custodian told at once, PID1 exit holding everything'
 cr_mutant no-cmdline-gate 'if (!ct.strict_iommu) FAIL(1, -EPERM);' '    (void)0;' \
-  'st == 0 && strstr(rep, "START rc=-1 step=1 heap_open=1 pool_fd=0") && strstr(rep, "PEER n=0 ok")' \
+  'st == 0 && strstr(rep, "START rc=-1 step=1 heap_open=1 pool_fd=0") && peer_count(rep) == 0' \
   'PASS composed census: a foreign holder (post-seal fork) refuses the MAP before any TX and keeps every anchor at the end'
 
 # Unit -> sources it is built from, for the mutants below.

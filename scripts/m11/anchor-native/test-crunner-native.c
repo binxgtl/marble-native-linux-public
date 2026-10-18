@@ -57,6 +57,7 @@ static int report_fd = -1;
 static void say(const char *s) { (void)!write(report_fd, s, strlen(s)); }
 static void peer(const char *slave, int journal, int mon, int ready, enum mode m) {
     alarm(15);
+    prctl(PR_SET_PDEATHSIG, SIGKILL); /* ends with the case child, never before it */
     int fd = open(slave, O_RDWR | O_NOCTTY);
     struct termios t;
     if (fd < 0 || tcgetattr(fd, &t)) _exit(120);
@@ -65,12 +66,19 @@ static void peer(const char *slave, int journal, int mon, int ready, enum mode m
     if (m == PRE_DOWN && write(mon, "D", 1) != 1) _exit(122);
     if (write(ready, "R", 1) != 1) _exit(123);
     close(ready);
+    say("PEER n=0 ok\n");
     static char seen[16384]; size_t have = 0;
     int got = 0;
     uint8_t buf[512]; size_t len = 0;
     for (;;) {
         ssize_t n = read(fd, buf + len, sizeof buf - len);
-        if (n <= 0) { char b[64]; snprintf(b, sizeof b, "PEER n=%d ok\n", got); say(b); _exit(0); }
+        if (n <= 0) {
+            /* The endpoint anchor was final-closed (or the child ended). Stay alive until the child
+             * dies: an exiting child of PID1 scans as inconclusive and would refuse the next anchor's
+             * census (a real constraint: PID1 enters its terminal with no exiting children). */
+            char b[64]; snprintf(b, sizeof b, "PEER n=%d ok\n", got); say(b);
+            for (;;) pause();
+        }
         len += (size_t)n;
         while (len >= 4) {
             uint32_t w; memcpy(&w, buf, 4);
@@ -101,6 +109,7 @@ static void peer(const char *slave, int journal, int mon, int ready, enum mode m
             }
             if (rc < 0) _exit(127);
             if (answer) (void)!write(fd, tx, txl);
+            { char b[64]; snprintf(b, sizeof b, "PEER n=%d ok\n", got); say(b); } /* running count */
             memmove(buf, buf + size, len - size); len -= size;
         }
     }
@@ -266,6 +275,11 @@ static void c_sink_fails(void) {
     say(b); _exit(0);
 }
 
+static int peer_count(const char *rep) {
+    int best = -1;
+    for (const char *p = rep; (p = strstr(p, "PEER n=")); p += 7) { int n = atoi(p + 7); if (n > best) best = n; }
+    return best;
+}
 static int run(void (*fn)(void), char *rep, size_t cap) {
     int p[2]; assert(pipe(p) == 0);
     fflush(stdout);
@@ -290,41 +304,41 @@ int main(void) {
     assert(strstr(rep, "START rc=0 step=0 heap_open=0"));
     assert(st == 42 && strstr(rep, "EXIT anchors=4/4 pool=4/4 region_in_pool=1 records=3 map=1 unmap=1 terminal=1"));
     assert(strstr(rep, "action=RESET_RETAINING_ANCHORS end=pid1_exit anchors_held=2/2 anchor_fds_open=4/4 pool=held"));
-    assert(strstr(rep, "PEER n=2 ok") && !strstr(rep, "PEER_VIOLATION"));
+    assert(peer_count(rep) == 2 && !strstr(rep, "PEER_VIOLATION"));
     printf("PASS composed boot: start (gate, PD up, pool from the heap, heap closed, seals, journal, census), MAP of a pool buffer, idle, UNMAP, close, PID1 exit holding every anchor and pool fd; each packet's record preceded it\n");
 
     st = run(c_never_mapped, rep, sizeof rep);
     printf("INFO %s", rep);
     assert(st == 43 && strstr(rep, "REBOOT anchors=0/4 pool=4/4") && strstr(rep, "action=ORDERLY_SHUTDOWN end=reboot"));
-    assert(strstr(rep, "PEER n=0 ok"));
+    assert(peer_count(rep) == 0);
     printf("PASS composed never-mapped boot: both anchors final-closed, terminal journaled, reboot; nothing sent\n");
 
     st = run(c_down_on_map, rep, sizeof rep);
     printf("INFO %s", rep);
     assert(strstr(rep, "MAP rc=-102 unresolved=1 imports_lost=1"));
     assert(st == 42 && strstr(rep, "EXIT anchors=4/4 pool=4/4 region_in_pool=1") && strstr(rep, "regions=1 in_pool=1 note=mapped_boot"));
-    assert(strstr(rep, "PEER n=1 ok"));
+    assert(peer_count(rep) == 1);
     printf("PASS composed PD DOWN during MAP: -ENETRESET, region unresolved, custodian told at once, PID1 exit holding everything\n");
 
     st = run(c_foreign_holder, rep, sizeof rep);
     printf("INFO %s", rep);
-    assert(strstr(rep, "MAP rc=-130 census_failed=1") && strstr(rep, "PEER n=0 ok"));
+    assert(strstr(rep, "MAP rc=-130 census_failed=1") && peer_count(rep) == 0);
     assert(st == 42 && strstr(rep, "EXIT anchors=4/4") && strstr(rep, "note=anchor_not_held"));
     printf("PASS composed census: a foreign holder (post-seal fork) refuses the MAP before any TX and keeps every anchor at the end\n");
 
     st = run(c_cmdline_refused, rep, sizeof rep);
     printf("INFO %s", rep);
-    assert(st == 0 && strstr(rep, "START rc=-1 step=1 heap_open=1 pool_fd=0") && strstr(rep, "PEER n=0 ok"));
+    assert(st == 0 && strstr(rep, "START rc=-1 step=1 heap_open=1 pool_fd=0") && peer_count(rep) == 0);
     printf("PASS composed start refused by the effective cmdline (iommu.strict=0): no pool, heap untouched, nothing sent\n");
 
     st = run(c_pd_down_at_start, rep, sizeof rep);
     printf("INFO %s", rep);
-    assert(st == 0 && strstr(rep, "START rc=-102 step=2 heap_open=1 pool_fd=0") && strstr(rep, "PEER n=0 ok"));
+    assert(st == 0 && strstr(rep, "START rc=-102 step=2 heap_open=1 pool_fd=0") && peer_count(rep) == 0);
     printf("PASS composed start refused while the PD is not UP: no pool, nothing sent\n");
 
     st = run(c_sink_fails, rep, sizeof rep);
     printf("INFO %s", rep);
-    assert(st == 0 && strstr(rep, "unresolved=1 END=-16 records=0") && strstr(rep, "PEER n=0 ok"));
+    assert(st == 0 && strstr(rep, "unresolved=1 END=-16 records=0") && peer_count(rep) == 0);
     printf("PASS composed journal failure: no TX, region unresolved, the end is held (HOLD_RECONCILE)\n");
 
     printf("PASS composed native custodian runner core (G1-G8 together over stand-ins)\n");
