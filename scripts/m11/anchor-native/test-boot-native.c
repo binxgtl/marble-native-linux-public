@@ -205,27 +205,27 @@ int main(int argc, char **argv) {
         return 0;
     }
     char rep[2048]; int st;
-    st = run(c_pd_down, rep, sizeof rep); printf("INFO %s", rep);
+    st = run(c_pd_down, rep, sizeof rep); printf("INFO st=%d %s", st, rep);
     assert(st == 0 && strstr(rep, "BOOT rc=-102 step=2 stage=1 ep=UNBOUND ion=UNBOUND ep_node=0 ion_node=0 cma_node=0 heap_fd=0 heap_dir=0 sealed=0 spawner=1"));
     printf("PASS boot refused while the PD is not UP: the spawner exists, no node, nothing opened\n");
 
-    st = run(c_node_exists, rep, sizeof rep); printf("INFO %s", rep);
+    st = run(c_node_exists, rep, sizeof rep); printf("INFO st=%d %s", st, rep);
     assert(st == 0 && strstr(rep, "BOOT rc=-17 step=3 stage=2 ep=UNBOUND") && strstr(rep, "KEPT regular=1"));
     printf("PASS boot refused where an endpoint node already exists: it is left untouched, nothing bound\n");
 
-    st = run(c_devname, rep, sizeof rep); printf("INFO %s", rep);
+    st = run(c_devname, rep, sizeof rep); printf("INFO st=%d %s", st, rep);
     assert(st == 0 && strstr(rep, "BOOT rc=-19 step=3 stage=2 ep=UNBOUND ion=UNBOUND ep_node=0"));
     printf("PASS boot refused when the number's DEVNAME is not the endpoint: no node made\n");
 
-    st = run(c_cma_node, rep, sizeof rep); printf("INFO %s", rep);
+    st = run(c_cma_node, rep, sizeof rep); printf("INFO st=%d %s", st, rep);
     assert(st == 0 && strstr(rep, "BOOT rc=-17 step=4 stage=3 ep=HELD ion=UNBOUND ep_node=0 ion_node=0 cma_node=1"));
     printf("PASS boot refused when the ION CMA twin has a node: the endpoint stays held, its node removed, no ION node\n");
 
-    st = run(c_heap_missing, rep, sizeof rep); printf("INFO %s", rep);
+    st = run(c_heap_missing, rep, sizeof rep); printf("INFO st=%d %s", st, rep);
     assert(st == 0 && strstr(rep, "BOOT rc=-19 step=5 stage=4 ep=HELD ion=HELD ep_node=0 ion_node=0 cma_node=0 heap_fd=0 heap_dir=0 sealed=0"));
     printf("PASS boot refused without a system heap: both anchors stay held, both nodes removed, no heap node\n");
 
-    st = run(c_full, rep, sizeof rep); printf("INFO %s", rep);
+    st = run(c_full, rep, sizeof rep); printf("INFO st=%d %s", st, rep);
     assert(strstr(rep, "BOOT rc=0 step=0 stage=6 ep=HELD ion=HELD ep_node=0 ion_node=0 cma_node=0 heap_fd=1 heap_dir=0 sealed=1 spawner=1"));
     assert(strstr(rep, "START rc=0 step=0 why=0 heap_open=0") && st == 43 && strstr(rep, "END reboot ep_fd_open=0 ion_fd_open=0"));
     printf("PASS full boot: spawner, PD UP, both nodes made, bound and sealed (nodes gone), heap opened; the composed runner starts with a clean census (spawner included) and ends orderly\n");
