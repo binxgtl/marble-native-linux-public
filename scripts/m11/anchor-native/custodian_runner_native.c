@@ -24,7 +24,7 @@ static const char *proc_root(const m11_crunner *r) { return r->cfg.proc_root ? r
 /* 0 with *ppid; 1 when the process is gone (its /proc directory no longer exists); -1 when it exists
  * but its stat cannot be read or parsed (inconclusive: the census fails closed). */
 static int read_ppid(const m11_crunner *r, pid_t pid, pid_t *ppid) {
-    char path[300], dir[300], b[512];
+    char dir[300], path[300 + 8], b[512];
     snprintf(dir, sizeof dir, "%s/%ld", proc_root(r), (long)pid);
     snprintf(path, sizeof path, "%s/stat", dir);
     int fd = open(path, O_RDONLY | O_CLOEXEC);
