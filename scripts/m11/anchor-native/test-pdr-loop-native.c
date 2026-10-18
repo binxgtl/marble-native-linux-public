@@ -69,8 +69,17 @@ static void peer(int ep, int mon, enum mode m) {
         if (h.opcode == M11_APM_CMD_SHARED_MEM_MAP_REGIONS) {
             if (m == DOWN_ON_MAP) { if (write(mon, "D", 1) != 1) _exit(105); continue; }
             m11_apm_rsp_shared_mem_map_t r = {.mem_map_handle = 0xA0000001u};
-            if (m == DOWN_THEN_ACK) { if (write(mon, "D", 1) != 1) _exit(105); }
-            else if (write(mon, "U", 1) != 1) _exit(105); /* PD traffic that stays UP */
+            if (m == DOWN_THEN_ACK) {
+                if (write(mon, "D", 1) != 1) _exit(105);
+                /* the late ACK: the test may already have stopped listening (endpoint closed) */
+                uint8_t tx[64]; size_t txl = 0;
+                if (m11_gpr_pack_packet_ex(tx, sizeof tx, &txl, M11_GPR_DOMAIN_APPS, M11_GPR_DOMAIN_ADSP, 0,
+                                           h.src_port, h.dst_port, h.token,
+                                           M11_APM_CMDRSP_SHARED_MEM_MAP_REGIONS, &r, sizeof r) < 0) _exit(104);
+                (void)send(ep, tx, txl, 0);
+                continue;
+            }
+            if (write(mon, "U", 1) != 1) _exit(105); /* PD traffic that stays UP */
             reply(ep, &h, M11_APM_CMDRSP_SHARED_MEM_MAP_REGIONS, &r, sizeof r);
         } else if (h.opcode == M11_APM_CMD_SHARED_MEM_UNMAP_REGIONS) {
             if (m == DOWN_ON_UNMAP) { if (write(mon, "D", 1) != 1) _exit(105); continue; }
