@@ -249,9 +249,9 @@ static int anchors_open(void) {
     if (E.runner.term.saved)
         return is_open(E.runner.term.saved_fd[0][0]) + is_open(E.runner.term.saved_fd[0][1]) +
                is_open(E.runner.term.saved_fd[1][0]) + is_open(E.runner.term.saved_fd[1][1]);
-    int n = 0;
-    if (E.boot.endpoint.state == M11_ANCHOR_HELD) n += is_open(E.boot.endpoint.anchor_fd) + is_open(E.boot.endpoint.guard_fd);
-    if (E.boot.ion.state == M11_ANCHOR_HELD) n += is_open(E.boot.ion.anchor_fd) + is_open(E.boot.ion.guard_fd);
+    int n = 0; /* never closed by the end: a bound anchor (HELD, or RETAINED by the retaining end) keeps its numbers */
+    if (E.boot.endpoint.state != M11_ANCHOR_UNBOUND) n += is_open(E.boot.endpoint.anchor_fd) + is_open(E.boot.endpoint.guard_fd);
+    if (E.boot.ion.state != M11_ANCHOR_UNBOUND) n += is_open(E.boot.ion.anchor_fd) + is_open(E.boot.ion.guard_fd);
     return n;
 }
 static void report(const char *kind) {
