@@ -737,7 +737,7 @@ p3_mutant() { # name asroot pattern replacement assertion last-pass (same detect
   fi
   echo "PASS P3 test detects mutant $name: Assertion \`$want'"
 }
-p3_mutant cmdline-gate-late 0 'if (!allowed) return entry_fail(e, "cmdline", 3, -EPERM);' '    (void)0;' \
+p3_mutant cmdline-gate-late 0 'if (!allowed) return entry_fail(e, "cmdline", 3, -EPERM);' '    (void)allowed;' \
   'st == 0 && strstr(rep, "CALLS perm=-1 inval=-22 first=-14 second=-114 phase=1/1 fail_step=3/3")' \
   'PASS default entry: PID1 only, /dev/kmsg (1:11) journal, /proc/cmdline, the AF_QIPCRTR monitor (10 s bring-up), the real nodes, no session (never maps), production terminal ops'
 p3_mutant kmsg-identity-unchecked 0 'if (cfg->journal_require_kmsg && (!S_ISCHR(st.st_mode) || st.st_rdev != makedev(1, 11))) {' '    if (0) {' \
