@@ -27,7 +27,9 @@
  * ledger untouched, and forces the G8 end to the retaining one ("foreign_holder_why=<census_why>"),
  * whatever the custodian decided (HOLD included).
  * Every custodian call is followed by m11_pdr_loop_settle. Every MAP is preceded by map_intent_fn
- * (required; P3 wires the PD session's resources-busy latch there). m11_crunner_end hands the boot to the G8
+ * (required; P3 wires the PD session's resources-busy latch there); after any MAP intent the end is
+ * never the orderly one (B5: forced retaining, "map_intent=N", even if that MAP never reached a TX).
+ * m11_crunner_end hands the boot to the G8
  * terminal with both anchors, the pool and the journal sink. A start that failed before the custodian
  * enrolled has no G8 decision: m11_crunner_end then journals START_FAILED with the failing step and
  * ends through exit_fn without closing anything (fail closed). Start is one-shot per process.

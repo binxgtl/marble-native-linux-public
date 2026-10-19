@@ -99,6 +99,16 @@ static void report(const char *what) {
     if (n > 0) (void)!write(report_fd, b, (size_t)n < sizeof b ? (size_t)n : sizeof b - 1);
 }
 static void t_exit(void *u) { (void)u; report("EXIT"); _exit(42); }
+/* B5 teardown hooks: the teardown states what it found (closes done, record written) */
+static int teardown_rc;
+static int t_teardown(void *u) {
+    (void)u; char b[120];
+    int n = snprintf(b, sizeof b, "TEARDOWN fds_open=%d/4 sink_writes=%u\n",
+                     is_open(ep_a) + is_open(ep_g) + is_open(io_a) + is_open(io_g), jfd.writes);
+    if (n > 0) (void)!write(report_fd, b, (size_t)n);
+    return teardown_rc;
+}
+static void t_hold(void *u) { (void)u; report("HOLD"); _exit(44); }
 static int reboot_mode; /* 0: "reboots" (child ends 43); 1: fails */
 static int t_reboot(void *u) { (void)u; if (reboot_mode) return -EIO; report("REBOOT"); _exit(43); }
 
@@ -183,6 +193,21 @@ static void c_latched_second(void) {
 }
 static void c_reboot_fails(void) { world(0, 0, 2); assert(m11_custodian_close(&cust) == 0); reboot_mode = 1; end_and_report(); }
 static void c_sink_fails(void) { world(1, 1, 2); (void)map_one(); m11_custodian_pd_down(&cust, ms()); close(jp[0]); jp[0] = -1; end_and_report(); }
+/* B5: the teardown runs after both final closes and the record, before reboot_fn; a failing one holds */
+static void teardown_case(int rc, int with_hold) {
+    world(0, 0, 2); assert(m11_custodian_close(&cust) == 0);
+    teardown_rc = rc; term.ops.teardown_fn = t_teardown; term.ops.hold_fn = with_hold ? t_hold : NULL;
+    end_and_report();
+}
+static void c_teardown_ok(void) { teardown_case(0, 1); }
+static void c_teardown_fails(void) { teardown_case(-EIO, 1); }
+static void c_teardown_no_hold(void) { teardown_case(0, 0); }
+static void c_teardown_mapped(void) { /* a mapped boot never reaches the teardown */
+    world(1, 1, 2); unsigned s = map_one();
+    assert(m11_custodian_retire(&cust, s, ms()) == 0 && m11_custodian_close(&cust) == 0);
+    teardown_rc = 0; term.ops.teardown_fn = t_teardown; term.ops.hold_fn = t_hold;
+    end_and_report();
+}
 
 static int run(void (*fn)(void), char *rep, size_t cap) {
     int p[2]; assert(pipe(p) == 0);
@@ -282,6 +307,27 @@ int main(void) {
     printf("INFO %s", rep);
     assert(st == 42 && strstr(rep, "EXIT fds_open=4/4 pool_open=4/4") && strstr(rep, "sink_writes=0 sink_failed=1"));
     printf("PASS terminal journal sink failing: the end still happens, holding every anchor and pool fd\n");
+
+    st = run(c_teardown_ok, rep, sizeof rep);
+    printf("INFO %s", rep);
+    assert(st == 43 && strstr(rep, "TEARDOWN fds_open=0/4 sink_writes=1") && strstr(rep, "REBOOT fds_open=0/4"));
+    assert(strstr(rep, "TEARDOWN") < strstr(rep, "REBOOT"));
+    printf("PASS B5 teardown: after both final closes and the journaled record, before the reboot\n");
+
+    st = run(c_teardown_fails, rep, sizeof rep);
+    printf("INFO %s", rep);
+    assert(st == 44 && strstr(rep, "TEARDOWN fds_open=0/4") && strstr(rep, "HOLD fds_open=0/4") && !strstr(rep, "REBOOT") && !strstr(rep, "EXIT"));
+    printf("PASS B5 teardown failing: hold (Run23), never the reboot, never the exit\n");
+
+    st = run(c_teardown_no_hold, rep, sizeof rep);
+    printf("INFO %s", rep);
+    assert(st == 0 && strstr(rep, "RET=-22 fds_open=4/4") && !strstr(rep, "TEARDOWN"));
+    printf("PASS B5 teardown without a hold hook: refused before anything is closed\n");
+
+    st = run(c_teardown_mapped, rep, sizeof rep);
+    printf("INFO %s", rep);
+    assert(st == 42 && strstr(rep, "EXIT fds_open=4/4") && !strstr(rep, "TEARDOWN") && strstr(rep, "note=mapped_boot"));
+    printf("PASS B5 teardown never runs for a mapped boot: retaining PID1 exit\n");
 
     m11_terminal_native bad; memset(&bad, 0, sizeof bad);
     assert(m11_terminal_native_end(&bad, 0) == -EINVAL);

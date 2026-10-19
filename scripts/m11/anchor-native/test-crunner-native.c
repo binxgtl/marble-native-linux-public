@@ -394,6 +394,18 @@ static void c_no_intent(void) {
     _exit(99);
 }
 
+/* B5: a MAP intent that the custodian refuses before any TX (it is closed) still rules out the
+ * orderly end the custodian alone would choose. */
+static void c_intent_after_close(void) {
+    int step; assert(world(ANSWER, GOOD, &step) == 0);
+    assert(m11_crunner_close(&R) == 0);
+    unsigned s; int rc = m11_crunner_map(&R, 4096, ms(), &s);
+    char b[160]; snprintf(b, sizeof b, "MAP rc=%d intents=%u attempted=%d action=%s\n", rc, R.map_intents,
+                          (int)R.boot.dsp_map_attempted, m11_terminal_action_name(m11_custodian_terminal_action(&R.cust))); say(b);
+    (void)m11_crunner_end(&R, ms());
+    _exit(99);
+}
+
 static int peer_count(const char *rep) {
     int best = -1;
     for (const char *p = rep; (p = strstr(p, "PEER n=")); p += 7) { int n = atoi(p + 7); if (n > best) best = n; }
@@ -521,6 +533,12 @@ int main(void) {
     assert(strstr(rep, "MAP rc=-1 slot=-1 intents=0 attempted=0") && peer_count(rep) == 0);
     assert(st == 43 && strstr(rep, "action=ORDERLY_SHUTDOWN end=reboot"));
     printf("PASS composed MAP without the MAP-intent hook: refused before any import or TX; the boot stays never-mapped\n");
+
+    st = run(c_intent_after_close, rep, sizeof rep);
+    printf("INFO %s", rep);
+    assert(strstr(rep, "MAP rc=-130 intents=1 attempted=0 action=ORDERLY_SHUTDOWN") && peer_count(rep) == 0);
+    assert(st == 42 && strstr(rep, "EXIT anchors=4/4") && strstr(rep, "action=ORDERLY_SHUTDOWN end=pid1_exit") && strstr(rep, "note=map_intent=1"));
+    printf("PASS composed MAP intent refused before TX (custodian closed): the orderly end is ruled out, retaining end (B5)\n");
 
     printf("PASS composed native custodian runner core (G1-G8 together over stand-ins)\n");
     return 0;

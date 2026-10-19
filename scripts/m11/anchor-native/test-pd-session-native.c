@@ -198,6 +198,25 @@ int main(void) {
     close(sv[0]); close(sv[1]);
     printf("PASS monitor in the G6 transport: the DOWN pumped before the write refuses the TX (-ENETRESET)\n");
 
+    /* 12. B5 retire (stop): only from READY with nothing busy; the withdrawal, DEL_LOOKUP, STOPPED */
+    to_ready(110000);
+    unsigned b0 = ntx;
+    assert(m11_pds_stop(&M.pds, 110001) == 1 && M.pds.phase == M11_PDS_STOPPING && ntx == b0 + 1);
+    assert(g16(txl[ntx - 1].b + 3) == 0x20 && txl[ntx - 1].b[7] == 1 && txl[ntx - 1].b[10] == 0); /* enable = 0 */
+    { unsigned char b[32] = {0}, r[4] = {0}; size_t n = 7; n += tlv(b + n, 2, r, 4); qmi(2, last_txn(0x20), 0x20, b, n); }
+    assert(m11_pdmon_pump(&M, 110002) == 0 && M.pds.phase == M11_PDS_STOPPED && M.pds.unregister_ok);
+    assert(ntx == b0 + 2 && txl[ntx - 1].port == M11_PDS_CTRL_PORT && g32(txl[ntx - 1].b) == 11 &&
+           g32(txl[ntx - 1].b + 12) == LOCAL && g32(txl[ntx - 1].b + 16) == LPORT);
+    assert(m11_pds_stop(&M.pds, 110003) == 0);
+    to_ready(111000); m11_pds_resources_busy(&M.pds); b0 = ntx;
+    int busy_stop = m11_pds_stop(&M.pds, 111001);
+    assert(busy_stop == -1 && M.pds.phase == M11_PDS_READY && ntx == b0);
+    to_ready(112000); indication(M11_PDS_DOWN, 16); assert(m11_pdmon_pump(&M, 112010) == 0);
+    assert(m11_pds_stop(&M.pds, 112011) == -1);
+    to_ready(113000); assert(m11_pds_stop(&M.pds, 113001) == 1); indication(M11_PDS_UP, 17);
+    assert(m11_pdmon_pump(&M, 113002) == 0 && M.pds.phase == M11_PDS_ENDED); /* anything else while stopping fails it */
+    printf("PASS B5 retire: from READY only, never while resources are busy or after the session ended; withdrawal (enable 0), DEL_LOOKUP, STOPPED; any other datagram fails the stop\n");
+
     /* 11. the production socket path on this host */
     m11_pdmon real; int rc = m11_pdmon_open(&real, NULL, 1, 5000);
     printf("INFO AF_QIPCRTR on this host: open rc=%d fd=%d (not asserted beyond cleanup)\n", rc, real.fd);

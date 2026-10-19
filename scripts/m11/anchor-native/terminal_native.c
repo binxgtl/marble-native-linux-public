@@ -118,9 +118,10 @@ static int anchors_ready(m11_terminal_native *t) {
 }
 
 int m11_terminal_native_end(m11_terminal_native *t, uint64_t now_ms) {
-    if (!t || !t->c || !t->c->boot || t->nanchors > 2 || !t->ops.exit_fn || !t->ops.reboot_fn) return -EINVAL;
+    if (!t || !t->c || !t->c->boot || t->nanchors > 2 || !t->ops.exit_fn || !t->ops.reboot_fn ||
+        (t->ops.teardown_fn && !t->ops.hold_fn)) return -EINVAL;
     for (unsigned i = 0; i < t->nanchors; i++) if (!t->anchors[i]) return -EINVAL;
-    t->orderly_failed = t->reboot_failed = t->sink_failed = t->saved = 0;
+    t->orderly_failed = t->reboot_failed = t->sink_failed = t->saved = t->teardown_ran = t->teardown_rc = 0;
     (void)m11_custodian_tick(t->c, now_ms);
     t->action = m11_custodian_terminal_action(t->c);
     if (t->force_retain_note) { /* an ownership violation: the record keeps the custodian's own decision */
@@ -158,6 +159,10 @@ int m11_terminal_native_end(m11_terminal_native *t, uint64_t now_ms) {
         t->anchors_held = 0;
         t->pool_held = t->pool ? m11_dmabuf_census_pid(t->pool, getpid(), 1) == 0 : 0;
         record(t, "reboot", "never_mapped");
+        if (t->ops.teardown_fn) { /* B5: the controlled teardown, then the reboot; a failure holds */
+            t->teardown_ran = 1;
+            if ((t->teardown_rc = t->ops.teardown_fn(t->ops.user)) != 0) { t->ops.hold_fn(t->ops.user); return -ECANCELED; }
+        }
         if (t->ops.reboot_fn(t->ops.user) != 0) { t->reboot_failed = 1; return end_retaining(t, "reboot_failed"); }
         t->reboot_failed = 1; /* reboot_fn returned success without rebooting */
         return end_retaining(t, "reboot_returned");

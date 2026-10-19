@@ -18,6 +18,11 @@ static int entry_started_once;
  * candidate that provides /m11/control is a later step; the entry runs no job itself. */
 static const char *const control_job[] = {"/bin/busybox", "sh", "/m11/control", NULL};
 static const char *const *const spawner_jobs[] = {control_job};
+/* B5: Run23's teardown through the control job, in its order and with its deadlines. Run23's mapper
+ * stop and result checkpoint involve the helper processes and the display, which P4 assembles. */
+static const m11_entry_job run23_teardown[] = {
+    {"seal", 10000}, {"usb_stop", 10000}, {"stop_adsp", 40000}, {"common", 10000}, {"unmount", 10000}};
+static void hold_forever(void *user) { (void)user; for (;;) pause(); }
 
 m11_entry_config m11_entry_config_default(void) {
     m11_entry_config c = {
@@ -29,6 +34,11 @@ m11_entry_config m11_entry_config_default(void) {
         .session_fn = NULL, .session_user = NULL};
     c.boot.spawner_commands = spawner_jobs;
     c.boot.spawner_count = 1;
+    c.terminal_ops.hold_fn = hold_forever;
+    c.teardown_jobs = run23_teardown;
+    c.teardown_count = sizeof run23_teardown / sizeof run23_teardown[0];
+    c.evidence_marker = "/run/m11-instrumentation/logger.done";
+    c.pd_retire_budget_ms = 2000;
     return c;
 }
 
@@ -117,6 +127,16 @@ static uint32_t crc32_text(const char *s) {
     return ~c;
 }
 
+int m11_entry_cmdline_summary(const char *cmdline, char *out, size_t cap) {
+    const int allowed = m11_custodian_cmdline_allowed(cmdline);
+    char strict[16], passthrough[16];
+    token_value(cmdline, "iommu.strict=", strict, sizeof strict);
+    token_value(cmdline, "iommu.passthrough=", passthrough, sizeof passthrough);
+    snprintf(out, cap, "allowed=%d len=%zu strict=%s passthrough=%s crc32=%08x", allowed, strlen(cmdline), strict,
+             passthrough, (unsigned)crc32_text(cmdline));
+    return allowed;
+}
+
 /* Nothing audio was ever opened: no bind was attempted on either anchor (an attempt may have
  * retained an fd it obtained) and no heap fd is held. Only then may a failed boot reboot. */
 static int nothing_opened(const m11_entry *e) {
@@ -146,10 +166,50 @@ static int entry_fail(m11_entry *e, const char *phase, int step, int rc) {
     return -EFAULT;
 }
 
+/* The runner's terminal ops: the caller's exit/reboot/hold under the caller's user, plus the
+ * entry's own B5 teardown. */
+static void ops_exit(void *u) { m11_entry *e = u; e->cfg.terminal_ops.exit_fn(e->cfg.terminal_ops.user); }
+static int ops_reboot(void *u) { m11_entry *e = u; return e->cfg.terminal_ops.reboot_fn(e->cfg.terminal_ops.user); }
+static void ops_hold(void *u) { m11_entry *e = u; e->cfg.terminal_ops.hold_fn(e->cfg.terminal_ops.user); }
+
+/* B5: called by the G8 orderly end only, after both final closes and its record. */
+static int entry_teardown(void *u) {
+    m11_entry *e = u;
+    const m11_entry_config *c = &e->cfg;
+    e->teardown_step = 0;
+    /* the gate, again here: never mapped, no MAP intent, census clean, both anchors final-closed */
+    if (e->runner.map_intents || e->runner.census_failed || e->runner.boot.dsp_map_attempted ||
+        e->boot.endpoint.state != M11_ANCHOR_OWNER_FDS_DROPPED || e->boot.ion.state != M11_ANCHOR_OWNER_FDS_DROPPED) {
+        phase_record(e, "phase=teardown refused=1 intents=%u census_failed=%d", e->runner.map_intents, e->runner.census_failed);
+        return e->teardown_rc = -EPERM;
+    }
+    /* the PD listener withdrawn while the ADSP still runs (Run23 retired before the transport teardown) */
+    int rc = m11_pdmon_retire(&e->pdmon, c->pd_retire_budget_ms);
+    phase_record(e, "phase=teardown pd_retire=%d jobs=%u", rc, c->teardown_count); /* the last record */
+    if (rc) return e->teardown_rc = rc;
+    for (unsigned i = 0; i < c->teardown_count; i++) {
+        e->teardown_step = (int)i + 1;
+        int status = 0;
+        rc = m11_spawner_run_flags(&e->boot.spawner, 0, c->teardown_jobs[i].arg, c->teardown_jobs[i].deadline_ms,
+                                   M11_SPAWN_NO_KILL, &status);
+        if (rc || status) return e->teardown_rc = rc ? rc : -ECHILD; /* a stuck job is never killed */
+        if (i == 0 && c->evidence_marker) { /* the evidence reached the host before anything stops */
+            char b[8]; struct stat st;
+            if (lstat(c->evidence_marker, &st) || !S_ISREG(st.st_mode) || read_text(c->evidence_marker, b, sizeof b) || strcmp(b, "1\n"))
+                return e->teardown_rc = -ENODATA;
+        }
+    }
+    e->teardown_step = (int)c->teardown_count + 1;
+    if ((rc = m11_spawner_stop(&e->boot.spawner))) return e->teardown_rc = rc;
+    return e->teardown_rc = 0;
+}
+
 int m11_entry_run(m11_entry *e, const m11_entry_config *cfg) {
     if (!e || !cfg || !cfg->cmdline_path || !cfg->journal_path || !cfg->pd_ready_budget_ms ||
         cfg->pd_ready_budget_ms > 10000u || !cfg->hold_idle_ms || !cfg->terminal_ops.exit_fn ||
-        !cfg->terminal_ops.reboot_fn) return -EINVAL;
+        !cfg->terminal_ops.reboot_fn ||
+        (cfg->teardown_count && (!cfg->teardown_jobs || !cfg->terminal_ops.hold_fn || !cfg->pd_retire_budget_ms ||
+                                 cfg->pd_retire_budget_ms > M11_PDS_TXN_TIMEOUT_MS))) return -EINVAL;
     if (cfg->require_pid1 && getpid() != 1) return -EPERM;
     if (entry_started_once) return -EALREADY; /* never wipe an entry that may hold the boot */
     entry_started_once = 1;
@@ -177,11 +237,9 @@ int m11_entry_run(m11_entry *e, const m11_entry_config *cfg) {
 
     /* 3. the effective cmdline, before anything else is opened */
     if ((rc = read_text(cfg->cmdline_path, e->cmdline, sizeof e->cmdline))) return entry_fail(e, "cmdline", 3, rc);
-    const int allowed = m11_custodian_cmdline_allowed(e->cmdline);
-    char strict[16], passthrough[16];
-    token_value(e->cmdline, "iommu.strict=", strict, sizeof strict);
-    token_value(e->cmdline, "iommu.passthrough=", passthrough, sizeof passthrough);
-    phase_record(e, "phase=cmdline allowed=%d len=%zu strict=%s passthrough=%s crc32=%08x", allowed, strlen(e->cmdline), strict, passthrough, crc32_text(e->cmdline));
+    char summary[112];
+    const int allowed = m11_entry_cmdline_summary(e->cmdline, summary, sizeof summary);
+    phase_record(e, "phase=cmdline %s", summary);
     if (!allowed) return entry_fail(e, "cmdline", 3, -EPERM);
     e->phase = M11_ENTRY_CMDLINE;
 
@@ -207,7 +265,10 @@ int m11_entry_run(m11_entry *e, const m11_entry_config *cfg) {
     m11_crunner_config rc_cfg = {.endpoint = &e->boot.endpoint, .ion = &e->boot.ion, .heap_fd = e->boot.heap.fd,
         .heap_rdev = e->boot.heap.rdev, .pool_count = cfg->pool_count, .pool_len = cfg->pool_len,
         .pool_base = cfg->pool_base, .sys = cfg->sys, .pd = &e->pdmon.monitor, .journal = &e->sink,
-        .terminal_ops = cfg->terminal_ops, .cmdline = e->cmdline, .boot_epoch = e->boot_epoch,
+        .terminal_ops = {.exit_fn = ops_exit, .reboot_fn = ops_reboot, .user = e, .panic_path = cfg->terminal_ops.panic_path,
+                         .teardown_fn = cfg->teardown_count ? entry_teardown : NULL,
+                         .hold_fn = cfg->terminal_ops.hold_fn ? ops_hold : NULL},
+        .cmdline = e->cmdline, .boot_epoch = e->boot_epoch,
         .timeout_ms = cfg->timeout_ms, .recovery_budget_ms = cfg->recovery_budget_ms, .src_port = cfg->src_port,
         .proc_root = cfg->proc_root, .map_intent_fn = map_intent, .map_intent_user = e};
     if ((rc = m11_crunner_start(&e->runner, &rc_cfg, m11_entry_now_ms(), &step))) {

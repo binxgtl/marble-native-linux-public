@@ -30,7 +30,12 @@
  *   8. close, then the G8 end. While the custodian decides HOLD or HOLD_RECONCILE, PID1 waits on the
  *      monitor (m11_crunner_idle, hold_idle_ms per round) and asks again; a PD DOWN, a census
  *      failure or the recovery deadline turns the decision into the retaining end. PID1 never
- *      leaves without a G8 end.
+ *      leaves without a G8 end. B5: the orderly end (never mapped, no MAP intent, census clean,
+ *      both final closes done) runs the Run23-style teardown between its record and the reboot:
+ *      the PD listener is withdrawn (unregister, DEL_LOOKUP, socket closed), one teardown record
+ *      is written (the last one: the seal closes the evidence channel), the control jobs run in
+ *      order (seal first; its evidence marker must read "1\n"), the spawner is stopped. Any refused
+ *      gate or failed step holds (hold_fn): no reboot, no exit, nothing more is run.
  * Not here: the PID1 environment (mounts, ADSP start, USB, the post-seal jobs the spawner runs) is a
  * precondition, part of a later candidate step. /dev must not be a devtmpfs that already holds the
  * audio nodes: P2 refuses a node that exists.
@@ -45,6 +50,9 @@
 #include "pd_session_native.h"
 
 typedef struct m11_entry m11_entry;
+
+/* One B5 teardown step: the spawner's control job (index 0) with this argument, never killed. */
+typedef struct { const char *arg; uint32_t deadline_ms; } m11_entry_job;
 
 typedef struct {
     m11_boot_config boot;            /* P2 (production: m11_boot_config_default + the control job) */
@@ -61,7 +69,16 @@ typedef struct {
     uint32_t timeout_ms, recovery_budget_ms, hold_idle_ms;
     uint16_t src_port;
     uint64_t boot_epoch;             /* 0 = derived at entry (getrandom, else CLOCK_BOOTTIME) */
-    m11_terminal_ops terminal_ops;   /* production: m11_terminal_ops_default */
+    m11_terminal_ops terminal_ops;   /* production: m11_terminal_ops_default + hold_fn (pause forever);
+                                      * its teardown_fn is ignored: the entry supplies its own */
+    /* B5 teardown (orderly never-mapped end only): PD listener retired, one record, then the jobs in
+     * order (the first must be the evidence seal), the evidence marker checked after the first job,
+     * the spawner stopped. Production: Run23's seal, usb_stop, stop_adsp, common, unmount. 0 jobs:
+     * no teardown (the orderly end reboots after its record, as before). */
+    const m11_entry_job *teardown_jobs;
+    unsigned teardown_count;
+    const char *evidence_marker;     /* "1\n" after the seal (Run23: logger.done); NULL: not checked */
+    uint32_t pd_retire_budget_ms;    /* 1..2000 */
     const char *proc_root;           /* NULL = "/proc" (runner tree census) */
     int (*session_fn)(void *user, m11_entry *); /* NULL in production: never maps */
     void *session_user;
@@ -83,12 +100,19 @@ struct m11_entry {
     m11_boot boot;
     m11_crunner runner;
     int session_rc, reboot_rc;
+    int teardown_step, teardown_rc;  /* B5: last step reached (0 retire, 1..n jobs, n+1 spawner stop) */
     unsigned hold_rounds;
     unsigned records, record_failures; /* entry records written / refused by the sink */
     char record[M11_INTENT_RECORD_MAX + 96];
 };
 
 m11_entry_config m11_entry_config_default(void);
+/* B6/B3: the cmdline record body ("allowed=%d len=%zu strict=%s passthrough=%s crc32=%08x"; the gate
+ * verdict, the last iommu.strict= / iommu.passthrough= token values sanitized or absent/empty, the
+ * length and CRC-32 of the text; never the text). Returns the verdict. The CRC is local evidence only:
+ * over a text with one short unknown field (the serial) it can be inverted, so it is never committed
+ * or exported. scripts/m11/anchor-native/cmdline_summary.py computes the same body off-device. */
+int m11_entry_cmdline_summary(const char *cmdline, char *out, size_t cap);
 uint64_t m11_entry_now_ms(void); /* CLOCK_MONOTONIC ms: the clock every phase uses */
 /* -EINVAL (bad configuration) and -EPERM (not PID1) touch nothing and do not count as the one call;
  * -EALREADY on any later call. Otherwise it does not return unless exit_fn or reboot_fn returns

@@ -51,6 +51,14 @@ static int request(m11_pds *s, uint16_t id, uint16_t t, unsigned char *b, size_t
     b[0] = 0; p16(b + 1, t); p16(b + 3, id); p16(b + 5, (uint16_t)(n - 7));
     return send_to(s, s->node, s->port, b, n);
 }
+/* The listener's withdrawal (enable = 0), as the frozen codec's stop sends it. */
+static int unregistration(m11_pds *s) {
+    unsigned char b[M11_PDS_WIRE_MAX] = {0}, e = 0;
+    size_t n = 7; n += tlv(b + n, 1, &e, 1); n += tlv(b + n, 2, M11_PDS_PATH, sizeof(M11_PDS_PATH) - 1);
+    if (!(s->register_txn = txn(s))) return end(s, M11_PDS_MALFORMED);
+    s->register_deadline = s->now + M11_PDS_TXN_TIMEOUT_MS;
+    return request(s, 0x20, s->register_txn, b, n);
+}
 static int registration(m11_pds *s) {
     unsigned char b[M11_PDS_WIRE_MAX] = {0}, e = 1;
     size_t n = 7; n += tlv(b + n, 1, &e, 1); n += tlv(b + n, 2, M11_PDS_PATH, sizeof(M11_PDS_PATH) - 1);
@@ -149,6 +157,14 @@ int m11_pds_receive(m11_pds *s, uint32_t node, uint32_t port, const void *data, 
     struct value v[256];
     if (values(b, n, v)) return end(s, M11_PDS_MALFORMED);
     uint16_t id = u16(b + 3), t = u16(b + 1);
+    if (s->phase == M11_PDS_STOPPING) { /* only the withdrawal's response; anything else fails the stop */
+        if (!(b[0] == 2 && id == 0x20 && t && t == s->register_txn) || !only(v, 2, 16, 2) || !result_ok(&v[2]))
+            return end(s, M11_PDS_MALFORMED);
+        s->register_txn = 0; s->unregister_ok = 1; s->registered = 0;
+        if (lookup(s, 11)) return -1; /* DEL_LOOKUP */
+        s->phase = M11_PDS_STOPPED;
+        return 0;
+    }
     if (b[0] == 2 && id == 0x20 && t && t == s->register_txn) { /* registration response */
         if (!only(v, 2, 16, 2) || !result_ok(&v[2]) || !v[16].b || v[16].n != 4 || !valid_state(u32(v[16].b)))
             return end(s, M11_PDS_MALFORMED);
@@ -183,6 +199,15 @@ int m11_pds_receive(m11_pds *s, uint32_t node, uint32_t port, const void *data, 
 }
 
 void m11_pds_resources_busy(m11_pds *s) { s->resources_busy = 1; }
+int m11_pds_stop(m11_pds *s, uint64_t now_ms) {
+    if (s->phase == M11_PDS_STOPPED) return 0;
+    if (s->phase == M11_PDS_STOPPING) return 1;
+    /* only a READY, idle session with nothing busy: a deferred ACK is never sent here */
+    if (s->resources_busy || s->phase != M11_PDS_READY || s->ack_txn || s->ack_deferred || s->register_txn) return -1;
+    if (deadlines(s, now_ms)) return -1;
+    s->phase = M11_PDS_STOPPING; s->unregister_sent = 1;
+    return unregistration(s) ? -1 : 1;
+}
 int m11_pds_resources_released(m11_pds *s) {
     s->resources_busy = 0;
     return s->ack_deferred ? ack(s) : 0;
@@ -277,4 +302,24 @@ int m11_pdmon_wait_up(m11_pdmon *m, uint32_t budget_ms) {
         if (poll(&p, 1, left > (uint64_t)INT_MAX ? INT_MAX : (int)left) < 0 && errno != EINTR) break;
     }
     return -ENETRESET;
+}
+int m11_pdmon_retire(m11_pdmon *m, uint32_t budget_ms) {
+    if (!m || m->fd < 0 || !budget_ms || budget_ms > M11_PDS_TXN_TIMEOUT_MS) return -EINVAL;
+    uint64_t start = mono_ms(), deadline = start + budget_ms;
+    (void)m11_pdmon_pump(m, start); /* what arrived before the stop */
+    int rc = start ? m11_pds_stop(&m->pds, start) : -1;
+    if (rc < 0) return -EBUSY;     /* refused: the socket stays open, the session unchanged */
+    while (m->pds.phase == M11_PDS_STOPPING) {
+        uint64_t now = mono_ms();
+        if (!now || now >= deadline) break;
+        struct pollfd p = {.fd = m->fd, .events = POLLIN};
+        uint64_t left = deadline - now;
+        if (poll(&p, 1, left > (uint64_t)INT_MAX ? INT_MAX : (int)left) < 0 && errno != EINTR) break;
+        (void)m11_pdmon_pump(m, mono_ms());
+    }
+    const int stopped = m->pds.phase == M11_PDS_STOPPED;
+    int crc = m->sys->close_fn(m->sys->u, m->fd); /* the kernel withdraws the port (DEL_CLIENT) */
+    m->fd = -1; m->monitor.fd = -1;
+    if (!stopped) return -ETIMEDOUT;
+    return crc ? -EIO : 0;
 }

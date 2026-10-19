@@ -467,6 +467,10 @@ g8_mutant reboot-failure-returns 'if (t->ops.reboot_fn(t->ops.user) != 0) { t->r
 g8_mutant sink-failure-blocks 'record(t, "pid1_exit", note);' '    record(t, "pid1_exit", note); if (t->sink_failed) return -EIO;' \
   'st == 42 && strstr(rep, "EXIT fds_open=4/4 pool_open=4/4") && strstr(rep, "sink_writes=0 sink_failed=1")' \
   'PASS reboot(2) failing after the orderly closes: PID1 exit, never a retry'
+g8_mutant teardown-failure-reboots 'if ((t->teardown_rc = t->ops.teardown_fn(t->ops.user)) != 0) { t->ops.hold_fn(t->ops.user); return -ECANCELED; }' \
+  '            t->teardown_rc = t->ops.teardown_fn(t->ops.user);' \
+  'st == 44 && strstr(rep, "TEARDOWN fds_open=0/4") && strstr(rep, "HOLD fds_open=0/4") && !strstr(rep, "REBOOT") && !strstr(rep, "EXIT")' \
+  'PASS B5 teardown: after both final closes and the journaled record, before the reboot'
 # Criterion 7 composition: G1-G8 in the composed runner core under one stand-in harness (real
 # adapters, owner + pool seals, GPR over a raw pty to the ADSP stand-in, PD pipe, journal pipe).
 cr_srcs=("${tc_srcs[@]}" "$own/m11_custodian.c" "$here/gpr_transport_native.c" "$here/shmem_backend_native.c"
@@ -551,6 +555,9 @@ cr_mutant map-intent-not-required 'if (!r->cfg.map_intent_fn) return -EPERM;' ' 
   'PASS composed journal failure: no TX, region unresolved, the end is held (HOLD_RECONCILE)'
 cr_mutant map-intent-not-called 'r->cfg.map_intent_fn(r->cfg.map_intent_user);' '    (void)0;' \
   'intents == 1 && R.map_intents == 1' ''
+cr_mutant map-intent-orderly 'else if (r->map_intents && m11_custodian_terminal_action(&r->cust) == M11_TERMINAL_ORDERLY_SHUTDOWN) {' '    } else if (0) {' \
+  'st == 42 && strstr(rep, "EXIT anchors=4/4") && strstr(rep, "action=ORDERLY_SHUTDOWN end=pid1_exit") && strstr(rep, "note=map_intent=1")' \
+  'PASS composed MAP without the MAP-intent hook: refused before any import or TX; the boot stays never-mapped'
 # Production P1: the long-session SERVREG listener and its QRTR adapter (the G6 PD monitor) over a
 # fixture QRTR; the frozen one-query codec (runtime/audio_pd.c) is not used and stays unchanged.
 p1_srcs=("$here/pd_session_native.c" "$here/gpr_transport_native.c" "$here/test-pd-session-native.c")
@@ -598,6 +605,10 @@ p1_mutant del-client-any 'return s->peer && a == s->node && c == s->port ? end(s
 p1_mutant unknown-ctrl-ignored 'default: /* anything else cannot be read as UP */' '    default: return 0;' \
   'hello == 0' \
   'PASS DOWN while resources are busy: not UP at once, the ACK deferred until release'
+p1_mutant stop-while-busy 'if (s->resources_busy || s->phase != M11_PDS_READY || s->ack_txn || s->ack_deferred || s->register_txn) return -1;' \
+  '    if (s->phase != M11_PDS_READY || s->ack_txn || s->ack_deferred || s->register_txn) return -1;' \
+  'busy_stop == -1 && M.pds.phase == M11_PDS_READY && ntx == b0' \
+  'PASS monitor in the G6 transport: the DOWN pumped before the write refuses the TX (-ENETRESET)'
 # Production P2: the PID1 boot sequence over a fake sysfs/procfs tree and a scratch /dev. Metadata
 # unprivileged; the refusals and a full boot handed to the composed runner as root (sudo).
 p2_srcs=("${tc_srcs[@]}" "$own/m11_custodian.c" "$here/gpr_transport_native.c" "$here/shmem_backend_native.c"
@@ -697,6 +708,12 @@ for f in custodian_entry_native.c custodian_entry_main.c; do
   fi
 done
 echo 'PASS production P3 PID1 entry (gcc, clang, ASan+UBSan, root when sudo); the PID1 binary links and returns 2 outside PID1; refused outside M11_CUSTODIAN_NATIVE'
+# B3: the off-device cmdline summary (cmdline_summary.py) equals the entry's B6 record body.
+b3_srcs=()
+for s in "${p3_srcs[@]}"; do [[ "$s" == "$here/test-entry-native.c" ]] && b3_srcs+=("$here/test-cmdline-summary.c") || b3_srcs+=("$s"); done
+gcc "${p2_flags[@]}" -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer \
+  "${b3_srcs[@]}" -o "$out/cmdline-summary-driver"
+python3 "$here/test-cmdline-summary.py" "$out/cmdline-summary-driver" | tee "$out/cmdline-summary.log"
 p3_mutant() { # name asroot pattern replacement assertion last-pass (same detection rule as gtn_mutant)
   local name="$1" asroot="$2" pat="$3" rep="$4" want="$5" last="$6" dir="$out/cen-mutant-$1" rc=0 got file=custodian_entry_native.c
   if [[ "$asroot" == 1 && "$sudo_ok" != 1 ]]; then echo "SKIP P3 mutant $name: no sudo"; return; fi
@@ -736,7 +753,17 @@ p3_mutant prebind-exits 0 'const int reboot = nothing_opened(e);' '    const int
 p3_mutant reboot-after-bind 1 'const int reboot = nothing_opened(e);' '    const int reboot = 1; (void)nothing_opened;' \
   'st == 42 && strstr(rep, "EXIT phase=3 fail_step=4 fail_rc=-17 ") && strstr(rep, "spawner=1 anchors_open=2/4") && !strstr(rep, "REBOOT")' \
   'PASS entry with the PD DOWN before any MAP: acknowledged at once (nothing mapped), retaining end (a PD DOWN loses the kernel imports)'
-p3_mutant no-cmdline-record 0 'phase_record(e, "phase=cmdline allowed=%d' '    (void)strict; (void)passthrough; (void)crc32_text;' \
+# B5: the PD listener withdrawn before any control job, job status and the evidence marker checked.
+p3_mutant retire-skipped 1 'int rc = m11_pdmon_retire(&e->pdmon, c->pd_retire_budget_ms);' '    int rc = 0;' \
+  'st == 43 && strstr(rep, "REBOOT phase=7 fail_step=0 fail_rc=0 hold=0 busy=0 deferred=0 acks_sent=0 regs=2 sockets=1 spawner=1 anchors_open=0/4 ep_node=0 ion_node=0")' \
+  'PASS entry whose reboot returns: journaled (reboot_failed) and ended through the retaining PID1 exit'
+p3_mutant job-status-ignored 1 'if (rc || status) return e->teardown_rc = rc ? rc : -ECHILD;' '        (void)status;' \
+  'st == 44 && strstr(rep, "HOLD phase=7 ") && strstr(rep, "td=1/-10 step=3 pds=6 jobs=seal,usb_stop,stop_adsp ") && strstr(rep, "anchors_open=0/4")' \
+  'PASS entry with a boot refused after a bind (ION CMA twin has a node, endpoint HELD): never reboots, retaining PID1 exit holding the endpoint'
+p3_mutant evidence-unchecked 1 'if (i == 0 && c->evidence_marker) {' '        if (0) {' \
+  'st == 44 && strstr(rep, "HOLD phase=7 ") && strstr(rep, "td=1/-61 step=1 pds=6 jobs=seal ") && !strstr(rep, "REBOOT")' \
+  'PASS B5 PD listener not withdrawn (no answer within the budget): hold before any control job (USB and ADSP untouched)'
+p3_mutant no-cmdline-record 0 'phase_record(e, "phase=cmdline %s", summary);' '    (void)summary;' \
   'strstr(rep, "action=START_FAILED end=reboot phase=cmdline step=3 rc=-1 anchors_held=0/2 boot_stage=0") && strstr(rep, "phases=journal,cmdline lines=3 ")' \
   'PASS entry refused when the journal is not the kernel log: nothing written to it, no socket, no spawner; nothing audio opened, so reboot'
 p3_mutant map-intent-not-busy 1 'm11_pds_resources_busy(&e->pdmon.pds);' '    (void)e;' \

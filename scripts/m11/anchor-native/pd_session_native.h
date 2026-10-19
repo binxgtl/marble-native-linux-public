@@ -42,7 +42,8 @@
 #define M11_PDS_WIRE_MAX 128u
 #define M11_PDS_TXN_TIMEOUT_MS 2000u
 
-typedef enum { M11_PDS_DISCOVERY, M11_PDS_REGISTERING, M11_PDS_WAIT_UP, M11_PDS_READY, M11_PDS_ENDED } m11_pds_phase;
+typedef enum { M11_PDS_DISCOVERY, M11_PDS_REGISTERING, M11_PDS_WAIT_UP, M11_PDS_READY, M11_PDS_ENDED,
+               M11_PDS_STOPPING, M11_PDS_STOPPED } m11_pds_phase;
 typedef enum { M11_PDS_OK, M11_PDS_MALFORMED, M11_PDS_PEER_LOST, M11_PDS_NOT_UP, M11_PDS_DEADLINE,
                M11_PDS_IO, M11_PDS_CLOCK } m11_pds_fault;
 
@@ -52,7 +53,7 @@ typedef struct {
     uint32_t local_node, local_port, node, port, state;
     uint16_t next_txn, register_txn, ack_txn, indication_txn;
     uint32_t indication_state;
-    int peer, registered, ever_ready, ack_deferred, resources_busy;
+    int peer, registered, ever_ready, ack_deferred, resources_busy, unregister_sent, unregister_ok;
     uint64_t now, ready_deadline, register_deadline, ack_deadline;
     uint32_t rx, tx, indications;
     int (*send)(void *ctx, uint32_t node, uint32_t port, const void *b, size_t n);
@@ -67,6 +68,11 @@ int m11_pds_tick(m11_pds *, uint64_t now_ms);
 static inline int m11_pds_up(const m11_pds *s) { return s->phase == M11_PDS_READY; }
 void m11_pds_resources_busy(m11_pds *);
 int m11_pds_resources_released(m11_pds *);
+/* B5 retire, as the frozen codec's stop: only from READY with nothing busy, outstanding or deferred
+ * (else -1, session unchanged). Sends the withdrawal (registration, enable = 0); on its response
+ * sends DEL_LOOKUP and reaches STOPPED. Any other datagram while STOPPING ends the session (a failed
+ * stop). 1 while stopping, 0 once STOPPED. */
+int m11_pds_stop(m11_pds *, uint64_t now_ms);
 
 /* ---- the QRTR adapter: the G6 PD monitor ---- */
 typedef struct {
@@ -93,5 +99,9 @@ int m11_pdmon_open(m11_pdmon *, const m11_qrtr_sys *sys, uint64_t now_ms, uint32
 int m11_pdmon_wait_up(m11_pdmon *, uint32_t budget_ms);
 /* The monitor's pump: drain every pending datagram into the session, tick, report UP (1) or not (0). */
 int m11_pdmon_pump(void *user, uint64_t now_ms);
+/* B5: withdraw the listener before the ADSP is stopped (Run23 retired its listener there): stop,
+ * pump until STOPPED within budget_ms (1..2000), then close the socket. 0 when stopped and closed;
+ * -EBUSY when the stop is refused (socket left open); -ETIMEDOUT/-EIO otherwise (socket closed). */
+int m11_pdmon_retire(m11_pdmon *, uint32_t budget_ms);
 
 #endif

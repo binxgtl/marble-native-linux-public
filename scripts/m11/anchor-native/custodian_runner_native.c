@@ -236,6 +236,11 @@ int m11_crunner_end(m11_crunner *r, uint64_t now_ms) {
     if (r->census_failed) { /* ownership violation: forced conservative end, custodian ledger untouched */
         snprintf(r->force_note, sizeof r->force_note, "foreign_holder_why=%u", r->census_why);
         r->term.force_retain_note = r->force_note;
+    } else if (r->map_intents && m11_custodian_terminal_action(&r->cust) == M11_TERMINAL_ORDERLY_SHUTDOWN) {
+        /* B5: after any MAP intent (resources busy, a PD DOWN no longer acknowledged) the boot never
+         * takes the orderly end and its teardown, even when the custodian refused that MAP before TX */
+        snprintf(r->force_note, sizeof r->force_note, "map_intent=%u", r->map_intents);
+        r->term.force_retain_note = r->force_note;
     }
     return m11_terminal_native_end(&r->term, now_ms);
 }

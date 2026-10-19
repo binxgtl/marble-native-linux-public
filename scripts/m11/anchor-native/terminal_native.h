@@ -36,6 +36,12 @@ typedef struct {
     int (*reboot_fn)(void *user);  /* production: reboot(RB_AUTOBOOT); returns only on failure */
     void *user;
     const char *panic_path;        /* production: "/proc/sys/kernel/panic" */
+    /* B5 (readiness review): optional teardown between the orderly end's record and reboot_fn, run
+     * only on that path (never mapped, every final close done, every anchor ended REBOOT). 0 lets
+     * the reboot proceed; any failure calls hold_fn (Run23: a failed teardown step holds, with no
+     * reboot and no exit). hold_fn is required whenever teardown_fn is set. */
+    int (*teardown_fn)(void *user);
+    void (*hold_fn)(void *user);   /* must not return in production */
 } m11_terminal_ops;
 
 typedef struct {
@@ -52,6 +58,7 @@ typedef struct {
     /* what the last call did, for the caller's journal and tests */
     m11_terminal_action action;
     int orderly_failed, reboot_failed, sink_failed;
+    int teardown_ran, teardown_rc; /* B5: teardown_fn called, and its result */
     unsigned anchors_held;
     unsigned regions, regions_in_pool; /* custodian regions still owning a dma-buf fd; of those, pool buffers */
     int pool_held, panic;          /* panic: INT_MIN when unreadable */
