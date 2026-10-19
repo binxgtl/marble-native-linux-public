@@ -767,6 +767,32 @@ for s in "${p3_srcs[@]}"; do [[ "$s" == "$here/test-entry-native.c" ]] && b3_src
 gcc "${p2_flags[@]}" -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer \
   "${b3_srcs[@]}" -o "$out/cmdline-summary-driver"
 python3 "$here/test-cmdline-summary.py" "$out/cmdline-summary-driver" | tee "$out/cmdline-summary.log"
+# P4 item 3 (docs/m11-argon-p4-assembly.md): the host evidence check over synthetic captures and over
+# the record lines the C writers produced in the P3 root sections (p4-journal-*.txt, required whenever
+# those ran), plus four one-line mutants of the check. The staging rules are tested on the operator PC
+# with the local staging (never exported); the binaries are built by the m11-r2 P4 jobs.
+find "$here/p4" -maxdepth 1 -type f -exec sha256sum {} + | sort -k2 > "$out/p4-inputs.sha256"
+p4a_req=(); [[ "$sudo_ok" == 1 ]] && p4a_req=(--require-c)
+python3 "$here/p4/test-p4-check.py" "$out" "${p4a_req[@]}" | tee "$out/p4-check.log"
+grep -qF 'PASS P4 host-check tests' "$out/p4-check.log"
+if [[ "$sudo_ok" == 1 ]]; then grep -qF 'PASS P4 check over the C writers (helpers-ok' "$out/p4-check.log"; fi
+p4c_mutant() { # name pattern replacement expected-case: the suite must fail on that case's assertion
+  local name="$1" pat="$2" rep="$3" want="$4" dir="$out/p4c-mutant-$1" rc=0
+  mkdir -p "$dir"
+  awk -v pat="$pat" -v rep="$rep" 'index($0,pat){n++; print rep; next} {print} END{if(n!=1) exit 3}' \
+    "$here/p4/check-capture.py" > "$dir/check-capture.py"
+  M11_P4_CHECK_MUTANT="$dir/check-capture.py" python3 "$here/p4/test-p4-check.py" > "$dir/log" 2>&1 || rc=$?
+  if [[ "$rc" != 1 ]] || ! grep -q '^AssertionError' "$dir/log" || ! grep -qF -- "$want" "$dir/log"; then
+    echo "ERROR: P4 check mutant $name not detected for the expected reason (rc=$rc)" >&2
+    cat "$dir/log" >&2; exit 1
+  fi
+  echo "PASS P4 host-check test detects mutant $name: $want"
+}
+p4c_mutant caller-unchecked "        if caller != 'T1':" '        if False:' "('record not from PID1', 'record-not-from-pid1'"
+p4c_mutant intents-ignored "         'intents': sum(1 for r in entry if r['kind'] == 'intent')," \
+  "         'intents': 0, 'records': len(records), 'b3': 'not-compared'}" "('MAP intent recorded', 'orderly-shape-invalid'"
+p4c_mutant b3-unchecked "            d['b3'] = 'match' if" "            d['b3'] = 'match'" "('b3 strict differs', 'b3-cmdline-differs'"
+p4c_mutant teardown-steps-unchecked "    if td[1] != '11':" '    if False:' "('teardown list not Run23', 'teardown-steps-differ'"
 p3_mutant() { # name asroot pattern replacement assertion last-pass (same detection rule as gtn_mutant)
   local name="$1" asroot="$2" pat="$3" rep="$4" want="$5" last="$6" dir="$out/cen-mutant-$1" rc=0 got file=custodian_entry_native.c
   if [[ "$asroot" == 1 && "$sudo_ok" != 1 ]]; then echo "SKIP P3 mutant $name: no sudo"; return; fi

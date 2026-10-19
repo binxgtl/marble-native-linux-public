@@ -1,4 +1,4 @@
-name: M11 R2 offline (journal stamp fix, anchor-native suites, graph plan)
+name: M11 R2 offline (journal stamp fix, anchor-native suites, graph plan, P4 binaries)
 # Offline only, on x64 and native ARM64: the integrated anchor suite (runner control flow, PDR
 # model, census, stand-in GET_SPF_STATE, the Run22 journal-stamp fix through the real journal.sh
 # with BusyBox and the unmodified evidence rule, mutants), the anchor qualification suite and the
@@ -54,3 +54,57 @@ jobs:
             artifacts/m11/r2/**/*.log
             artifacts/m11/r2/**/*.txt
             artifacts/m11/r2/**/*.sha256
+  # P4 item 5 (docs/m11-argon-p4-assembly.md): the candidate's two on-device binaries, each built
+  # twice and compared, on the Run23 build pattern. Not a candidate by themselves: the local staging
+  # takes them from these artifacts by digest. No device, ROM payload or proprietary module.
+  p4-build-pid1:
+    needs: suites
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Static ARM64 native custodian PID1, A/B identical, refuses outside PID1
+        run: bash scripts/m11/anchor-native/p4/build.sh pid1 artifacts/m11/p4-build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: p4-pid1-${{ github.sha }}
+          path: |
+            artifacts/m11/p4-build/m11-p4
+            artifacts/m11/p4-build/pid1-elf.txt
+            artifacts/m11/p4-build/pid1-compiler.txt
+            artifacts/m11/p4-build/SHA256SUMS-pid1
+  p4-build-relay:
+    needs: suites
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Freestanding M11R25 relay with the pinned clang-r416183b, A/B identical
+        run: bash scripts/m11/anchor-native/p4/build.sh relay artifacts/m11/p4-build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: p4-relay-${{ github.sha }}
+          path: |
+            artifacts/m11/p4-build/m11-kmsg-relay
+            artifacts/m11/p4-build/relay-compiler.txt
+            artifacts/m11/p4-build/relay-toolchain-commit.txt
+            artifacts/m11/p4-build/SHA256SUMS-relay
+  p4-relay-elf:
+    needs: p4-build-relay
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: p4-relay-${{ github.sha }}
+          path: artifacts/m11/p4-build
+      - name: Exact M11R25 relay ELF over a private PTY, decoded by the P4 host check
+        run: |
+          cd artifacts/m11/p4-build && sha256sum -c SHA256SUMS-relay && cd -
+          chmod 0755 artifacts/m11/p4-build/m11-kmsg-relay
+          sudo python3 scripts/m11/anchor-native/p4/test-elf.py artifacts/m11/p4-build/m11-kmsg-relay --out artifacts/m11/p4-elf/elf-pty.bin
+      - uses: actions/upload-artifact@v4
+        with:
+          name: p4-relay-elf-${{ github.sha }}
+          path: artifacts/m11/p4-elf

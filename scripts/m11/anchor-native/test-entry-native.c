@@ -313,8 +313,24 @@ static void jobs_ran(char *out, size_t cap) {
     for (char *p = b; *p; p++) if (*p == '\n') *p = p[1] ? ',' : 0;
     snprintf(out, cap, "%s", b);
 }
+/* P4 item 3: the journal of a named case is kept as <out>/p4-journal-<name>.txt, the record lines
+ * the host checker (p4/check-capture.py) parses in the CI cross-check. */
+static const char *keep_as;
+static char keep_dir[256];
+static void keep_journal(void) {
+    static char j[65536];
+    char path[400];
+    int fd = open(p_journal, O_RDONLY | O_CLOEXEC); if (fd < 0) return;
+    ssize_t n = read(fd, j, sizeof j); close(fd);
+    if (n <= 0) return;
+    snprintf(path, sizeof path, "%s/p4-journal-%s.txt", keep_dir, keep_as);
+    fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644); if (fd < 0) return;
+    assert(write(fd, j, (size_t)n) == n);
+    close(fd);
+}
 static void report(const char *kind) {
     char rec[600], b[3000], phases[200], cmd[200], bootrec[200], jobs[300]; unsigned lines;
+    if (keep_as) keep_journal();
     last_terminal(rec, sizeof rec);
     journal_scan(phases, sizeof phases, &lines);
     phase_body("cmdline", cmd, sizeof cmd); phase_body("boot", bootrec, sizeof bootrec);
@@ -575,6 +591,7 @@ int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
     signal(SIGPIPE, SIG_IGN);
     snprintf(base, sizeof base, "%s/m11-entry-XXXXXX", argc > 1 ? argv[1] : "/tmp");
+    snprintf(keep_dir, sizeof keep_dir, "%s", argc > 1 ? argv[1] : "/tmp");
     assert(mkdtemp(base));
 
     /* production defaults */
@@ -610,7 +627,7 @@ int main(int argc, char **argv) {
     assert(st == 43 && strstr(rep, "REBOOT phase=0 fail_step=2 fail_rc=-19 ") && strstr(rep, "sockets=0 spawner=0") && strstr(rep, "phases=- lines=0 "));
     printf("PASS entry refused when the journal is not the kernel log: nothing written to it, no socket, no spawner; nothing audio opened, so reboot\n");
 
-    st = run(c_cmdline_refused, rep, sizeof rep); printf("INFO st=%d %s", st, rep);
+    keep_as = "cmdline-refused"; st = run(c_cmdline_refused, rep, sizeof rep); keep_as = NULL; printf("INFO st=%d %s", st, rep);
     assert(st == 43 && strstr(rep, "REBOOT phase=1 fail_step=3 fail_rc=-1 ") && strstr(rep, "sockets=0 spawner=0 anchors_open=0/4 ep_node=0"));
     assert(strstr(rep, "action=START_FAILED end=reboot phase=cmdline step=3 rc=-1 anchors_held=0/2 boot_stage=0") && strstr(rep, "phases=journal,cmdline lines=3 "));
     assert(strstr(rep, "cmd=[phase=cmdline allowed=0 len=31 strict=0 passthrough=absent crc32="));
@@ -627,7 +644,7 @@ int main(int argc, char **argv) {
     assert(strstr(rep, "bootrec=[phase=boot rc=-17 step=3 stage=2 ep=5:2 ion=0:0 heap=0:0]"));
     printf("PASS entry with a refused boot before any bind (an endpoint node already exists): the P2 step journaled, nothing opened or closed; reboot\n");
 
-    st = run(c_reboot_fails, rep, sizeof rep); printf("INFO st=%d %s", st, rep);
+    keep_as = "reboot-fails"; st = run(c_reboot_fails, rep, sizeof rep); keep_as = NULL; printf("INFO st=%d %s", st, rep);
     assert(st == 42 && strstr(rep, "REBOOT phase=1 fail_step=3 fail_rc=-1 ") && strstr(rep, "EXIT phase=1 fail_step=3 fail_rc=-1 "));
     assert(strstr(rep, "phases=journal,cmdline,reboot_failed lines=4 "));
     printf("PASS entry whose reboot returns: journaled (reboot_failed) and ended through the retaining PID1 exit\n");
@@ -638,7 +655,7 @@ int main(int argc, char **argv) {
         printf("PASS production P3 PID1 entry (unprivileged sections)\n");
         return 0;
     }
-    st = run(c_never_mapped, rep, sizeof rep); printf("INFO st=%d %s", st, rep);
+    keep_as = "never-mapped-td7"; st = run(c_never_mapped, rep, sizeof rep); keep_as = NULL; printf("INFO st=%d %s", st, rep);
     assert(st == 43 && strstr(rep, "REBOOT phase=7 fail_step=0 fail_rc=0 hold=0 busy=0 deferred=0 acks_sent=0 regs=2 sockets=1 spawner=1 anchors_open=0/4 ep_node=0 ion_node=0"));
     assert(strstr(rep, "action=ORDERLY_SHUTDOWN end=reboot") && !strstr(rep, "PEER n="));
     assert(strstr(rep, "phases=journal,cmdline,pd_up,boot,runner,session,teardown lines=8 ") && strstr(rep, "cmd=[phase=cmdline allowed=1 len=44 strict=1 passthrough=absent crc32="));
@@ -646,7 +663,7 @@ int main(int argc, char **argv) {
     assert(strstr(rep, "td=1/0 step=8 pds=6 jobs=seal,usb_stop,stop_adsp,common,checkpoint-green,unmount ") && strstr(rep, "PEER unregister") && strstr(rep, "PEER del_lookup"));
     printf("PASS entry, production shape (no session): P1 UP, P2 boot (nodes made, bound, sealed, removed), runner start, close, G8 orderly end: both anchors final-closed, reboot; nothing sent\n");
 
-    st = run(c_map_hold, rep, sizeof rep); printf("INFO st=%d %s", st, rep);
+    keep_as = "map-hold"; st = run(c_map_hold, rep, sizeof rep); keep_as = NULL; printf("INFO st=%d %s", st, rep);
     assert(strstr(rep, "MAP rc=0 busy=1 intents=1") && strstr(rep, "PEER n=1") && strstr(rep, "PEER down_sent") && !strstr(rep, "PEER_VIOLATION"));
     assert(st == 42 && strstr(rep, "EXIT phase=7 ") && strstr(rep, "busy=1 deferred=1 acks_sent=0") && strstr(rep, "anchors_open=4/4"));
     assert(hold_of(rep) >= 1 && strstr(rep, "action=RESET_RETAINING_ANCHORS end=pid1_exit"));
@@ -666,7 +683,7 @@ int main(int argc, char **argv) {
     assert(strstr(rep, "action=RESET_RETAINING_ANCHORS end=pid1_exit") && strstr(rep, "phases=journal,cmdline,pd_up,boot,runner,session lines=7 "));
     printf("PASS entry with the PD DOWN before any MAP: acknowledged at once (nothing mapped), retaining end (a PD DOWN loses the kernel imports)\n");
 
-    st = run(c_boot_after_bind, rep, sizeof rep); printf("INFO st=%d %s", st, rep);
+    keep_as = "boot-after-bind"; st = run(c_boot_after_bind, rep, sizeof rep); keep_as = NULL; printf("INFO st=%d %s", st, rep);
     assert(st == 42 && strstr(rep, "EXIT phase=3 fail_step=4 fail_rc=-17 ") && strstr(rep, "spawner=1 anchors_open=2/4") && !strstr(rep, "REBOOT"));
     assert(strstr(rep, "action=START_FAILED end=pid1_exit phase=boot step=4 rc=-17 anchors_held=1/2 boot_stage=3") && strstr(rep, "phases=journal,cmdline,pd_up,boot lines=5 "));
     printf("PASS entry with a boot refused after a bind (ION CMA twin has a node, endpoint HELD): never reboots, retaining PID1 exit holding the endpoint\n");
@@ -676,7 +693,7 @@ int main(int argc, char **argv) {
     assert(!strstr(rep, "REBOOT") && !strstr(rep, "EXIT") && strstr(rep, "PEER unregister") && strstr(rep, "phases=journal,cmdline,pd_up,boot,runner,session,teardown lines=8 "));
     printf("PASS B5 teardown step failing (stop_adsp): hold after the anchors closed, no later job, no reboot, no exit\n");
 
-    st = run(c_teardown_no_unreg, rep, sizeof rep); printf("INFO st=%d %s", st, rep);
+    keep_as = "teardown-no-unreg"; st = run(c_teardown_no_unreg, rep, sizeof rep); keep_as = NULL; printf("INFO st=%d %s", st, rep);
     assert(st == 44 && strstr(rep, "HOLD phase=7 ") && strstr(rep, "td=1/-110 step=0 pds=5 jobs=- ") && strstr(rep, "PEER unregister") && !strstr(rep, "REBOOT"));
     printf("PASS B5 PD listener not withdrawn (no answer within the budget): hold before any control job (USB and ADSP untouched)\n");
 
@@ -684,12 +701,12 @@ int main(int argc, char **argv) {
     assert(st == 44 && strstr(rep, "HOLD phase=7 ") && strstr(rep, "td=1/-61 step=2 pds=6 jobs=seal ") && !strstr(rep, "REBOOT"));
     printf("PASS B5 evidence not confirmed after the seal: hold before USB is stopped\n");
 
-    st = run(c_intent_after_close, rep, sizeof rep); printf("INFO st=%d %s", st, rep);
+    keep_as = "intent-after-close"; st = run(c_intent_after_close, rep, sizeof rep); keep_as = NULL; printf("INFO st=%d %s", st, rep);
     assert(strstr(rep, "MAP rc=-130 intents=1 busy=1") && st == 42 && strstr(rep, "EXIT phase=7 ") && strstr(rep, "td=0/0 step=0"));
     assert(strstr(rep, "jobs=- ") && strstr(rep, "note=map_intent=1") && !strstr(rep, "PEER unregister") && !strstr(rep, "REBOOT"));
     printf("PASS B5 MAP intent refused before TX: no orderly end, no teardown, retaining PID1 exit\n");
 
-    st = run(c_helpers_ok, rep, sizeof rep); printf("INFO st=%d %s", st, rep);
+    keep_as = "helpers-ok"; st = run(c_helpers_ok, rep, sizeof rep); keep_as = NULL; printf("INFO st=%d %s", st, rep);
     assert(st == 43 && strstr(rep, "REBOOT phase=7 ") && strstr(rep, "td=1/0 step=12 pds=6 jobs=seal,usb_stop,stop_adsp,common,checkpoint-green,unmount "));
     assert(strstr(rep, "phases=journal,cmdline,pd_up,boot,runner,session,teardown lines=8 ") && strstr(rep, "PEER unregister"));
     printf("PASS P4 teardown, Run23's whole sequence: seal, relay reaped, logger.done, usb_stop, stop_adsp, pd.stop, locator reaped, pd.done, common, checkpoint, unmount, then the reboot\n");

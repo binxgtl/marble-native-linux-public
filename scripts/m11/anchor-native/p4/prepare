@@ -1,0 +1,188 @@
+#!/bin/busybox sh
+set -eu
+BB=/bin/busybox
+exec 0</dev/null 1>/dev/null 2>&1
+log() { return 0; }
+hold() { exit 1; }
+read_value() { $BB cat "$1"; }
+adsp=
+for node in /sys/class/remoteproc/remoteproc*; do
+ target=$($BB readlink -f "$node/device" 2>/dev/null || true)
+ case "$target" in
+  */3000000.remoteproc-adsp)
+   [ -z "$adsp" ] || hold "duplicate ADSP"
+   adsp=$node;;
+ esac
+done
+[ -n "$adsp" ] || hold "ADSP not found"
+[ "$(read_value "$adsp/state")" = offline ] || hold "ADSP not offline"
+[ "$($BB wc -l < /proc/modules)" -eq 95 ] || hold "initial module count mismatch"
+sound_absent() {
+ for node in /sys/bus/platform/devices/*; do
+  case "$node" in *spf_core_platform*sound*) return 1;; esac
+ done
+ return 0
+}
+sound_absent || hold "sound exists before audio modules"
+
+# Stable PARTNAME discovery; only a vfat read-only mount is permitted.
+modem=
+for node in /sys/class/block/*; do
+ if $BB grep -qx 'PARTNAME=modem_a' "$node/uevent" 2>/dev/null; then
+  [ -z "$modem" ] || hold "duplicate modem_a"
+  modem=$node
+ fi
+done
+[ -n "$modem" ] || hold "modem_a not found"
+devno=$(read_value "$modem/dev")
+major=${devno%%:*}; minor=${devno#*:}
+case "$major:$minor" in *[!0-9:]*|:*|*:) hold "invalid modem devno";; esac
+$BB mkdir -p /m11/modem /run/m11
+$BB mknod -m 600 /dev/m11-modem b "$major" "$minor" || hold "modem node"
+$BB mount -t vfat -o ro,nosuid,nodev,noexec /dev/m11-modem /m11/modem || hold "read-only modem mount"
+[ -r /m11/modem/image/adsp2.mdt ] || hold "ADSP firmware absent"
+[ -r /lib/firmware/aw882xx_acf.bin ] || hold "amp firmware absent"
+
+fwparam=/sys/module/firmware_class/parameters/path
+initial_path=$(read_value "$fwparam")
+initial_firmware=$(read_value "$adsp/firmware")
+[ -n "$initial_firmware" ] || hold "initial ADSP firmware empty"
+printf "%s" "$initial_path" > /run/m11/original-path
+printf "%s" "$initial_firmware" > /run/m11/original-firmware
+printf "%s" "$adsp" > /run/m11/adsp-node
+printf '%s' /m11/modem/image > "$fwparam" || hold "firmware path write"
+[ "$(read_value "$fwparam")" = /m11/modem/image ] || hold "firmware path readback"
+
+loaded=95
+result=
+failed_module=
+loader_rc=0
+while IFS= read -r name; do
+ [ -n "$name" ] || hold "empty module name"
+ # Guard against a supplier starting ADSP or populating sound unexpectedly.
+ if [ "$name" = machine_dlkm.ko ]; then
+  [ "$(read_value "$adsp/state")" = offline ] || hold "ADSP started before machine"
+  sound_absent || hold "sound exists before machine"
+ fi
+ log "module begin name=$name count=$loaded"
+ if output=$(/sbin/m11-load-one "/lib/modules/$name"); then rc=0; else rc=$?; fi
+ log "$output; helper_exit=$rc"
+ loader_rc=$rc
+ case "$loader_rc" in
+  0) loaded=$((loaded+1));;
+  1|2)
+   # Locked load-one: 1=finit_module nonzero, 2=open/usage error.
+   # BLUE reports a loader error; it does not claim syscall/probe execution.
+   failed_module=$name
+   result=loader-error
+   break;;
+  *) hold "unexpected loader termination: $name exit=$loader_rc";;
+ esac
+done < /m11/load-order.txt
+if [ -z "$result" ]; then
+ [ "$loaded" -eq 137 ] || hold "loaded count mismatch"
+else
+ [ "$loaded" -ge 95 ] && [ "$loaded" -lt 137 ] || hold "partial count mismatch"
+fi
+[ "$($BB wc -l < /proc/modules)" -eq "$loaded" ] || hold "kernel module count mismatch"
+[ "$(read_value "$adsp/state")" = offline ] || hold "ADSP started before amp gate"
+sound_absent || hold "sound exists before amp gate"
+
+# Exact aw882xx_dlkm driver.name from its i2c_driver relocation is
+# aw882xx_smartpa. Read-only links are observations, not probe completion.
+# Snapshot both unique clients; ambiguous inventory/link failures stay unknown.
+amp_snapshot() {
+ amp34_count=0; amp35_count=0; amp34_bound=0; amp35_bound=0
+ amp34_adapter=; amp35_adapter=; amp_bad=0
+ for node in /sys/bus/i2c/devices/*-0034 /sys/bus/i2c/devices/*-0035; do
+  [ -d "$node" ] || continue
+  base=${node##*/}; current=${base%-*}; address=${base##*-}
+  case "$current" in ''|*[!0-9]*) amp_bad=1;; esac
+  case "$address" in
+   0034) amp34_count=$((amp34_count+1)); amp34_adapter=$current;;
+   0035) amp35_count=$((amp35_count+1)); amp35_adapter=$current;;
+   *) amp_bad=1;;
+  esac
+  linked=0
+  if [ -L "$node/driver" ]; then
+   if target=$($BB readlink -f "$node/driver" 2>/dev/null); then
+    if [ "${target##*/}" = aw882xx_smartpa ] && [ -d "$target" ]; then
+     linked=1
+    else
+     amp_bad=1
+    fi
+   else
+    amp_bad=1
+   fi
+  elif [ -e "$node/driver" ]; then
+   amp_bad=1
+  fi
+  case "$address" in
+   0034) amp34_bound=$linked;;
+   0035) amp35_bound=$linked;;
+  esac
+ done
+ amp_state=unknown
+ if [ "$amp_bad" -eq 0 ] && [ "$amp34_count" -eq 1 ] &&
+    [ "$amp35_count" -eq 1 ] && [ "$amp34_adapter" = "$amp35_adapter" ]; then
+  case "$amp34_bound:$amp35_bound" in
+   1:1) amp_state=both;;
+   1:0) amp_state=only34;;
+   0:1) amp_state=only35;;
+   0:0) amp_state=neither;;
+  esac
+ fi
+ return 0
+}
+if [ -z "$result" ]; then
+ i=0; stable=0
+ while [ "$i" -lt 300 ] && [ "$stable" -lt 5 ]; do
+  [ "$(read_value "$adsp/state")" = offline ] || hold "ADSP changed during amp observation"
+  sound_absent || hold "sound appeared during amp observation"
+  amp_snapshot
+  if [ "$amp_state" = both ]; then stable=$((stable+1)); else stable=0; fi
+  $BB sleep 0.1 || hold "amp poll sleep failed"
+  i=$((i+1))
+ done
+ # Fresh snapshot before classifying; never report stale stable success.
+ amp_snapshot
+ case "$amp_state" in
+  both)
+   if [ "$stable" -eq 5 ]; then result=amps-ready; else result=amps-unknown; fi;;
+  only34) result=amp34-only;;
+  only35) result=amp35-only;;
+  neither) result=amps-unbound;;
+  *) result=amps-unknown;;
+ esac
+ log "amp sample state=$amp_state clients=$amp34_count:$amp35_count bound=$amp34_bound:$amp35_bound adapters=$amp34_adapter:$amp35_adapter stable=$stable"
+fi
+log "pre-ADSP result=$result count=$loaded failed_module=$failed_module loader_exit=$loader_rc"
+
+if [ "$result" = amps-ready ]; then
+ # Preserve exact95 prefix and 41 audio modules with BAM before NGD, then add only the four established USB suppliers.
+ while IFS= read -r name; do
+  [ -n "$name" ] || hold "empty USB supplier"
+  log "USB supplier begin name=$name count=$loaded"
+  if output=$(/sbin/m11-load-one "/lib/modules/$name"); then rc=0; else rc=$?; fi
+  log "$output; USB helper_exit=$rc"
+  [ "$rc" -eq 0 ] || hold "USB supplier failed: $name"
+  loaded=$((loaded+1))
+ done < /m11/usb-load-order.txt
+ [ "$loaded" -eq 141 ] && [ "$($BB wc -l < /proc/modules)" -eq 141 ] || hold "USB module count mismatch"
+ . /m11/haptics-suppliers || hold "haptics supplier stage"
+fi
+[ "$result" = amps-ready ] || hold "pre-ADSP amp gate not ready"
+output=$(/sbin/m11-load-one /lib/modules/qrtr-smd.ko) || hold "QRTR supplier"
+[ "$($BB wc -l < /proc/modules)" -eq 145 ] || hold "final closure mismatch"
+# P4 (B1, docs/m11-argon-hw-readiness-review.md): the system DMA heap, the one module beyond the
+# 145-module Run23 closure (stock vendor_boot; its dependencies are all loaded above). P2 opens
+# /dev/dma_heap/system from its sysfs metadata later, so the class entry must exist here.
+output=$(/sbin/m11-load-one /lib/modules/qcom_dma_heaps.ko) || hold "system heap supplier"
+[ "$($BB wc -l < /proc/modules)" -eq 146 ] || hold "P4 closure mismatch"
+i=0
+while [ ! -r /sys/class/dma_heap/system/dev ]; do
+ [ "$i" -lt 50 ] || hold "system heap class entry absent"
+ $BB sleep 0.1 || hold "heap poll sleep failed"; i=$((i+1))
+done
+(cd /m11/pdr && $BB sha256sum -c maps.sha256) || hold "PDR maps"
+/sbin/m11-pd-mapper --check-maps || hold "PDR map parser"
