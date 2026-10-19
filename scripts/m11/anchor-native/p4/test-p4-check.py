@@ -8,6 +8,7 @@ cross-check). --require-c fails when any of them is missing."""
 import hashlib
 import importlib.util
 import os
+import re
 from pathlib import Path
 import sys
 import types
@@ -188,8 +189,7 @@ def test_checker():
     print('PASS P4 check: the identity is required, the host receipt binds the raw hash, the stock summary is parsed strictly')
 
 
-# C writer cases (test-entry-native.c, keep_as) and the verdict each must get. The test's own
-# cmdline carries iommu.strict=1, so its stock tokens are ('1', '1', 'absent').
+# C writer cases (test-entry-native.c, keep_as) and the verdict each must get.
 C_CASES = {'helpers-ok': 'never-mapped-orderly', 'never-mapped-td7': 'teardown-steps-differ',
            'map-hold': 'retaining-end', 'intent-after-close': 'retaining-end',
            'cmdline-refused': 'start-failed-reboot', 'reboot-fails': 'reboot-failed',
@@ -205,7 +205,16 @@ def test_c_writers(directory, required):
             continue
         lines = [ln for ln in path.read_text(encoding='ascii').split('\n') if ln]
         assert lines and all(ln[:3] in ('<6>', '<5>', '<3>') for ln in lines), (case, lines)
-        stock = ('0', '1', 'absent') if case == 'cmdline-refused' else ('1', '1', 'absent')
+        # B3 against the fixture's own cmdline tokens (the stock comparison itself is tested above)
+        cmd = [re.search(r' phase=cmdline allowed=([01]) len=[0-9]+ strict=(\S+) passthrough=(\S+) ', ln) for ln in lines]
+        stock = next(m.groups() for m in cmd if m)
+        # The fixture writes its journal to a file from a process that is not PID1 (pid=N kmsg=0): the
+        # check refuses that record as written, and is given the production values only after that.
+        journal = [i for i, ln in enumerate(lines) if ' phase=journal ' in ln]
+        assert len(journal) == 1 and re.search(r' phase=journal pid=([2-9]|[1-9][0-9]+) kmsg=0$', lines[journal[0]]), (case, lines)
+        if want == 'never-mapped-orderly':
+            assert verdict(ENV_OK + lines, stock=stock)[0] == 'orderly-shape-invalid', (case, lines)
+        lines[journal[0]] = re.sub(r'pid=[0-9]+ kmsg=0$', 'pid=1 kmsg=1', lines[journal[0]])
         got, r = verdict(ENV_OK + lines, stock=stock)
         assert got == want, (case, want, got, r['p4'], lines)
         found += 1
