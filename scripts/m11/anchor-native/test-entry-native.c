@@ -33,6 +33,7 @@
 #include <sys/sysmacros.h>
 #include <sys/wait.h>
 #include <termios.h>
+#include <time.h>
 #include <unistd.h>
 
 static char base[256], root[320];
