@@ -240,7 +240,7 @@ int m11_crunner_end(m11_crunner *r, uint64_t now_ms) {
         /* B5: after any MAP intent (resources busy, a PD DOWN no longer acknowledged) the boot never
          * takes the orderly end and its teardown, even when the custodian refused that MAP before TX */
         snprintf(r->force_note, sizeof r->force_note, "map_intent=%u", r->map_intents);
-        r->term.force_retain_note = r->force_note;
+        r->term.force_retain_note = (const char *)r->force_note; /* spelt apart from the census line (its mutant) */
     }
     return m11_terminal_native_end(&r->term, now_ms);
 }
