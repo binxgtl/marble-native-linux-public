@@ -200,6 +200,7 @@ static void peer(int q, int ctl, int ack, enum pmode pm) {
         int n = poll(p, peer_pty >= 0 ? 3 : 2, -1);
         if (n < 0) { if (errno == EINTR) continue; _exit(120); }
         if (p[0].revents & POLLIN) qrtr_in(q, pm);
+        if (p[0].revents & (POLLHUP | POLLERR | POLLNVAL)) q = -1; /* the entry closed its end (retire): poll skips it */
         if (p[1].revents & (POLLIN | POLLHUP)) {
             char c[200]; ssize_t r = read(ctl, c, sizeof c - 1);
             if (r <= 0) for (;;) pause(); /* the case is ending: stay until it is gone */
