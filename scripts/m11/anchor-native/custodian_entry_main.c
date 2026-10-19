@@ -6,6 +6,7 @@
 #ifndef M11_CUSTODIAN_NATIVE
 #error "custodian_entry_main requires the reviewed M11_CUSTODIAN_NATIVE build"
 #endif
+#define _GNU_SOURCE
 #include "custodian_entry_native.h"
 #include "p4_env_native.h"
 #include <fcntl.h>
