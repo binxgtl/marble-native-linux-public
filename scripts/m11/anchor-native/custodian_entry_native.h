@@ -33,8 +33,9 @@
  *      leaves without a G8 end. B5: the orderly end (never mapped, no MAP intent, census clean,
  *      both final closes done) runs the Run23-style teardown between its record and the reboot:
  *      the PD listener is withdrawn (unregister, DEL_LOOKUP, socket closed), one teardown record
- *      is written (the last one: the seal closes the evidence channel), the control jobs run in
- *      order (seal first; its evidence marker must read "1\n"), the spawner is stopped. Any refused
+ *      is written (the last one: the seal closes the evidence channel), the typed steps run in order
+ *      (P4, Run23's sequence: seal, the relay reaped, logger.done, usb_stop, stop_adsp, pd.stop, the
+ *      locator reaped, pd.done, common, the checkpoint, unmount), the spawner is stopped. Any refused
  *      gate or failed step holds (hold_fn): no reboot, no exit, nothing more is run.
  * Not here: the PID1 environment (mounts, ADSP start, USB, the post-seal jobs the spawner runs) is a
  * precondition, part of a later candidate step. /dev must not be a devtmpfs that already holds the
@@ -51,8 +52,15 @@
 
 typedef struct m11_entry m11_entry;
 
-/* One B5 teardown step: the spawner's control job (index 0) with this argument, never killed. */
-typedef struct { const char *arg; uint32_t deadline_ms; } m11_entry_job;
+/* One B5 teardown step (P4: Run23's whole sequence, helpers included):
+ *  JOB    spawner command `index` with argument `arg`, never killed; status 0 required;
+ *  CHECK  `arg` must be a regular file reading "1\n" (Run23 logger.done / pd.done);
+ *  CREATE marker `arg` made O_EXCL with "1\n" (Run23 pd.stop);
+ *  REAP   helper_pids[slot] must exit with status 0 within deadline_ms (never killed; a timeout,
+ *         a signal or a non-zero status is a failure). */
+enum { M11_TD_JOB, M11_TD_CHECK, M11_TD_CREATE, M11_TD_REAP };
+typedef struct { int kind; const char *arg; uint32_t deadline_ms; unsigned index, slot; } m11_entry_job;
+#define M11_ENTRY_HELPERS 2u /* P4: 0 the PD locator (m11-pd-mapper), 1 the kmsg relay */
 
 typedef struct {
     m11_boot_config boot;            /* P2 (production: m11_boot_config_default + the control job) */
@@ -71,13 +79,13 @@ typedef struct {
     uint64_t boot_epoch;             /* 0 = derived at entry (getrandom, else CLOCK_BOOTTIME) */
     m11_terminal_ops terminal_ops;   /* production: m11_terminal_ops_default + hold_fn (pause forever);
                                       * its teardown_fn is ignored: the entry supplies its own */
-    /* B5 teardown (orderly never-mapped end only): PD listener retired, one record, then the jobs in
-     * order (the first must be the evidence seal), the evidence marker checked after the first job,
-     * the spawner stopped. Production: Run23's seal, usb_stop, stop_adsp, common, unmount. 0 jobs:
-     * no teardown (the orderly end reboots after its record, as before). */
+    /* B5 teardown (orderly never-mapped end only): PD listener retired, one record, then the steps
+     * in order, the spawner stopped. Production (P4): Run23's sequence - seal, reap the relay, its
+     * logger.done, usb_stop, stop_adsp, pd.stop, reap the locator, its pd.done, common, the green
+     * checkpoint, unmount. 0 steps: no teardown (the orderly end reboots after its record). */
     const m11_entry_job *teardown_jobs;
     unsigned teardown_count;
-    const char *evidence_marker;     /* "1\n" after the seal (Run23: logger.done); NULL: not checked */
+    pid_t helper_pids[M11_ENTRY_HELPERS]; /* P4 environment helpers (0: none; a REAP of it fails) */
     uint32_t pd_retire_budget_ms;    /* 1..2000 */
     const char *proc_root;           /* NULL = "/proc" (runner tree census) */
     int (*session_fn)(void *user, m11_entry *); /* NULL in production: never maps */
@@ -100,7 +108,7 @@ struct m11_entry {
     m11_boot boot;
     m11_crunner runner;
     int session_rc, reboot_rc;
-    int teardown_step, teardown_rc;  /* B5: last step reached (0 retire, 1..n jobs, n+1 spawner stop) */
+    int teardown_step, teardown_rc;  /* B5: last step reached (0 retire, 1..n steps, n+1 spawner stop) */
     unsigned hold_rounds;
     unsigned records, record_failures; /* entry records written / refused by the sink */
     char record[M11_INTENT_RECORD_MAX + 96];

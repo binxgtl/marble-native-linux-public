@@ -9,6 +9,7 @@
 #include <sys/random.h>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -17,11 +18,21 @@ static int entry_started_once;
 /* Post-seal jobs run in the spawner (P2); the job layout is the Run23 runner's control job. The
  * candidate that provides /m11/control is a later step; the entry runs no job itself. */
 static const char *const control_job[] = {"/bin/busybox", "sh", "/m11/control", NULL};
-static const char *const *const spawner_jobs[] = {control_job};
-/* B5: Run23's teardown through the control job, in its order and with its deadlines. Run23's mapper
- * stop and result checkpoint involve the helper processes and the display, which P4 assembles. */
+static const char *const checkpoint_job[] = {"/sbin/m11-checkpoint", NULL};
+static const char *const *const spawner_jobs[] = {control_job, checkpoint_job};
+/* B5/P4: Run23's teardown after its final closes, in its order, with its deadlines and markers. */
 static const m11_entry_job run23_teardown[] = {
-    {"seal", 10000}, {"usb_stop", 10000}, {"stop_adsp", 40000}, {"common", 10000}, {"unmount", 10000}};
+    {.kind = M11_TD_JOB, .arg = "seal", .deadline_ms = 10000, .index = 0},
+    {.kind = M11_TD_REAP, .deadline_ms = 5000, .slot = 1},                       /* the kmsg relay */
+    {.kind = M11_TD_CHECK, .arg = "/run/m11-instrumentation/logger.done"},      /* evidence on the host */
+    {.kind = M11_TD_JOB, .arg = "usb_stop", .deadline_ms = 10000, .index = 0},
+    {.kind = M11_TD_JOB, .arg = "stop_adsp", .deadline_ms = 40000, .index = 0},
+    {.kind = M11_TD_CREATE, .arg = "/run/m11/pd.stop"},
+    {.kind = M11_TD_REAP, .deadline_ms = 5000, .slot = 0},                       /* the PD locator */
+    {.kind = M11_TD_CHECK, .arg = "/run/m11/pd.done"},
+    {.kind = M11_TD_JOB, .arg = "common", .deadline_ms = 10000, .index = 0},
+    {.kind = M11_TD_JOB, .arg = "green", .deadline_ms = 10000, .index = 1},     /* the result checkpoint */
+    {.kind = M11_TD_JOB, .arg = "unmount", .deadline_ms = 10000, .index = 0}};
 static void hold_forever(void *user) { (void)user; for (;;) pause(); }
 
 m11_entry_config m11_entry_config_default(void) {
@@ -33,11 +44,10 @@ m11_entry_config m11_entry_config_default(void) {
         .boot_epoch = 0, .terminal_ops = m11_terminal_ops_default(), .proc_root = NULL,
         .session_fn = NULL, .session_user = NULL};
     c.boot.spawner_commands = spawner_jobs;
-    c.boot.spawner_count = 1;
+    c.boot.spawner_count = 2;
     c.terminal_ops.hold_fn = hold_forever;
     c.teardown_jobs = run23_teardown;
     c.teardown_count = sizeof run23_teardown / sizeof run23_teardown[0];
-    c.evidence_marker = "/run/m11-instrumentation/logger.done";
     c.pd_retire_budget_ms = 2000;
     return c;
 }
@@ -172,6 +182,45 @@ static void ops_exit(void *u) { m11_entry *e = u; e->cfg.terminal_ops.exit_fn(e-
 static int ops_reboot(void *u) { m11_entry *e = u; return e->cfg.terminal_ops.reboot_fn(e->cfg.terminal_ops.user); }
 static void ops_hold(void *u) { m11_entry *e = u; e->cfg.terminal_ops.hold_fn(e->cfg.terminal_ops.user); }
 
+static uint64_t mono_ms(void) { return m11_entry_now_ms(); }
+/* One typed teardown step; 0 or a negative errno. Never kills anything. */
+static int teardown_step(m11_entry *e, const m11_entry_job *j) {
+    char b[8]; struct stat st;
+    switch (j->kind) {
+    case M11_TD_JOB: {
+        int status = 0;
+        int rc = m11_spawner_run_flags(&e->boot.spawner, j->index, j->arg, j->deadline_ms, M11_SPAWN_NO_KILL, &status);
+        return rc ? rc : status ? -ECHILD : 0; /* a stuck job is never killed */
+    }
+    case M11_TD_CHECK: /* evidence or a helper's completion marker */
+        if (lstat(j->arg, &st) || !S_ISREG(st.st_mode) || read_text(j->arg, b, sizeof b) || strcmp(b, "1\n")) return -ENODATA;
+        return 0;
+    case M11_TD_CREATE: {
+        int fd = open(j->arg, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+        if (fd < 0) return -errno;
+        ssize_t n = write(fd, "1\n", 2);
+        int cr = close(fd);
+        return n == 2 && !cr ? 0 : -EIO;
+    }
+    case M11_TD_REAP: {
+        pid_t pid = j->slot < M11_ENTRY_HELPERS ? e->cfg.helper_pids[j->slot] : 0;
+        if (pid <= 1) return -ESRCH;
+        uint64_t until = mono_ms() + j->deadline_ms;
+        for (;;) {
+            int status;
+            pid_t got = waitpid(pid, &status, WNOHANG);
+            if (got == pid) return WIFEXITED(status) && WEXITSTATUS(status) == 0 ? 0 : -ECHILD;
+            if (got < 0 && errno != EINTR) return -errno;
+            if (mono_ms() >= until) return -ETIMEDOUT; /* left running: the boot holds */
+            struct timespec t = {0, 10 * 1000000L};
+            (void)nanosleep(&t, NULL);
+        }
+    }
+    default:
+        return -EINVAL;
+    }
+}
+
 /* B5: called by the G8 orderly end only, after both final closes and its record. */
 static int entry_teardown(void *u) {
     m11_entry *e = u;
@@ -185,19 +234,12 @@ static int entry_teardown(void *u) {
     }
     /* the PD listener withdrawn while the ADSP still runs (Run23 retired before the transport teardown) */
     int rc = m11_pdmon_retire(&e->pdmon, c->pd_retire_budget_ms);
-    phase_record(e, "phase=teardown pd_retire=%d jobs=%u", rc, c->teardown_count); /* the last record */
+    phase_record(e, "phase=teardown pd_retire=%d steps=%u", rc, c->teardown_count); /* the last record */
     if (rc) return e->teardown_rc = rc;
     for (unsigned i = 0; i < c->teardown_count; i++) {
+        const m11_entry_job *j = &c->teardown_jobs[i];
         e->teardown_step = (int)i + 1;
-        int status = 0;
-        rc = m11_spawner_run_flags(&e->boot.spawner, 0, c->teardown_jobs[i].arg, c->teardown_jobs[i].deadline_ms,
-                                   M11_SPAWN_NO_KILL, &status);
-        if (rc || status) return e->teardown_rc = rc ? rc : -ECHILD; /* a stuck job is never killed */
-        if (i == 0 && c->evidence_marker) { /* the evidence reached the host before anything stops */
-            char b[8]; struct stat st;
-            if (lstat(c->evidence_marker, &st) || !S_ISREG(st.st_mode) || read_text(c->evidence_marker, b, sizeof b) || strcmp(b, "1\n"))
-                return e->teardown_rc = -ENODATA;
-        }
+        if ((rc = teardown_step(e, j))) return e->teardown_rc = rc; /* nothing after a failed step */
     }
     e->teardown_step = (int)c->teardown_count + 1;
     if ((rc = m11_spawner_stop(&e->boot.spawner))) return e->teardown_rc = rc;
@@ -210,6 +252,12 @@ int m11_entry_run(m11_entry *e, const m11_entry_config *cfg) {
         !cfg->terminal_ops.reboot_fn ||
         (cfg->teardown_count && (!cfg->teardown_jobs || !cfg->terminal_ops.hold_fn || !cfg->pd_retire_budget_ms ||
                                  cfg->pd_retire_budget_ms > M11_PDS_TXN_TIMEOUT_MS))) return -EINVAL;
+    for (unsigned i = 0; i < cfg->teardown_count; i++) { /* every step well formed before anything starts */
+        const m11_entry_job *j = &cfg->teardown_jobs[i];
+        if (j->kind == M11_TD_JOB ? !j->arg || j->index >= cfg->boot.spawner_count :
+            j->kind == M11_TD_REAP ? j->slot >= M11_ENTRY_HELPERS || !j->deadline_ms :
+            (j->kind == M11_TD_CHECK || j->kind == M11_TD_CREATE) ? !j->arg : 1) return -EINVAL;
+    }
     if (cfg->require_pid1 && getpid() != 1) return -EPERM;
     if (entry_started_once) return -EALREADY; /* never wipe an entry that may hold the boot */
     entry_started_once = 1;

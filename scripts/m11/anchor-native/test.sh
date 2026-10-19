@@ -681,7 +681,7 @@ for s in "${p2_srcs[@]}"; do
   else p3_srcs+=("$s"); p3_main+=("$s"); fi
 done
 p3_srcs+=("$here/pd_session_native.c" "$here/custodian_entry_native.c")
-p3_main+=("$here/pd_session_native.c" "$here/custodian_entry_native.c")
+p3_main+=("$here/pd_session_native.c" "$here/custodian_entry_native.c" "$here/p4_env_native.c")
 for cm_cc in gcc clang; do
   "$cm_cc" "${p2_flags[@]}" "${p3_srcs[@]}" -o "$out/entry-native-$cm_cc"
   timeout 180 "$out/entry-native-$cm_cc" "$out" | tee "$out/entry-native-$cm_cc.log"
@@ -702,12 +702,65 @@ for cm_cc in gcc clang; do
   rc=0; "$out/custodian-entry-$cm_cc" || rc=$?
   if [[ "$rc" != 2 ]]; then echo "ERROR: custodian entry binary ($cm_cc) did not refuse outside PID1 (rc=$rc)" >&2; exit 1; fi
 done
-for f in custodian_entry_native.c custodian_entry_main.c; do
+for f in custodian_entry_native.c custodian_entry_main.c p4_env_native.c; do
   if gcc -std=c11 -DM11_ANCHOR_NATIVE -I "$own" -I "$repair" -I "$here" -c "$here/$f" -o "$out/cen-refused.o" 2>/dev/null; then
     echo "ERROR: $f compiled outside M11_CUSTODIAN_NATIVE" >&2; exit 1
   fi
 done
 echo 'PASS production P3 PID1 entry (gcc, clang, ASan+UBSan, root when sudo); the PID1 binary links and returns 2 outside PID1; refused outside M11_CUSTODIAN_NATIVE'
+# P4 item 1: the environment phase (Run23's pre-owned path) over shell stand-ins and an ELF helper
+# stand-in; as root (sudo) the helpers drop to uid 65534 with no capabilities.
+gcc -std=c11 -O1 -Wall -Wextra -Werror "$here/test-p4-helper.c" -o "$out/p4-helper"
+p4e_srcs=()
+for s in "${p2_srcs[@]}"; do [[ "$s" == "$here/test-boot-native.c" ]] && p4e_srcs+=("$here/test-p4-env-native.c") || p4e_srcs+=("$s"); done
+p4e_srcs+=("$here/p4_env_native.c")
+for cm_cc in gcc clang; do
+  "$cm_cc" "${p2_flags[@]}" "${p4e_srcs[@]}" -o "$out/p4-env-$cm_cc"
+  timeout 180 "$out/p4-env-$cm_cc" "$out" "$out/p4-helper" | tee "$out/p4-env-$cm_cc.log"
+done
+gcc "${p2_flags[@]}" -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer \
+  "${p4e_srcs[@]}" -o "$out/p4-env-sanitize"
+timeout 180 "$out/p4-env-sanitize" "$out" "$out/p4-helper" | tee "$out/p4-env-sanitize.log"
+if [[ "$sudo_ok" == 1 ]]; then
+  timeout 180 sudo -n "$out/p4-env-gcc" "$out" "$out/p4-helper" | tee "$out/p4-env-root.log"
+  grep -qF 'PASS P4 environment phase (root)' "$out/p4-env-root.log"
+else
+  if [[ -n "${CI:-}" ]]; then echo "ERROR: P4 environment root sections need sudo in CI" >&2; exit 1; fi
+  echo "SKIP P4 environment root sections: no sudo"
+fi
+echo 'PASS P4 environment phase (gcc, clang, ASan+UBSan, root when sudo)'
+p4e_mutant() { # name asroot pattern replacement assertion last-pass (same detection rule as gtn_mutant)
+  local name="$1" asroot="$2" pat="$3" rep="$4" want="$5" last="$6" dir="$out/p4e-mutant-$1" rc=0 got file=p4_env_native.c
+  if [[ "$asroot" == 1 && "$sudo_ok" != 1 ]]; then echo "SKIP P4 environment mutant $name: no sudo"; return; fi
+  mkdir -p "$dir"
+  awk -v pat="$pat" -v rep="$rep" 'index($0,pat){n++; print rep; next} {print} END{if(n!=1) exit 3}' \
+    "$here/$file" > "$dir/$file"
+  local srcs=() s
+  for s in "${p4e_srcs[@]}"; do [[ "$(basename "$s")" == "$file" ]] && srcs+=("$dir/$file") || srcs+=("$s"); done
+  gcc "${p2_flags[@]}" "${srcs[@]}" -o "$dir/bin"
+  if [[ "$asroot" == 1 ]]; then
+    timeout 180 sudo -n "$dir/bin" "$dir" "$out/p4-helper" > "$dir/log" 2>&1 || rc=$?
+    sudo -n rm -rf "$dir"/m11-p4env-*
+  else
+    timeout 180 "$dir/bin" "$dir" "$out/p4-helper" > "$dir/log" 2>&1 || rc=$?
+    rm -rf "$dir"/m11-p4env-*
+  fi
+  got="$(grep '^PASS ' "$dir/log" | tail -n1 || true)"
+  if [[ "$rc" != 134 ]] || ! grep -qF -- "Assertion \`$want' failed" "$dir/log" || [[ "$got" != "$last" ]]; then
+    echo "ERROR: P4 environment mutant $name not detected for the expected reason (rc=$rc, last PASS: '${got}')" >&2
+    cat "$dir/log" >&2; exit 1
+  fi
+  echo "PASS P4 environment test detects mutant $name: Assertion \`$want'"
+}
+p4e_mutant amp-result-unchecked 0 'FAIL(7, -EPERM);' '    (void)result;' \
+  'st == 0 && strstr(rep, "ENV rc=-1 step=7 estep=6") && strstr(rep, "jobs=prepare,journal,probe,start,usb_start,amp_gate ")' \
+  'PASS P4 environment: a locator that never reports ready stops the phase (it is left running, never killed)'
+p4e_mutant helper-fds-kept 0 'if (!failed && keep_lo > 3) failed = syscall(SYS_close_range, 3u, (unsigned)keep_lo - 1u, 0u) != 0;' '        (void)0;' \
+  'strstr(rep, " fds=0]") && strstr(rep, "M11P4 v=1 env step=8 metadata rc=0")' \
+  'PASS P4 environment defaults: Run23'"'"'s scripts, helpers, markers and deadlines; checked root images, tmpfs log, dropped helpers'
+p4e_mutant drop-skipped 1 'if (!failed && c->drop_helpers) failed = drop_privileges();' '        (void)drop_privileges;' \
+  'strstr(rep, "loc=[uid=65534 caps=0000000000000000 fds=0]") && strstr(rep, "rel=[uid=65534 caps=0000000000000000 fds=0]")' \
+  'PASS P4 environment: a helper log off tmpfs (production rule) is refused'
 # B3: the off-device cmdline summary (cmdline_summary.py) equals the entry's B6 record body.
 b3_srcs=()
 for s in "${p3_srcs[@]}"; do [[ "$s" == "$here/test-entry-native.c" ]] && b3_srcs+=("$here/test-cmdline-summary.c") || b3_srcs+=("$s"); done
@@ -757,12 +810,15 @@ p3_mutant reboot-after-bind 1 'const int reboot = nothing_opened(e);' '    const
 p3_mutant retire-skipped 1 'int rc = m11_pdmon_retire(&e->pdmon, c->pd_retire_budget_ms);' '    int rc = 0;' \
   'st == 43 && strstr(rep, "REBOOT phase=7 fail_step=0 fail_rc=0 hold=0 busy=0 deferred=0 acks_sent=0 regs=2 sockets=1 spawner=1 anchors_open=0/4 ep_node=0 ion_node=0")' \
   'PASS entry whose reboot returns: journaled (reboot_failed) and ended through the retaining PID1 exit'
-p3_mutant job-status-ignored 1 'if (rc || status) return e->teardown_rc = rc ? rc : -ECHILD;' '        (void)status;' \
-  'st == 44 && strstr(rep, "HOLD phase=7 ") && strstr(rep, "td=1/-10 step=3 pds=6 jobs=seal,usb_stop,stop_adsp ") && strstr(rep, "anchors_open=0/4")' \
+p3_mutant job-status-ignored 1 'return rc ? rc : status ? -ECHILD : 0;' '        (void)status; return rc;' \
+  'st == 44 && strstr(rep, "HOLD phase=7 ") && strstr(rep, "td=1/-10 step=4 pds=6 jobs=seal,usb_stop,stop_adsp ") && strstr(rep, "anchors_open=0/4")' \
   'PASS entry with a boot refused after a bind (ION CMA twin has a node, endpoint HELD): never reboots, retaining PID1 exit holding the endpoint'
-p3_mutant evidence-unchecked 1 'if (i == 0 && c->evidence_marker) {' '        if (0) {' \
-  'st == 44 && strstr(rep, "HOLD phase=7 ") && strstr(rep, "td=1/-61 step=1 pds=6 jobs=seal ") && !strstr(rep, "REBOOT")' \
+p3_mutant evidence-unchecked 1 'return -ENODATA;' '        (void)b; (void)st;' \
+  'st == 44 && strstr(rep, "HOLD phase=7 ") && strstr(rep, "td=1/-61 step=2 pds=6 jobs=seal ") && !strstr(rep, "REBOOT")' \
   'PASS B5 PD listener not withdrawn (no answer within the budget): hold before any control job (USB and ADSP untouched)'
+p3_mutant reap-status-ignored 1 'if (got == pid) return WIFEXITED(status) && WEXITSTATUS(status) == 0 ? 0 : -ECHILD;' '            if (got == pid) return 0;' \
+  'st == 44 && strstr(rep, "HOLD phase=7 ") && strstr(rep, "td=1/-10 step=7 pds=6 jobs=seal,usb_stop,stop_adsp ") && !strstr(rep, "REBOOT")' \
+  "PASS P4 teardown, Run23's whole sequence: seal, relay reaped, logger.done, usb_stop, stop_adsp, pd.stop, locator reaped, pd.done, common, checkpoint, unmount, then the reboot"
 p3_mutant no-cmdline-record 0 'phase_record(e, "phase=cmdline %s", summary);' '    (void)summary;' \
   'strstr(rep, "action=START_FAILED end=reboot phase=cmdline step=3 rc=-1 anchors_held=0/2 boot_stage=0") && strstr(rep, "phases=journal,cmdline lines=3 ")' \
   'PASS entry refused when the journal is not the kernel log: nothing written to it, no socket, no spawner; nothing audio opened, so reboot'

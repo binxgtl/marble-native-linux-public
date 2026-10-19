@@ -28,6 +28,7 @@
 #include <sys/mount.h>
 #include <sys/prctl.h>
 #include <sys/socket.h>
+#include <sys/syscall.h>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
 #include <sys/wait.h>
@@ -39,7 +40,8 @@ static int in_case;
 static m11_entry_config CFG;
 static m11_entry E;
 static char p_sys[400], p_proc[400], p_dev[400], p_ep[400], p_ion[400], p_cma[400], p_hdir[400], p_hnode[400];
-static char p_cmdline[400], p_journal[400], p_marker[400];
+static char p_cmdline[400], p_journal[400], p_marker[400], p_ldone[400], p_pdstop[400], p_pddone[400];
+static m11_entry_job td_basic[7], td_helpers[11];
 static int report_fd = -1;
 static void say(const char *s) { (void)!write(report_fd, s, strlen(s)); }
 
@@ -362,24 +364,61 @@ static void tree(const char *cmdline) {
     snprintf(p_hdir, sizeof p_hdir, "%s/dev/heap", root); snprintf(p_hnode, sizeof p_hnode, "%s/dev/heap/system", root);
     /* the control job stand-in: logs its argument in order, writes the evidence marker on "seal",
      * fails where a "fail-<arg>" file exists */
-    static char script[1400];
-    snprintf(script, sizeof script, "echo \"$0\" >> %s/jobs; if [ \"$0\" = seal ]; then echo 1 > %s/logger.done; fi; [ ! -e \"%s/fail-$0\" ]",
+    static char script[1400], ckpt[600];
+    snprintf(script, sizeof script, "echo \"$0\" >> %s/jobs; if [ \"$0\" = seal ]; then echo 1 > %s/sealed; fi; [ ! -e \"%s/fail-$0\" ]",
              root, root, root);
-    snprintf(p_marker, sizeof p_marker, "%s/logger.done", root);
+    snprintf(ckpt, sizeof ckpt, "echo \"checkpoint-$0\" >> %s/jobs", root);
+    snprintf(p_marker, sizeof p_marker, "%s/sealed", root);
+    snprintf(p_ldone, sizeof p_ldone, "%s/logger.done", root); snprintf(p_pdstop, sizeof p_pdstop, "%s/pd.stop", root);
+    snprintf(p_pddone, sizeof p_pddone, "%s/pd.done", root);
     static const char *const job[] = {"/bin/sh", "-c", script, NULL};
-    static const char *const *const jobs[] = {job};
+    static const char *const ckjob[] = {"/bin/sh", "-c", ckpt, NULL};
+    static const char *const *const jobs[] = {job, ckjob};
+    /* without helpers: Run23's jobs and the seal's evidence marker */
+    td_basic[0] = (m11_entry_job){.kind = M11_TD_JOB, .arg = "seal", .deadline_ms = 5000};
+    td_basic[1] = (m11_entry_job){.kind = M11_TD_CHECK, .arg = p_marker};
+    td_basic[2] = (m11_entry_job){.kind = M11_TD_JOB, .arg = "usb_stop", .deadline_ms = 5000};
+    td_basic[3] = (m11_entry_job){.kind = M11_TD_JOB, .arg = "stop_adsp", .deadline_ms = 5000};
+    td_basic[4] = (m11_entry_job){.kind = M11_TD_JOB, .arg = "common", .deadline_ms = 5000};
+    td_basic[5] = (m11_entry_job){.kind = M11_TD_JOB, .arg = "green", .deadline_ms = 5000, .index = 1};
+    td_basic[6] = (m11_entry_job){.kind = M11_TD_JOB, .arg = "unmount", .deadline_ms = 5000};
+    /* with the two helper stand-ins: Run23's whole sequence */
+    td_helpers[0] = td_basic[0];
+    td_helpers[1] = (m11_entry_job){.kind = M11_TD_REAP, .deadline_ms = 3000, .slot = 1};
+    td_helpers[2] = (m11_entry_job){.kind = M11_TD_CHECK, .arg = p_ldone};
+    td_helpers[3] = td_basic[2]; td_helpers[4] = td_basic[3];
+    td_helpers[5] = (m11_entry_job){.kind = M11_TD_CREATE, .arg = p_pdstop};
+    td_helpers[6] = (m11_entry_job){.kind = M11_TD_REAP, .deadline_ms = 3000, .slot = 0};
+    td_helpers[7] = (m11_entry_job){.kind = M11_TD_CHECK, .arg = p_pddone};
+    td_helpers[8] = td_basic[4]; td_helpers[9] = td_basic[5]; td_helpers[10] = td_basic[6];
     CFG = m11_entry_config_default();
     CFG.boot = (m11_boot_config){.sys = p_sys, .proc_devices = p_proc,
         .endpoint = {"aud_pasthru_adsp", "aud_pasthru_adsp", p_ep, 0}, .ion = {"msm_audio_ion", "msm_audio_ion", p_ion, 0},
         .ion_cma = {"msm_audio_ion_cma", "msm_audio_ion_cma", p_cma, 0},
         .heap = {.sys = p_sys, .proc_devices = p_proc, .dev_dir = p_hdir, .node = p_hnode, .require_kernel_fs = 0, .require_root = 1},
-        .require_root = 1, .census_root = getpid(), .spawner_commands = jobs, .spawner_count = 1, .spawner_require_drop = geteuid() == 0};
+        .require_root = 1, .census_root = getpid(), .spawner_commands = jobs, .spawner_count = 2, .spawner_require_drop = geteuid() == 0};
     CFG.qrtr = &fxq; CFG.pd_ready_budget_ms = 400; CFG.cmdline_path = p_cmdline; CFG.journal_path = p_journal;
     CFG.journal_require_kmsg = 0; CFG.require_pid1 = 0; CFG.pool_count = 2; CFG.pool_len = 4096; CFG.pool_base = 200;
     CFG.sys = &fx_sys; CFG.timeout_ms = 300; CFG.recovery_budget_ms = 2000; CFG.hold_idle_ms = 50; CFG.boot_epoch = 31;
     CFG.terminal_ops = (m11_terminal_ops){.exit_fn = t_exit, .reboot_fn = t_reboot, .user = NULL, .panic_path = "/nonexistent-m11/panic",
                                           .hold_fn = t_hold};
-    CFG.evidence_marker = p_marker; CFG.pd_retire_budget_ms = 300; /* the Run23 job list stays the default */
+    CFG.teardown_jobs = td_basic; CFG.teardown_count = 7; CFG.pd_retire_budget_ms = 300;
+}
+/* P4 helper stand-ins (children of the case, like PID1's helpers): the relay ends after the seal
+ * (logger.done), the locator after pd.stop (pd.done, then the given exit status). They hold no
+ * anchor, pool buffer or heap. */
+static pid_t helper(int relay, int status) {
+    pid_t p = fork(); assert(p >= 0);
+    if (p) return p;
+    prctl(PR_SET_PDEATHSIG, SIGKILL);
+    (void)syscall(SYS_close_range, 3u, ~0u, 0u);
+    const char *wait_for = relay ? p_marker : p_pdstop, *done = relay ? p_ldone : p_pddone;
+    struct stat st;
+    for (int i = 0; i < 2000 && lstat(wait_for, &st); i++) { struct timespec t = {0, 10000000L}; nanosleep(&t, NULL); }
+    int fd = open(done, O_WRONLY | O_CREAT | O_EXCL, 0600);
+    if (fd < 0 || write(fd, "1\n", 2) != 2) _exit(5);
+    close(fd);
+    _exit(status);
 }
 
 /* ---- sessions (production has none) ---- */
@@ -449,7 +488,7 @@ static void c_teardown_no_unreg(void) { entry_case(GOOD, P_NO_UNREG, NULL); }
 /* B5: the seal ran but the evidence marker never appeared: hold before USB is stopped */
 static void c_teardown_no_evidence(void) {
     tree(GOOD); start_peer(P_UP);
-    static char never[460]; snprintf(never, sizeof never, "%s/never.done", root); CFG.evidence_marker = never;
+    static char never[460]; snprintf(never, sizeof never, "%s/never.done", root); td_basic[1].arg = never;
     int rc = m11_entry_run(&E, &CFG);
     char b[64]; snprintf(b, sizeof b, "RETURNED rc=%d\n", rc); say(b);
     _exit(0);
@@ -464,6 +503,18 @@ static int s_intent_after_close(void *u, m11_entry *e) {
     return rc;
 }
 static void c_intent_after_close(void) { entry_case(GOOD, P_UP, s_intent_after_close); }
+/* P4: Run23's whole teardown with the two helpers (relay reaped after the seal, locator after
+ * pd.stop); locator_status != 0 makes its reap fail */
+static void helpers_case(int locator_status) {
+    tree(GOOD); start_peer(P_UP);
+    CFG.helper_pids[0] = helper(0, locator_status); CFG.helper_pids[1] = helper(1, 0);
+    CFG.teardown_jobs = td_helpers; CFG.teardown_count = 11;
+    int rc = m11_entry_run(&E, &CFG);
+    char b[64]; snprintf(b, sizeof b, "RETURNED rc=%d\n", rc); say(b);
+    _exit(0);
+}
+static void c_helpers_ok(void) { helpers_case(0); }
+static void c_helper_fails(void) { helpers_case(3); }
 /* B4: a reboot_fn that returns falls through to the retaining end. */
 static void c_reboot_fails(void) { reboot_returns = 1; entry_case("console=ttyMSM0 iommu.strict=0\n", P_UP, NULL); }
 /* B4: once a bind was attempted the failed boot never reboots: the ION CMA twin has a node, so P2
@@ -531,12 +582,22 @@ int main(int argc, char **argv) {
            d.require_pid1 && d.qrtr == NULL && d.pd_ready_budget_ms == 10000 && d.session_fn == NULL && d.proc_root == NULL &&
            d.sys == NULL && d.terminal_ops.exit_fn && d.terminal_ops.reboot_fn && !strcmp(d.terminal_ops.panic_path, "/proc/sys/kernel/panic"));
     assert(!strcmp(d.boot.endpoint.node, "/dev/aud_pasthru_adsp") && !strcmp(d.boot.ion.node, "/dev/msm_audio_ion") &&
-           d.boot.census_root == 0 && d.boot.require_root && d.boot.spawner_require_drop && d.boot.spawner_count == 1 &&
-           d.boot.spawner_commands && !strcmp(d.boot.spawner_commands[0][2], "/m11/control"));
-    assert(d.teardown_count == 5 && !strcmp(d.teardown_jobs[0].arg, "seal") && !strcmp(d.teardown_jobs[1].arg, "usb_stop") &&
-           !strcmp(d.teardown_jobs[2].arg, "stop_adsp") && d.teardown_jobs[2].deadline_ms == 40000 &&
-           !strcmp(d.teardown_jobs[3].arg, "common") && !strcmp(d.teardown_jobs[4].arg, "unmount") && d.terminal_ops.hold_fn &&
-           !strcmp(d.evidence_marker, "/run/m11-instrumentation/logger.done") && d.pd_retire_budget_ms == 2000);
+           d.boot.census_root == 0 && d.boot.require_root && d.boot.spawner_require_drop && d.boot.spawner_count == 2 &&
+           d.boot.spawner_commands && !strcmp(d.boot.spawner_commands[0][2], "/m11/control") &&
+           !strcmp(d.boot.spawner_commands[1][0], "/sbin/m11-checkpoint"));
+    /* Run23's teardown sequence, helpers included */
+    static const struct { int kind; const char *arg; unsigned slot_or_index; } want[] = {
+        {M11_TD_JOB, "seal", 0}, {M11_TD_REAP, NULL, 1}, {M11_TD_CHECK, "/run/m11-instrumentation/logger.done", 0},
+        {M11_TD_JOB, "usb_stop", 0}, {M11_TD_JOB, "stop_adsp", 0}, {M11_TD_CREATE, "/run/m11/pd.stop", 0},
+        {M11_TD_REAP, NULL, 0}, {M11_TD_CHECK, "/run/m11/pd.done", 0}, {M11_TD_JOB, "common", 0},
+        {M11_TD_JOB, "green", 1}, {M11_TD_JOB, "unmount", 0}};
+    assert(d.teardown_count == sizeof want / sizeof want[0] && d.terminal_ops.hold_fn && d.pd_retire_budget_ms == 2000 &&
+           d.teardown_jobs[4].deadline_ms == 40000);
+    for (unsigned i = 0; i < d.teardown_count; i++) {
+        const m11_entry_job *j = &d.teardown_jobs[i];
+        assert(j->kind == want[i].kind && (want[i].arg ? j->arg && !strcmp(j->arg, want[i].arg) : !j->arg));
+        assert(j->kind == M11_TD_REAP ? j->slot == want[i].slot_or_index : j->kind == M11_TD_JOB ? j->index == want[i].slot_or_index : 1);
+    }
     printf("PASS default entry: PID1 only, /dev/kmsg (1:11) journal, /proc/cmdline, the AF_QIPCRTR monitor (10 s bring-up), the real nodes, no session (never maps), production terminal ops\n");
 
     char rep[8192]; int st;
@@ -581,7 +642,7 @@ int main(int argc, char **argv) {
     assert(strstr(rep, "action=ORDERLY_SHUTDOWN end=reboot") && !strstr(rep, "PEER n="));
     assert(strstr(rep, "phases=journal,cmdline,pd_up,boot,runner,session,teardown lines=8 ") && strstr(rep, "cmd=[phase=cmdline allowed=1 len=44 strict=1 passthrough=absent crc32="));
     assert(strstr(rep, "bootrec=[phase=boot rc=0 step=0 stage=6 ep=5:2 ion=1:3 heap=1:7]"));
-    assert(strstr(rep, "td=1/0 step=6 pds=6 jobs=seal,usb_stop,stop_adsp,common,unmount ") && strstr(rep, "PEER unregister") && strstr(rep, "PEER del_lookup"));
+    assert(strstr(rep, "td=1/0 step=8 pds=6 jobs=seal,usb_stop,stop_adsp,common,checkpoint-green,unmount ") && strstr(rep, "PEER unregister") && strstr(rep, "PEER del_lookup"));
     printf("PASS entry, production shape (no session): P1 UP, P2 boot (nodes made, bound, sealed, removed), runner start, close, G8 orderly end: both anchors final-closed, reboot; nothing sent\n");
 
     st = run(c_map_hold, rep, sizeof rep); printf("INFO st=%d %s", st, rep);
@@ -610,7 +671,7 @@ int main(int argc, char **argv) {
     printf("PASS entry with a boot refused after a bind (ION CMA twin has a node, endpoint HELD): never reboots, retaining PID1 exit holding the endpoint\n");
 
     st = run(c_teardown_job_fails, rep, sizeof rep); printf("INFO st=%d %s", st, rep);
-    assert(st == 44 && strstr(rep, "HOLD phase=7 ") && strstr(rep, "td=1/-10 step=3 pds=6 jobs=seal,usb_stop,stop_adsp ") && strstr(rep, "anchors_open=0/4"));
+    assert(st == 44 && strstr(rep, "HOLD phase=7 ") && strstr(rep, "td=1/-10 step=4 pds=6 jobs=seal,usb_stop,stop_adsp ") && strstr(rep, "anchors_open=0/4"));
     assert(!strstr(rep, "REBOOT") && !strstr(rep, "EXIT") && strstr(rep, "PEER unregister") && strstr(rep, "phases=journal,cmdline,pd_up,boot,runner,session,teardown lines=8 "));
     printf("PASS B5 teardown step failing (stop_adsp): hold after the anchors closed, no later job, no reboot, no exit\n");
 
@@ -619,13 +680,22 @@ int main(int argc, char **argv) {
     printf("PASS B5 PD listener not withdrawn (no answer within the budget): hold before any control job (USB and ADSP untouched)\n");
 
     st = run(c_teardown_no_evidence, rep, sizeof rep); printf("INFO st=%d %s", st, rep);
-    assert(st == 44 && strstr(rep, "HOLD phase=7 ") && strstr(rep, "td=1/-61 step=1 pds=6 jobs=seal ") && !strstr(rep, "REBOOT"));
+    assert(st == 44 && strstr(rep, "HOLD phase=7 ") && strstr(rep, "td=1/-61 step=2 pds=6 jobs=seal ") && !strstr(rep, "REBOOT"));
     printf("PASS B5 evidence not confirmed after the seal: hold before USB is stopped\n");
 
     st = run(c_intent_after_close, rep, sizeof rep); printf("INFO st=%d %s", st, rep);
     assert(strstr(rep, "MAP rc=-130 intents=1 busy=1") && st == 42 && strstr(rep, "EXIT phase=7 ") && strstr(rep, "td=0/0 step=0"));
     assert(strstr(rep, "jobs=- ") && strstr(rep, "note=map_intent=1") && !strstr(rep, "PEER unregister") && !strstr(rep, "REBOOT"));
     printf("PASS B5 MAP intent refused before TX: no orderly end, no teardown, retaining PID1 exit\n");
+
+    st = run(c_helpers_ok, rep, sizeof rep); printf("INFO st=%d %s", st, rep);
+    assert(st == 43 && strstr(rep, "REBOOT phase=7 ") && strstr(rep, "td=1/0 step=12 pds=6 jobs=seal,usb_stop,stop_adsp,common,checkpoint-green,unmount "));
+    assert(strstr(rep, "phases=journal,cmdline,pd_up,boot,runner,session,teardown lines=8 ") && strstr(rep, "PEER unregister"));
+    printf("PASS P4 teardown, Run23's whole sequence: seal, relay reaped, logger.done, usb_stop, stop_adsp, pd.stop, locator reaped, pd.done, common, checkpoint, unmount, then the reboot\n");
+
+    st = run(c_helper_fails, rep, sizeof rep); printf("INFO st=%d %s", st, rep);
+    assert(st == 44 && strstr(rep, "HOLD phase=7 ") && strstr(rep, "td=1/-10 step=7 pds=6 jobs=seal,usb_stop,stop_adsp ") && !strstr(rep, "REBOOT"));
+    printf("PASS P4 teardown, a helper ending badly (locator exit 3): hold at its reap, nothing after it\n");
 
     (void)nftw(base, rm_one, 16, FTW_DEPTH | FTW_PHYS);
     printf("PASS production P3 PID1 entry (root sections)\n");
