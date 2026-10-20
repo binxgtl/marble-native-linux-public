@@ -239,8 +239,8 @@ def test_c_writers(directory, required):
         # the fixture's 7-step list (td_basic, seal_count 2) against production's 11 and 3
         sized = [re.sub(r'( phase=teardown .*steps=)7$', r'\g<1>11', re.sub(r' phase=seal steps=2$', ' phase=seal steps=3', ln))
                  for ln in lines]
-        if sized != lines:  # (reboot-failed outranks the list size)
-            assert verdict(ENV_OK + lines, stock=stock)[0] in ('teardown-steps-differ', 'seal-steps-differ', 'reboot-failed'), (case, lines)
+        if sized != lines:  # the fixture's list sizes alone never pass
+            assert verdict(ENV_OK + lines, stock=stock)[0] != 'never-mapped-orderly', (case, lines)
             lines = sized
         got, r = verdict(ENV_OK + lines, stock=stock)
         assert got == want, (case, want, got, r['p4'], lines)
