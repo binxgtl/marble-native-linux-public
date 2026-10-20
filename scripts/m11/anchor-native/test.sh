@@ -837,9 +837,10 @@ p3_mutant reboot-after-bind 1 'const int reboot = nothing_opened(e);' '    const
 p3_mutant retire-skipped 1 'int rc = m11_pdmon_retire(&e->pdmon, c->pd_retire_budget_ms);' '    int rc = 0;' \
   'st == 43 && strstr(rep, "REBOOT phase=7 fail_step=0 fail_rc=0 hold=0 busy=0 deferred=0 acks_sent=0 regs=2 sockets=1 spawner=1 anchors_open=0/4 ep_node=0 ion_node=0")' \
   'PASS entry whose reboot returns: journaled (reboot_failed) and ended through the retaining PID1 exit'
-p3_mutant job-status-ignored 1 'return rc ? rc : status ? -ECHILD : 0;' '        (void)status; return rc;' \
-  'st == 44 && strstr(rep, "HOLD phase=7 ") && strstr(rep, "td=1/-10 step=4 pds=6 jobs=seal,usb_stop,stop_adsp ") && strstr(rep, "anchors_open=0/4")' \
-  'PASS entry with a boot refused after a bind (ION CMA twin has a node, endpoint HELD): never reboots, retaining PID1 exit holding the endpoint'
+# (the job status is now first checked by R1's pre-bind failure teardown, unprivileged)
+p3_mutant job-status-ignored 0 'return rc ? rc : status ? -ECHILD : 0;' '        (void)status; return rc;' \
+  'st == 44 && strstr(rep, "HOLD phase=1 fail_step=3 fail_rc=-1 ") && strstr(rep, "jobs=seal,usb_stop ") && !strstr(rep, "REBOOT")' \
+  'PASS entry with a refused boot before any bind (an endpoint node already exists): the P2 step journaled, nothing opened or closed; reboot'
 p3_mutant evidence-unchecked 1 'return -ENODATA;' '        (void)b; (void)st;' \
   'st == 44 && strstr(rep, "HOLD phase=7 ") && strstr(rep, "td=1/-61 step=2 pds=6 jobs=seal ") && !strstr(rep, "REBOOT")' \
   'PASS B5 PD listener not withdrawn (no answer within the budget): hold before any control job (USB and ADSP untouched)'
