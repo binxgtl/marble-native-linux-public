@@ -116,7 +116,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - name: Receiver, observer identity and launcher plan (no phone tool)
+      - name: Receiver, observer identity, launcher plan and post-run listing (no phone tool)
         shell: pwsh
         run: |
           python scripts/m11/anchor-native/p4/test-p4-check.py --write-fixture p4-fixture.bin
@@ -124,4 +124,6 @@ jobs:
           pwsh -NoProfile -File scripts/m11/anchor-native/p4/test-host-reader.ps1 -Fixture p4-fixture.bin
           if ($LASTEXITCODE -ne 0) { exit 1 }
           $env:M11_PWSH='pwsh'; python scripts/m11/anchor-native/p4/test-launch.py
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          python scripts/m11/anchor-native/p4/test-post-run-listing.py
           if ($LASTEXITCODE -ne 0) { exit 1 }

@@ -867,6 +867,10 @@ p3_mutant failure-colour-green 0 'e->result = "cyan";' '    e->result = "green";
 p3_mutant seal-before-exit-skipped 1 'if (!c->teardown_count || e->steps_started || e->boot.spawner.pid <= 0) return;' '    if (c) return;' \
   'strstr(rep, "phases=journal,cmdline,pd_up,boot,runner,session,hold,seal lines=10 ")' \
   'PASS entry, production shape (no session): P1 UP, P2 boot (nodes made, bound, sealed, removed), runner start, close, G8 orderly end: both anchors final-closed, reboot; nothing sent'
+# E-1: the last record gets seal_settle_ms of relay rounds before the seal's logger.stop.
+p3_mutant seal-settle-skipped 0 'while (m11_entry_now_ms() < settle_until) sleep_until(settle_until);' '    (void)settle_until; (void)sleep_until;' \
+  'settle_of(rep) >= 100 && strstr(rep, "checkpoint-cyan")' \
+  "PASS entry refused when the journal is not the kernel log: nothing written to it, no socket; nothing audio opened, so Run23's sealed teardown (CYAN), then reboot"
 
 # Unit -> sources it is built from, for the mutants below.
 build() { # name output [file-to-replace replacement-path]

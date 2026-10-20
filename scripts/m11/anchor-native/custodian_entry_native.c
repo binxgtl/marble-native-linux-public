@@ -49,6 +49,7 @@ m11_entry_config m11_entry_config_default(void) {
     c.teardown_jobs = run23_teardown;
     c.teardown_count = sizeof run23_teardown / sizeof run23_teardown[0];
     c.seal_count = 3; /* seal, the relay reaped, logger.done */
+    c.seal_settle_ms = 100; /* E-1: ten relay rounds before the seal's logger.stop */
     c.pd_retire_budget_ms = 2000;
     return c;
 }
@@ -105,7 +106,7 @@ static void phase_record(m11_entry *e, const char *fmt, ...) {
     if (k < 0 || (size_t)k >= sizeof body) { e->record_failures++; return; }
     int n = snprintf(e->record, sizeof e->record, "<6>M11ENTRY v=1 boot=%llu %s\n", (unsigned long long)e->boot_epoch, body);
     if (n <= 0 || (size_t)n >= sizeof e->record || e->sink.append_fn(e->sink.user, e->record, (size_t)n)) e->record_failures++;
-    else e->records++;
+    else { e->records++; e->last_record_ms = m11_entry_now_ms(); }
 }
 
 /* The gate-relevant tokens, for the record only (the verdict comes from the kernel-faithful gate):
@@ -171,7 +172,7 @@ static int entry_fail(m11_entry *e, const char *phase, int step, int rc) {
                      anchors_held(e), e->boot.stage);
     if (e->journal_fd >= 0 && n > 0 && (size_t)n < sizeof e->record) {
         if (e->sink.append_fn(e->sink.user, e->record, (size_t)n)) e->record_failures++;
-        else e->records++;
+        else { e->records++; e->last_record_ms = m11_entry_now_ms(); }
     }
     if (reboot) {
         if (e->cfg.teardown_count && fail_teardown(e)) { /* R1: as Run23, sealed before the reboot */
@@ -239,8 +240,19 @@ static int teardown_step(m11_entry *e, const m11_entry_job *j) {
 }
 
 /* The first n steps in order, at most once per boot; nothing after a failed step. */
+static void sleep_until(uint64_t until_ms) {
+    uint64_t now = m11_entry_now_ms();
+    if (now >= until_ms) return;
+    struct timespec t = {(time_t)((until_ms - now) / 1000u), (long)((until_ms - now) % 1000u) * 1000000L};
+    (void)nanosleep(&t, NULL); /* an interrupted sleep is resumed by the caller's loop */
+}
 static int run_steps(m11_entry *e, unsigned n) {
     e->steps_started = 1;
+    /* E-1: the relay reads /dev/kmsg every 10 ms and stops reading at the seal's logger.stop: the
+     * record just written gets seal_settle_ms of relay rounds before the first step (the seal) */
+    const uint64_t settle_until = e->last_record_ms + e->cfg.seal_settle_ms;
+    while (m11_entry_now_ms() < settle_until) sleep_until(settle_until);
+    e->settle_ms = m11_entry_now_ms() - e->last_record_ms;
     for (unsigned i = 0; i < n; i++) {
         e->teardown_step = (int)i + 1;
         int rc = teardown_step(e, &e->cfg.teardown_jobs[i]);
@@ -312,7 +324,7 @@ int m11_entry_run(m11_entry *e, const m11_entry_config *cfg) {
         !cfg->terminal_ops.reboot_fn ||
         (cfg->teardown_count && (!cfg->teardown_jobs || !cfg->terminal_ops.hold_fn || !cfg->pd_retire_budget_ms ||
                                  cfg->pd_retire_budget_ms > M11_PDS_TXN_TIMEOUT_MS || !cfg->seal_count ||
-                                 cfg->seal_count > cfg->teardown_count))) return -EINVAL;
+                                 cfg->seal_count > cfg->teardown_count || cfg->seal_settle_ms > 1000u))) return -EINVAL;
     for (unsigned i = 0; i < cfg->teardown_count; i++) { /* every step well formed before anything starts */
         const m11_entry_job *j = &cfg->teardown_jobs[i];
         if (j->kind == M11_TD_JOB ? !j->arg || j->index >= cfg->boot.spawner_count :

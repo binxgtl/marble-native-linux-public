@@ -99,6 +99,10 @@ typedef struct {
     unsigned teardown_count;
     unsigned seal_count;             /* R1/D2: the leading steps that seal the evidence (production 3:
                                       * seal, the relay reaped, logger.done); 1..teardown_count */
+    uint32_t seal_settle_ms;         /* E-1 (docs/m11-argon-pstore-review.md): the least time between
+                                      * the last record and the first step, so the relay (10 ms rounds,
+                                      * no kmsg read after the seal's logger.stop) ships that record;
+                                      * production 100, at most 1000 */
     pid_t helper_pids[M11_ENTRY_HELPERS]; /* P4 environment helpers (0: none; a REAP of it fails) */
     uint32_t pd_retire_budget_ms;    /* 1..2000 */
     const char *proc_root;           /* NULL = "/proc" (runner tree census) */
@@ -126,6 +130,8 @@ struct m11_entry {
     int steps_started;               /* R1/D2: the steps (the seal first) have started in this boot */
     int seal_rc;                     /* D2: the pre-exit seal (0, or the failed step's -errno) */
     const char *result;              /* the RESULT checkpoint argument */
+    uint64_t last_record_ms;         /* E-1: when the last entry record was written (0: none) */
+    uint64_t settle_ms;              /* E-1: last record to the first step, as observed */
     unsigned hold_rounds;
     unsigned records, record_failures; /* entry records written / refused by the sink */
     char record[M11_INTENT_RECORD_MAX + 96];

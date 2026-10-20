@@ -339,11 +339,11 @@ static void report(const char *kind) {
     int n = snprintf(b, sizeof b,
         "%s phase=%d fail_step=%d fail_rc=%d hold=%u busy=%d deferred=%d acks_sent=%u regs=%u sockets=%u spawner=%d "
         "anchors_open=%d/4 ep_node=%d ion_node=%d session_rc=%d intents=%u why=%u td=%d/%d step=%d pds=%d jobs=%s "
-        "phases=%s lines=%u cmd=[%s] bootrec=[%s] tdrec=[%s] rec=%s\n",
+        "phases=%s lines=%u cmd=[%s] bootrec=[%s] tdrec=[%s] settle=%llu rec=%s\n",
         kind, E.phase, E.fail_step, E.fail_rc, E.hold_rounds, E.pdmon.pds.resources_busy, E.pdmon.pds.ack_deferred,
         acks_sent, regs_sent, sockets, E.boot.spawner.pid > 0, anchors_open(), !absent(p_ep), !absent(p_ion),
         E.session_rc, E.runner.map_intents, E.runner.census_why, E.runner.term.teardown_ran, E.teardown_rc,
-        E.teardown_step, (int)E.pdmon.pds.phase, jobs, phases, lines, cmd, bootrec, tdrec, rec);
+        E.teardown_step, (int)E.pdmon.pds.phase, jobs, phases, lines, cmd, bootrec, tdrec, (unsigned long long)E.settle_ms, rec);
     if (n > 0) (void)!write(report_fd, b, (size_t)n < sizeof b ? (size_t)n : sizeof b - 1);
 }
 static int exit_returns;
@@ -602,6 +602,8 @@ static int run(void (*fn)(void), char *rep, size_t cap) {
     return WIFEXITED(st) ? WEXITSTATUS(st) : 128 + WTERMSIG(st);
 }
 static int rm_one(const char *p, const struct stat *s, int f, struct FTW *w) { (void)s; (void)f; (void)w; return remove(p); }
+/* E-1: the observed time from the last record to the first step (the seal) */
+static unsigned long long settle_of(const char *rep) { const char *h = strstr(rep, " settle="); return h ? strtoull(h + 8, NULL, 10) : 0; }
 static unsigned hold_of(const char *rep) { const char *h = strstr(rep, " hold="); return h ? (unsigned)atoi(h + 6) : 0; }
 
 int main(int argc, char **argv) {
@@ -649,6 +651,7 @@ int main(int argc, char **argv) {
     assert(st == 43 && strstr(rep, "REBOOT phase=1 fail_step=3 fail_rc=-1 ") && strstr(rep, "sockets=0 spawner=1 anchors_open=0/4 ep_node=0"));
     assert(strstr(rep, "action=START_FAILED end=reboot phase=cmdline step=3 rc=-1 anchors_held=0/2 boot_stage=0") && strstr(rep, "phases=journal,cmdline,teardown lines=4 "));
     assert(strstr(rep, "tdrec=[phase=teardown fail=1 spawner=0 pd=none pd_retire=0 steps=7]") && strstr(rep, "jobs=seal,usb_stop,stop_adsp,common,checkpoint-cyan,unmount "));
+    assert(settle_of(rep) >= 100 && strstr(rep, "checkpoint-cyan")); /* E-1: the relay gets 100 ms after the last record */
     assert(strstr(rep, "cmd=[phase=cmdline allowed=0 len=31 strict=0 passthrough=absent crc32="));
     printf("PASS entry refused by the effective cmdline before anything is opened: no PD socket, no node; the verdict, gate tokens, length and CRC journaled (never the text); START_FAILED, the sealed teardown (CYAN; the spawner forked for it), reboot\n");
 
@@ -687,6 +690,7 @@ int main(int argc, char **argv) {
     assert(strstr(rep, "phases=journal,cmdline,pd_up,boot,runner,session,teardown lines=8 ") && strstr(rep, "cmd=[phase=cmdline allowed=1 len=44 strict=1 passthrough=absent crc32="));
     assert(strstr(rep, "bootrec=[phase=boot rc=0 step=0 stage=6 ep=5:2 ion=1:3 heap=1:7]"));
     assert(strstr(rep, "td=1/0 step=8 pds=6 jobs=seal,usb_stop,stop_adsp,common,checkpoint-green,unmount ") && strstr(rep, "PEER unregister") && strstr(rep, "PEER del_lookup"));
+    assert(settle_of(rep) >= 100 && strstr(rep, "checkpoint-green")); /* E-1 on the orderly teardown */
     printf("PASS entry, production shape (no session): P1 UP, P2 boot (nodes made, bound, sealed, removed), runner start, close, G8 orderly end: both anchors final-closed, reboot; nothing sent\n");
 
     keep_as = "map-hold"; st = run(c_map_hold, rep, sizeof rep); keep_as = NULL; printf("INFO st=%d %s", st, rep);
@@ -695,6 +699,7 @@ int main(int argc, char **argv) {
     assert(hold_of(rep) >= 1 && strstr(rep, "action=RESET_RETAINING_ANCHORS end=pid1_exit"));
     assert(strstr(rep, "phases=journal,cmdline,pd_up,boot,runner,session,hold,seal lines=10 ")); /* + the MAP intent and G8 records: the burst of 10 */
     assert(strstr(rep, "td=0/0 step=2") && strstr(rep, "jobs=seal ") && !strstr(rep, "PEER unregister")); /* a mapped boot: only the seal (D2) */
+    assert(settle_of(rep) >= 100 && strstr(rep, "action=RESET_RETAINING_ANCHORS")); /* E-1 before the D2 seal */
     printf("PASS entry with a mapped region left: the MAP intent latched resources busy before the TX; the end holds (HOLD) waiting on the monitor until the PD DOWN, which is NOT acknowledged; then the retaining end holding every anchor\n");
 
     st = run(c_down_on_map, rep, sizeof rep); printf("INFO st=%d %s", st, rep);
