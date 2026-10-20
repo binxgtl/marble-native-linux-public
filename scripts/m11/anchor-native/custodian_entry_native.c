@@ -31,7 +31,7 @@ static const m11_entry_job run23_teardown[] = {
     {.kind = M11_TD_REAP, .deadline_ms = 5000, .slot = 0},                       /* the PD locator */
     {.kind = M11_TD_CHECK, .arg = "/run/m11/pd.done"},
     {.kind = M11_TD_JOB, .arg = "common", .deadline_ms = 10000, .index = 0},
-    {.kind = M11_TD_JOB, .arg = "green", .deadline_ms = 10000, .index = 1},     /* the result checkpoint */
+    {.kind = M11_TD_RESULT, .deadline_ms = 10000, .index = 1},                  /* the result checkpoint */
     {.kind = M11_TD_JOB, .arg = "unmount", .deadline_ms = 10000, .index = 0}};
 static void hold_forever(void *user) { (void)user; for (;;) pause(); }
 
@@ -48,6 +48,7 @@ m11_entry_config m11_entry_config_default(void) {
     c.terminal_ops.hold_fn = hold_forever;
     c.teardown_jobs = run23_teardown;
     c.teardown_count = sizeof run23_teardown / sizeof run23_teardown[0];
+    c.seal_count = 3; /* seal, the relay reaped, logger.done */
     c.pd_retire_budget_ms = 2000;
     return c;
 }
@@ -153,9 +154,13 @@ static int nothing_opened(const m11_entry *e) {
     return !e->boot.endpoint.bind_attempted && !e->boot.ion.bind_attempted && e->boot.heap.fd < 0;
 }
 
+static int fail_teardown(m11_entry *e);
+static void seal_before_exit(m11_entry *e);
+
 /* A boot that never reached the runner. Nothing is closed. B4: when nothing audio was ever opened
- * the end is reboot(2), as Run23 rebooted a boot whose PD never came UP; once a bind was attempted
- * the only end is the retaining one (PID1 exit). A reboot_fn that returns falls through to it. */
+ * the end is reboot(2), as Run23 rebooted a boot whose PD never came UP, after Run23's sealed
+ * teardown (R1; a failed step holds); once a bind was attempted the only end is the retaining one
+ * (PID1 exit), after the evidence is sealed (D2). A reboot_fn that returns falls through to it. */
 static int entry_fail(m11_entry *e, const char *phase, int step, int rc) {
     e->fail_step = step; e->fail_rc = rc;
     const int reboot = nothing_opened(e);
@@ -169,16 +174,25 @@ static int entry_fail(m11_entry *e, const char *phase, int step, int rc) {
         else e->records++;
     }
     if (reboot) {
+        if (e->cfg.teardown_count && fail_teardown(e)) { /* R1: as Run23, sealed before the reboot */
+            e->cfg.terminal_ops.hold_fn(e->cfg.terminal_ops.user);
+            return -ECANCELED; /* hold_fn returned (never in production) */
+        }
         e->reboot_rc = e->cfg.terminal_ops.reboot_fn(e->cfg.terminal_ops.user);
         phase_record(e, "phase=reboot_failed rc=%d", e->reboot_rc);
     }
+    seal_before_exit(e);
     e->cfg.terminal_ops.exit_fn(e->cfg.terminal_ops.user);
     return -EFAULT;
 }
 
 /* The runner's terminal ops: the caller's exit/reboot/hold under the caller's user, plus the
- * entry's own B5 teardown. */
-static void ops_exit(void *u) { m11_entry *e = u; e->cfg.terminal_ops.exit_fn(e->cfg.terminal_ops.user); }
+ * entry's own B5 teardown. Every exit seals the evidence first (D2). */
+static void ops_exit(void *u) {
+    m11_entry *e = u;
+    seal_before_exit(e);
+    e->cfg.terminal_ops.exit_fn(e->cfg.terminal_ops.user);
+}
 static int ops_reboot(void *u) { m11_entry *e = u; return e->cfg.terminal_ops.reboot_fn(e->cfg.terminal_ops.user); }
 static void ops_hold(void *u) { m11_entry *e = u; e->cfg.terminal_ops.hold_fn(e->cfg.terminal_ops.user); }
 
@@ -187,9 +201,12 @@ static uint64_t mono_ms(void) { return m11_entry_now_ms(); }
 static int teardown_step(m11_entry *e, const m11_entry_job *j) {
     char b[8]; struct stat st;
     switch (j->kind) {
-    case M11_TD_JOB: {
+    case M11_TD_JOB:
+    case M11_TD_RESULT: {
+        const char *arg = j->kind == M11_TD_RESULT ? e->result : j->arg;
+        if (!arg) return -EINVAL;
         int status = 0;
-        int rc = m11_spawner_run_flags(&e->boot.spawner, j->index, j->arg, j->deadline_ms, M11_SPAWN_NO_KILL, &status);
+        int rc = m11_spawner_run_flags(&e->boot.spawner, j->index, arg, j->deadline_ms, M11_SPAWN_NO_KILL, &status);
         return rc ? rc : status ? -ECHILD : 0; /* a stuck job is never killed */
     }
     case M11_TD_CHECK: /* evidence or a helper's completion marker */
@@ -221,6 +238,17 @@ static int teardown_step(m11_entry *e, const m11_entry_job *j) {
     }
 }
 
+/* The first n steps in order, at most once per boot; nothing after a failed step. */
+static int run_steps(m11_entry *e, unsigned n) {
+    e->steps_started = 1;
+    for (unsigned i = 0; i < n; i++) {
+        e->teardown_step = (int)i + 1;
+        int rc = teardown_step(e, &e->cfg.teardown_jobs[i]);
+        if (rc) return rc;
+    }
+    return 0;
+}
+
 /* B5: called by the G8 orderly end only, after both final closes and its record. */
 static int entry_teardown(void *u) {
     m11_entry *e = u;
@@ -236,14 +264,46 @@ static int entry_teardown(void *u) {
     int rc = m11_pdmon_retire(&e->pdmon, c->pd_retire_budget_ms);
     phase_record(e, "phase=teardown pd_retire=%d steps=%u", rc, c->teardown_count); /* the last record */
     if (rc) return e->teardown_rc = rc;
-    for (unsigned i = 0; i < c->teardown_count; i++) {
-        const m11_entry_job *j = &c->teardown_jobs[i];
-        e->teardown_step = (int)i + 1;
-        if ((rc = teardown_step(e, j))) return e->teardown_rc = rc; /* nothing after a failed step */
-    }
+    e->result = "green";
+    if ((rc = run_steps(e, c->teardown_count))) return e->teardown_rc = rc;
     e->teardown_step = (int)c->teardown_count + 1;
     if ((rc = m11_spawner_stop(&e->boot.spawner))) return e->teardown_rc = rc;
     return e->teardown_rc = 0;
+}
+
+/* R1: a pre-bind failure tears down as Run23 did before its CYAN reboot. Nothing audio was opened;
+ * the spawner is forked here if the failure came before P2 forked it (still before any open). */
+static int fail_teardown(m11_entry *e) {
+    const m11_entry_config *c = &e->cfg;
+    if (!nothing_opened(e) || e->steps_started) return e->teardown_rc = -EPERM; /* defence in depth */
+    int src = 0, prc = 0, rc;
+    if (e->boot.spawner.pid <= 0 &&
+        (src = m11_spawner_start(&e->boot.spawner, c->boot.spawner_commands, c->boot.spawner_count,
+                                 c->boot.spawner_require_drop != 0))) {
+        e->boot.spawner.sock = -1; e->boot.spawner.pid = 0;
+    }
+    const char *pd = "none";
+    if (e->pdmon.fd >= 0 && e->pdmon.pds.phase == M11_PDS_READY) {
+        pd = "ready"; prc = m11_pdmon_retire(&e->pdmon, c->pd_retire_budget_ms);
+    } else if (e->pdmon.fd >= 0) { /* never READY: nothing to withdraw, the socket only closed */
+        pd = "closed"; (void)close(e->pdmon.fd); e->pdmon.fd = -1;
+    }
+    phase_record(e, "phase=teardown fail=1 spawner=%d pd=%s pd_retire=%d steps=%u", src, pd, prc, c->teardown_count);
+    if (src) return e->teardown_rc = src;
+    if (prc) return e->teardown_rc = prc;
+    e->result = "cyan";
+    if ((rc = run_steps(e, c->teardown_count))) return e->teardown_rc = rc;
+    e->teardown_step = (int)c->teardown_count + 1;
+    if ((rc = m11_spawner_stop(&e->boot.spawner))) return e->teardown_rc = rc;
+    return e->teardown_rc = 0;
+}
+
+/* D2: before a retaining exit, only the steps that seal the evidence; the exit follows regardless. */
+static void seal_before_exit(m11_entry *e) {
+    const m11_entry_config *c = &e->cfg;
+    if (!c->teardown_count || e->steps_started || e->boot.spawner.pid <= 0) return;
+    phase_record(e, "phase=seal steps=%u", c->seal_count);
+    e->seal_rc = run_steps(e, c->seal_count);
 }
 
 int m11_entry_run(m11_entry *e, const m11_entry_config *cfg) {
@@ -251,10 +311,12 @@ int m11_entry_run(m11_entry *e, const m11_entry_config *cfg) {
         cfg->pd_ready_budget_ms > 10000u || !cfg->hold_idle_ms || !cfg->terminal_ops.exit_fn ||
         !cfg->terminal_ops.reboot_fn ||
         (cfg->teardown_count && (!cfg->teardown_jobs || !cfg->terminal_ops.hold_fn || !cfg->pd_retire_budget_ms ||
-                                 cfg->pd_retire_budget_ms > M11_PDS_TXN_TIMEOUT_MS))) return -EINVAL;
+                                 cfg->pd_retire_budget_ms > M11_PDS_TXN_TIMEOUT_MS || !cfg->seal_count ||
+                                 cfg->seal_count > cfg->teardown_count))) return -EINVAL;
     for (unsigned i = 0; i < cfg->teardown_count; i++) { /* every step well formed before anything starts */
         const m11_entry_job *j = &cfg->teardown_jobs[i];
         if (j->kind == M11_TD_JOB ? !j->arg || j->index >= cfg->boot.spawner_count :
+            j->kind == M11_TD_RESULT ? j->index >= cfg->boot.spawner_count :
             j->kind == M11_TD_REAP ? j->slot >= M11_ENTRY_HELPERS || !j->deadline_ms :
             (j->kind == M11_TD_CHECK || j->kind == M11_TD_CREATE) ? !j->arg : 1) return -EINVAL;
     }

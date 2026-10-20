@@ -108,6 +108,14 @@ ENTRY_OK = [B + 'phase=journal pid=1 kmsg=1',
             TERM_OK,
             B + 'phase=teardown pd_retire=0 steps=11']
 STOCK = ('1', 'absent', 'absent')
+SEAL = B + 'phase=seal steps=3'
+FAIL_TD = B + 'phase=teardown fail=1 spawner=0 pd=ready pd_retire=0 steps=11'
+RETAIN = (TERM_OK.replace('ORDERLY_SHUTDOWN end=reboot', 'RESET_RETAINING_ANCHORS end=pid1_exit')
+          .replace('note=never_mapped', 'note=mapped_boot'))
+PREBIND = ('<6>M11TERMINAL v=2 boot=4242 action=START_FAILED end=reboot phase=pd_up step=4 rc=-102 anchors_held=0/2 '
+           'boot_stage=0 note=entry_failed')
+RUNFAIL = ('<6>M11TERMINAL v=2 boot=4242 action=START_FAILED end=pid1_exit step=2 anchor_fds_open=4/4 pool=none heap_open=1 '
+           'note=start_failed')
 
 
 def verdict(lines, stock=STOCK, **kw):
@@ -153,15 +161,20 @@ def test_checker():
         ('PD withdrawal failed', ENV_OK + ENTRY_OK[:7] + [B + 'phase=teardown pd_retire=-110 steps=11'], 'teardown-failed'),
         ('teardown list not Run23', ENV_OK + ENTRY_OK[:7] + [B + 'phase=teardown pd_retire=0 steps=7'], 'teardown-steps-differ'),
         ('terminal after the teardown', ENV_OK + ENTRY_OK[:6] + [ENTRY_OK[7], ENTRY_OK[6]], 'record-order'),
-        ('retaining end', ENV_OK + ENTRY_OK[:6] + [B + 'phase=hold action=HOLD',
-                                                  TERM_OK.replace('ORDERLY_SHUTDOWN end=reboot', 'RESET_RETAINING_ANCHORS end=pid1_exit')
-                                                  .replace('note=never_mapped', 'note=mapped_boot')], 'retaining-end'),
-        ('start failed before a bind', ENV_OK + ENTRY_OK[:2] + [
-            '<6>M11TERMINAL v=2 boot=4242 action=START_FAILED end=reboot phase=pd_up step=4 rc=-102 anchors_held=0/2 '
-            'boot_stage=0 note=entry_failed'], 'start-failed-reboot'),
-        ('runner start failed', ENV_OK + ENTRY_OK[:4] + [
-            '<6>M11TERMINAL v=2 boot=4242 action=START_FAILED end=pid1_exit step=2 anchor_fds_open=4/4 pool=none heap_open=1 '
-            'note=start_failed'], 'start-failed-pid1_exit'),
+        ('retaining end, sealed (D2)', ENV_OK + ENTRY_OK[:6] + [B + 'phase=hold action=HOLD', RETAIN, SEAL], 'retaining-end'),
+        ('retaining end without the seal', ENV_OK + ENTRY_OK[:6] + [B + 'phase=hold action=HOLD', RETAIN], 'retaining-end-unsealed'),
+        ('seal before the terminal record', ENV_OK + ENTRY_OK[:6] + [SEAL, RETAIN], 'record-order'),
+        ('seal list not Run23', ENV_OK + ENTRY_OK[:6] + [RETAIN, B + 'phase=seal steps=2'], 'seal-steps-differ'),
+        ('start failed before a bind, sealed teardown (R1)', ENV_OK + ENTRY_OK[:2] + [PREBIND, FAIL_TD], 'start-failed-reboot'),
+        ('start failed before a bind, unsealed', ENV_OK + ENTRY_OK[:2] + [PREBIND], 'start-failed-unsealed'),
+        ('failure teardown: spawner refused', ENV_OK + ENTRY_OK[:2] + [PREBIND, FAIL_TD.replace('spawner=0', 'spawner=-1')], 'teardown-failed'),
+        ('failure teardown: PD withdrawal failed', ENV_OK + ENTRY_OK[:2] + [PREBIND, FAIL_TD.replace('pd_retire=0', 'pd_retire=-110')], 'teardown-failed'),
+        ('failure teardown list not Run23', ENV_OK + ENTRY_OK[:2] + [PREBIND, FAIL_TD.replace('steps=11', 'steps=7')], 'teardown-steps-differ'),
+        ('failure teardown with a seal record', ENV_OK + ENTRY_OK[:2] + [PREBIND, FAIL_TD, SEAL], 'record-order'),
+        ('pre-bind reboot sealed like an exit', ENV_OK + ENTRY_OK[:2] + [PREBIND, SEAL], 'record-order'),
+        ('runner start failed, sealed', ENV_OK + ENTRY_OK[:4] + [RUNFAIL, SEAL], 'start-failed-pid1_exit'),
+        ('runner start failed, unsealed', ENV_OK + ENTRY_OK[:4] + [RUNFAIL], 'start-failed-pid1_exit-unsealed'),
+        ('orderly end with a failure teardown', ENV_OK + ENTRY_OK[:7] + [FAIL_TD], 'orderly-shape-invalid'),
         ('no terminal record', ENV_OK + ENTRY_OK[:6], 'terminal-missing'),
         ('no entry at all', ENV_OK, 'entry-missing'),
     ]
@@ -187,10 +200,18 @@ def test_checker():
     assert C.stock_tokens('allowed=1 len=1177 strict=absent passthrough=absent crc32=0badc0de\n') == STOCK
     expect_error(C.stock_tokens, 'allowed=1 strict=absent', contains='stock-summary-invalid')
     print('PASS P4 check: the identity is required, the host receipt binds the raw hash, the stock summary is parsed strictly')
+    # R1(c): an unsealed capture is never a PASS; its records are classified for diagnosis only
+    cut = capture(kmsg(ENV_OK + ENTRY_OK[:2] + [PREBIND]), final=False)
+    _, r = C.check(cut, JN, JI, STOCK)
+    assert r['p4_verdict'] == 'transport-invalid' and not r['p4_expected'] and r['p4_diagnostic'] == 'start-failed-unsealed', r
+    assert r['p4_diagnostic_strict'] is False
+    _, r = C.check(capture(kmsg(ENV_OK + ENTRY_OK), final=False), JN, JI, STOCK)
+    assert r['p4_diagnostic'] == 'never-mapped-orderly' and not r['p4_expected'] and r['p4_verdict'] == 'transport-invalid', r
+    print('PASS P4 check diagnostic mode: an unsealed capture is classified from the records ahead of the break, never expected')
 
 
 # C writer cases (test-entry-native.c, keep_as) and the verdict each must get.
-C_CASES = {'helpers-ok': 'never-mapped-orderly', 'never-mapped-td7': 'teardown-steps-differ',
+C_CASES = {'helpers-ok': 'never-mapped-orderly', 'never-mapped-td7': 'never-mapped-orderly',
            'map-hold': 'retaining-end', 'intent-after-close': 'retaining-end',
            'cmdline-refused': 'start-failed-reboot', 'reboot-fails': 'reboot-failed',
            'boot-after-bind': 'start-failed-pid1_exit', 'teardown-no-unreg': 'teardown-failed'}
@@ -215,6 +236,12 @@ def test_c_writers(directory, required):
         if want == 'never-mapped-orderly':
             assert verdict(ENV_OK + lines, stock=stock)[0] == 'orderly-shape-invalid', (case, lines)
         lines[journal[0]] = re.sub(r'pid=[0-9]+ kmsg=0$', 'pid=1 kmsg=1', lines[journal[0]])
+        # the fixture's 7-step list (td_basic, seal_count 2) against production's 11 and 3
+        sized = [re.sub(r'( phase=teardown .*steps=)7$', r'\g<1>11', re.sub(r' phase=seal steps=2$', ' phase=seal steps=3', ln))
+                 for ln in lines]
+        if sized != lines:  # (reboot-failed outranks the list size)
+            assert verdict(ENV_OK + lines, stock=stock)[0] in ('teardown-steps-differ', 'seal-steps-differ', 'reboot-failed'), (case, lines)
+            lines = sized
         got, r = verdict(ENV_OK + lines, stock=stock)
         assert got == want, (case, want, got, r['p4'], lines)
         found += 1
@@ -239,6 +266,10 @@ def test_sources():
 
 
 if __name__ == '__main__':
+    if sys.argv[1:2] == ['--write-fixture']:  # the expected-shape capture for the Windows receiver test
+        Path(sys.argv[2]).write_bytes(capture(kmsg(ENV_OK + ENTRY_OK)))
+        print(f'wrote the synthetic P4 capture {sys.argv[2]}')
+        raise SystemExit(0)
     test_checker()
     if len(sys.argv) > 1:
         test_c_writers(sys.argv[1], '--require-c' in sys.argv[2:])

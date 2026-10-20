@@ -108,3 +108,20 @@ jobs:
         with:
           name: p4-relay-elf-${{ github.sha }}
           path: artifacts/m11/p4-elf
+  # Run25 readiness R2: the P4 host side on Windows (the Run23 receiver over a synthetic P4 capture,
+  # the M11R25 observer identity, the launcher's PlanOnly branch). No phone tool, no COM port opened.
+  p4-windows-host:
+    needs: suites
+    runs-on: windows-2025
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Receiver, observer identity and launcher plan (no phone tool)
+        shell: pwsh
+        run: |
+          python scripts/m11/anchor-native/p4/test-p4-check.py --write-fixture p4-fixture.bin
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          pwsh -NoProfile -File scripts/m11/anchor-native/p4/test-host-reader.ps1 -Fixture p4-fixture.bin
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $env:M11_PWSH='pwsh'; python scripts/m11/anchor-native/p4/test-launch.py
+          if ($LASTEXITCODE -ne 0) { exit 1 }

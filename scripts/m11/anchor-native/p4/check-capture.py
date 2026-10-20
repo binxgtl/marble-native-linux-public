@@ -11,7 +11,12 @@ Two layers, both fail closed, no healing or resynchronization:
        journal kmsg=1, cmdline allowed=1, pd_up rc=0, boot rc=0, runner, session present=0 rc=0
        intents=0, no M11INTENT, the G8 record action=ORDERLY_SHUTDOWN end=reboot note=never_mapped
        with nothing held, then teardown pd_retire=0 steps=11 as the last P4 record.
-     Anything else is reported by category; nothing is inferred from a missing record.
+     Anything else is reported by category; nothing is inferred from a missing record. Every other
+     end must be sealed too (Run25 readiness R1/D2): a pre-bind START_FAILED reboot by the failure
+     teardown record (fail=1) last, every PID1 exit by the seal record last; without it the verdict
+     is *-unsealed.
+  R1(c): when the transport is incomplete, the records ahead of the break are classified as
+  p4_diagnostic (never strict, never expected).
   B3: with --stock-summary, the candidate's cmdline verdict and the two token values must equal the
   stock capture's (length and CRC may differ through boot-varying tokens and are never compared).
 
@@ -165,10 +170,16 @@ PHASES = {
     'runner': re.compile(r'stage=' + INT + r' why=' + NAT + r' pool=' + NAT),
     'session': re.compile(r'present=([01]) rc=' + INT + r' intents=' + NAT),
     'hold': re.compile(r'action=' + ACTION),
-    'teardown': re.compile(r'(?:pd_retire=' + INT + r' steps=' + NAT + r'|refused=1 intents=' + NAT + r' census_failed=' + INT + r')'),
+    # orderly (pd_retire, steps), refused (the gate), or R1's pre-bind failure teardown (fail=1)
+    'teardown': re.compile(r'(?:pd_retire=(?P<prc>-?[0-9]+) steps=(?P<steps>0|[1-9][0-9]*)'
+                           r'|refused=1 intents=(?P<intents>0|[1-9][0-9]*) census_failed=-?[0-9]+'
+                           r'|fail=1 spawner=(?P<spawner>-?[0-9]+) pd=(?P<pd>ready|closed|none) pd_retire=(?P<fprc>-?[0-9]+)'
+                           r' steps=(?P<fsteps>0|[1-9][0-9]*))'),
+    'seal': re.compile(r'steps=(?P<seal>0|[1-9][0-9]*)'),  # D2: before every retaining exit
     'reboot_failed': re.compile(r'rc=' + INT),
 }
-ORDER = ('journal', 'cmdline', 'pd_up', 'boot', 'runner', 'session', 'hold', 'teardown')
+ORDER = ('journal', 'cmdline', 'pd_up', 'boot', 'runner', 'session', 'hold', 'teardown', 'seal')
+TEARDOWN_STEPS, SEAL_STEPS = '11', '3'  # Run23's whole sequence; seal, the relay reaped, logger.done
 INTENT = re.compile(r'M11INTENT v=1 boot=([1-9][0-9]*) seq=' + NAT + r' op=([0-9a-f]{8}) tok=([0-9a-f]{8}) cd=' + NAT +
                     r' dst=([0-9a-f]{8})(?: (?:fd=[0-9]+ msw=[0-9]+ bytes=[0-9]+ pool=[0-9]+ regions=[0-9]+ flags=[0-9a-f]+'
                     r'|handle=[0-9a-f]{8}|pl=[0-9]+))?')
@@ -219,7 +230,8 @@ def parse_record(message):
         rule = PHASES.get(phase)
         if not rule or not rule.fullmatch(body):
             raise RecordError('entry-record-invalid')
-        return 'entry', dict(boot=m[1], phase=phase, body=body, groups=rule.fullmatch(body).groups())
+        g = rule.fullmatch(body)
+        return 'entry', dict(boot=m[1], phase=phase, body=body, groups=g.groups(), named=g.groupdict())
     m = INTENT.fullmatch(message)
     if m:
         return 'intent', dict(boot=m[1], seq=int(m[2]), op=m[3])
@@ -310,27 +322,48 @@ def classify(records, stock=None):
         return 'b3-cmdline-differs', d
     if 'reboot_failed' in by:
         return 'reboot-failed', d
-    if t['action'] == 'START_FAILED':
-        return 'start-failed-' + t['end'], d
-    if t['action'] != 'ORDERLY_SHUTDOWN' or t['end'] != 'reboot':
-        return 'retaining-end', d
+    td, seal = by.get('teardown'), by.get('seal')
+    if td is not None and seal is not None:
+        return 'record-order', d
+    last = entry[-1]
+    if t['end'] == 'pid1_exit':  # D2: sealed before every retaining exit, the seal record last
+        verdict = 'start-failed-pid1_exit' if t['action'] == 'START_FAILED' else 'retaining-end'
+        if td is not None or seal is None:
+            return verdict + '-unsealed', d
+        if last is not seal or entry.index(t) > entry.index(seal):
+            return 'record-order', d
+        return (verdict if seal['named']['seal'] == SEAL_STEPS else 'seal-steps-differ'), d
+    if seal is not None:
+        return 'record-order', d
+    if t['action'] == 'START_FAILED':  # R1: the pre-bind reboot follows Run23's sealed teardown
+        if td is None or td['named']['fsteps'] is None:
+            return 'start-failed-unsealed', d
+        if last is not td or entry.index(t) != len(entry) - 2:
+            return 'record-order', d
+        d['teardown'] = td['body']
+        n = td['named']
+        if n['spawner'] != '0' or n['fprc'] != '0':
+            return 'teardown-failed', d
+        return ('start-failed-reboot' if n['fsteps'] == TEARDOWN_STEPS else 'teardown-steps-differ'), d
+    if t['action'] != 'ORDERLY_SHUTDOWN':
+        return 'record-order', d  # every other action ends by PID1 exit
     expect = {'journal': ('1', '1'), 'session': ('0', '0', '0')}
     if (phases != ['journal', 'cmdline', 'pd_up', 'boot', 'runner', 'session', 'teardown'] or d['intents'] or
             by['journal']['groups'] != expect['journal'] or by['cmdline']['groups'][0] != '1' or
             by['pd_up']['groups'][0] != '0' or by['boot']['groups'][:2] != ('0', '0') or
-            by['session']['groups'] != expect['session'] or
+            by['session']['groups'] != expect['session'] or td['named']['fsteps'] is not None or
             t['note'] != 'never_mapped' or t['anchors_held'] or t['fds_open'] or t['map_attempted'] or t['unmap_attempted'] or
             t['regions'] or t['pool'] == 'NOT_HELD'):
         return 'orderly-shape-invalid', d
-    td = by['teardown']['groups']
-    d['teardown'] = by['teardown']['body']
-    if td[0] is None:
+    n = td['named']
+    d['teardown'] = td['body']
+    if n['intents'] is not None:
         return 'teardown-refused', d
-    if td[0] != '0':
+    if n['prc'] != '0':
         return 'teardown-failed', d
-    if td[1] != '11':  # Run23's whole sequence: 11 steps
+    if n['steps'] != TEARDOWN_STEPS:
         return 'teardown-steps-differ', d
-    if entry[-1] is not by['teardown'] or entry.index(t) != len(entry) - 2:
+    if last is not td or entry.index(t) != len(entry) - 2:
         return 'record-order', d
     return 'never-mapped-orderly', d
 
@@ -338,12 +371,19 @@ def classify(records, stock=None):
 def check(data, nonce, identity, stock=None):
     streams, kbodies, report = decode(data, nonce, identity)
     verdict, details = 'transport-invalid', {}
-    if report['event_stream_complete']:
-        try:
+    diagnostic = None
+    try:
+        if report['event_stream_complete']:
             verdict, details = classify(p4_records(kbodies), stock)
-        except RecordError as exc:
+        elif kbodies:  # R1(c): the records ahead of the transport error, for classification only
+            diagnostic, _ = classify(p4_records(kbodies), stock)
+    except RecordError as exc:
+        if report['event_stream_complete']:
             verdict = str(exc)
-    report.update(p4_verdict=verdict, p4=details, p4_expected=verdict == 'never-mapped-orderly')
+        else:
+            diagnostic = str(exc)
+    report.update(p4_verdict=verdict, p4=details, p4_expected=verdict == 'never-mapped-orderly',
+                  p4_diagnostic=diagnostic, p4_diagnostic_strict=False)
     return streams, report
 
 

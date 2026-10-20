@@ -37,6 +37,16 @@
  *      (P4, Run23's sequence: seal, the relay reaped, logger.done, usb_stop, stop_adsp, pd.stop, the
  *      locator reaped, pd.done, common, the checkpoint, unmount), the spawner is stopped. Any refused
  *      gate or failed step holds (hold_fn): no reboot, no exit, nothing more is run.
+ * Run25 readiness R1/D2 (docs/m11-argon-run25-readiness.md): every other end also seals the evidence,
+ * as Run23 sealed before every reboot (CYAN included):
+ *   - a pre-bind failure (the reboot end) runs the same steps after its START_FAILED record: the PD
+ *     listener withdrawn when READY (its socket only closed otherwise), one "phase=teardown fail=1"
+ *     record, the steps with the RESULT checkpoint "cyan", the spawner stopped (started first when
+ *     the failure came before P2 forked it, which is still before any open); a failed step holds;
+ *   - before every retaining exit (a post-bind START_FAILED, the runner's partial start, the G8
+ *     retaining end) one "phase=seal" record, then only the first seal_count steps (production: seal,
+ *     the relay reaped, logger.done); the anchors stay held and the exit follows whatever they return.
+ *   The steps start at most once per boot (Run23: never append past an attempted final digest).
  * Not here: the PID1 environment (mounts, ADSP start, USB, the post-seal jobs the spawner runs) is a
  * precondition, part of a later candidate step. /dev must not be a devtmpfs that already holds the
  * audio nodes: P2 refuses a node that exists.
@@ -57,8 +67,10 @@ typedef struct m11_entry m11_entry;
  *  CHECK  `arg` must be a regular file reading "1\n" (Run23 logger.done / pd.done);
  *  CREATE marker `arg` made O_EXCL with "1\n" (Run23 pd.stop);
  *  REAP   helper_pids[slot] must exit with status 0 within deadline_ms (never killed; a timeout,
- *         a signal or a non-zero status is a failure). */
-enum { M11_TD_JOB, M11_TD_CHECK, M11_TD_CREATE, M11_TD_REAP };
+ *         a signal or a non-zero status is a failure);
+ *  RESULT spawner command `index` with the boot's result as its argument ("green" after the orderly
+ *         end, "cyan" after a pre-bind failure: Run23's checkpoint colours), as JOB otherwise. */
+enum { M11_TD_JOB, M11_TD_CHECK, M11_TD_CREATE, M11_TD_REAP, M11_TD_RESULT };
 typedef struct { int kind; const char *arg; uint32_t deadline_ms; unsigned index, slot; } m11_entry_job;
 #define M11_ENTRY_HELPERS 2u /* P4: 0 the PD locator (m11-pd-mapper), 1 the kmsg relay */
 
@@ -85,6 +97,8 @@ typedef struct {
      * checkpoint, unmount. 0 steps: no teardown (the orderly end reboots after its record). */
     const m11_entry_job *teardown_jobs;
     unsigned teardown_count;
+    unsigned seal_count;             /* R1/D2: the leading steps that seal the evidence (production 3:
+                                      * seal, the relay reaped, logger.done); 1..teardown_count */
     pid_t helper_pids[M11_ENTRY_HELPERS]; /* P4 environment helpers (0: none; a REAP of it fails) */
     uint32_t pd_retire_budget_ms;    /* 1..2000 */
     const char *proc_root;           /* NULL = "/proc" (runner tree census) */
@@ -109,6 +123,9 @@ struct m11_entry {
     m11_crunner runner;
     int session_rc, reboot_rc;
     int teardown_step, teardown_rc;  /* B5: last step reached (0 retire, 1..n steps, n+1 spawner stop) */
+    int steps_started;               /* R1/D2: the steps (the seal first) have started in this boot */
+    int seal_rc;                     /* D2: the pre-exit seal (0, or the failed step's -errno) */
+    const char *result;              /* the RESULT checkpoint argument */
     unsigned hold_rounds;
     unsigned records, record_failures; /* entry records written / refused by the sink */
     char record[M11_INTENT_RECORD_MAX + 96];
