@@ -48,9 +48,10 @@ if gcc -std=c11 -I "$own" -I "$repair" -c "$here/terminal_core.c" -o "$out/termi
   echo "ERROR: terminal_core compiled with no build mode" >&2; exit 1
 fi
 echo 'PASS terminal_core refuses to build without M11_ANCHOR_NATIVE or M11_OWNERSHIP_OFFLINE'
-# Cross-check: the native terminal core decides a boot's end IDENTICALLY to the frozen,
-# CI-qualified offline custodian over the never-mapped state space (terminal decisions and
-# the cmdline gate). Offline mode links both in one program; the custodian is unchanged.
+# Cross-check: over the never-mapped state space (terminal decisions and the cmdline gate) the
+# native terminal core decides a boot's end IDENTICALLY to the CI-qualified offline custodian,
+# both linked into one program in offline mode. The custodian's post-MAP hold (rev 5) lies
+# outside that space (a mapped boot always ends retaining; Run24 never maps).
 tc_units=(m11_gpr_engine m11_shmem m11_apm_protocol m11_aw_protection m11_strict_mock)
 for tc_mode in gcc clang sanitize; do
   tc_cc=gcc
@@ -149,11 +150,6 @@ pmh_mutant proof-forged shmem 'm11_shmem_cause_t cause = M11_SHMEM_CAUSE_MAP_WRI
 pmh_mutant proof-never-set shmem 'out_region->map_tx_unsent_proof = true;' '            (void)0;' \
   'pre.map_tx_started && pre.map_tx_unsent_proof && pre.state == M11_SHMEM_STATE_RELEASED' \
   'PASS T7 UNMAP research path (driven directly): ACK, late ACK and LOCAL_RELEASE_PENDING never release a transmitted region'
-# T10: no production anchor-native source names the SysRq trigger (the independent review's bypass:
-# an 'b'/'c' write would end the boot outside the custodian's terminal decision).
-sysrq_hits="$(grep -rIl -i --exclude='test*' --exclude='*.md' sysrq "$here" || true)"
-if [[ -n "$sysrq_hits" ]]; then echo "ERROR: SysRq named in production anchor-native sources: $sysrq_hits" >&2; exit 1; fi
-echo 'PASS no production anchor-native source names the SysRq trigger'
 # G1 (docs/m11-custodian-native-integration.md): the reviewed M11_CUSTODIAN_NATIVE build mode. It
 # selects the build only (no native backend yet); custodian, anchor and terminal core share one
 # terminal enum and one boot ledger.
@@ -486,7 +482,7 @@ g7_mutant no-ledger-check 'if ((h.opcode == M11_APM_CMD_SHARED_MEM_MAP_REGIONS &
 g7_mutant close-all-allowed "return -EPERM; /* outside the custodian's set" '        break;' \
   'm11_intent_format(rec, sizeof rec, 7, 3, pkt, pl) == -EPERM' ''
 # Post-MAP hold L2: an UNMAP is never journaled, so never transmitted (design M4).
-g7_mutant journal-allows-unmap 'return -EPERM; /* CP2 post-MAP hold: no UNMAP ever leaves PID1' '        break;' \
+g7_mutant journal-allows-unmap 'return -EPERM; /* CP2 post-MAP hold L2: no UNMAP is journaled' '        break;' \
   'un == -EPERM' ''
 # G8: the native end of a custodian boot over real adapters (stand-ins), the real owner seal and the
 # real custodian, manager and engine; test exit/reboot hooks report the fds at the moment of the end.
@@ -791,6 +787,101 @@ for f in custodian_entry_native.c custodian_entry_main.c p4_env_native.c; do
   fi
 done
 echo 'PASS production P3 PID1 entry (gcc, clang, ASan+UBSan, root when sudo); the PID1 binary links and returns 2 outside PID1; refused outside M11_CUSTODIAN_NATIVE'
+# T10 (R4 rule; docs/m11-argon-cp2-c5-hold-design.md): nothing the P4 PID1 runs names the SysRq trigger
+# (a 'b'/'c' write would end the boot outside the custodian's terminal decision).
+#  - source layer: every production anchor-native file; every unit p4/build.sh compiles into the PID1
+#    (read from build.sh itself and required to equal the x64 PID1 linked above) with every header
+#    they include, transitively; the relay; every repository script the P4 payload ships
+#    (public-payload.py REPO_SOURCES) and the Run14 journal.sh it reuses;
+#  - binary layer: the strings of the linked x64 PID1 (gcc, clang), which also show literals the
+#    compiler joins ("/proc/sys" "rq-trigger");
+#  - a self-test per layer. A name assembled at run time evades both layers (review residual).
+t10_scan() { LC_ALL=C grep -Il -i sysrq "$@" || true; }
+t10_bin() { LC_ALL=C grep -a -c -i sysrq "$1" || true; }
+sysrq_hits="$(grep -rIl -i --exclude='test*' --exclude='*.md' sysrq "$here" || true)"
+if [[ -n "$sysrq_hits" ]]; then echo "ERROR: SysRq named in production anchor-native sources: $sysrq_hits" >&2; exit 1; fi
+t10_block="$(sed -n '/^ pid1)/,/^  for variant/p' "$here/p4/build.sh")"
+t10_units=()
+for tok in $(printf '%s\n' "$t10_block" | grep -oE '[A-Za-z0-9_]+' | sort -u); do
+  for d in "$repair" "$own" "$here"; do [[ -f "$d/$tok.c" ]] && t10_units+=("$d/$tok.c"); done
+done
+t10_a="$(for f in "${t10_units[@]}"; do basename "$f"; done | sort)"
+t10_b="$(for f in "${p3_main[@]}"; do basename "$f"; done | sort)"
+if [[ "${#t10_units[@]}" -lt 20 || "$t10_a" != "$t10_b" ]]; then
+  echo "ERROR: T10: the p4/build.sh PID1 units differ from the x64 PID1 linked above" >&2
+  diff <(printf '%s\n' "$t10_a") <(printf '%s\n' "$t10_b") >&2 || true; exit 1
+fi
+t10_files=("${t10_units[@]}" "$here/p4/kmsg-relay.c"); t10_queue=("${t10_files[@]}"); t10_seen=" "
+while ((${#t10_queue[@]})); do
+  f="${t10_queue[0]}"; t10_queue=("${t10_queue[@]:1}")
+  for h in $(sed -n 's/^#include "\([^"]*\)".*/\1/p' "$f"); do
+    p=""; for d in "$(dirname "$f")" "$repair" "$own" "$here"; do [[ -f "$d/$h" ]] && { p="$d/$h"; break; }; done
+    if [[ -z "$p" ]]; then echo "ERROR: T10: $(basename "$f") includes $h, not found" >&2; exit 1; fi
+    p="$(cd "$(dirname "$p")" && pwd)/$(basename "$p")" # one path per file ("../" includes)
+    [[ "$t10_seen" == *" $p "* ]] && continue
+    t10_seen+="$p "; t10_files+=("$p"); t10_queue+=("$p")
+  done
+done
+t10_headers=$(( ${#t10_files[@]} - ${#t10_units[@]} - 1 ))
+# The repository scripts the P4 payload ships (p4/public-payload.py REPO_SOURCES; that file is not in the
+# public export, so the list is declared here and compared with it wherever it exists) and the Run14
+# journal.sh it reuses. run16/haptics-suppliers is never exported: frozen and scope-guard locked, it is
+# scanned in the private tree and is the only input allowed to be absent.
+t10_shipped=(scripts/m11/anchor-native/p4/init scripts/m11/anchor-native/p4/prepare scripts/m11/anchor-native/p4/usb
+             scripts/m11/run16/haptics-suppliers scripts/m11/run19/amp-switch scripts/m11/run23/amp-gate
+             scripts/m11/run23/control)
+t10_private_only=scripts/m11/run16/haptics-suppliers
+if [[ -f "$here/p4/public-payload.py" ]]; then
+  t10_declared="$(python3 -I - "$here/p4/public-payload.py" <<'PY'
+import ast, sys
+tree = ast.parse(open(sys.argv[1], encoding="utf-8").read())
+maps = [ast.literal_eval(n.value) for n in tree.body
+        if isinstance(n, ast.Assign) and any(getattr(t, "id", None) == "REPO_SOURCES" for t in n.targets)]
+if len(maps) == 1:
+    print("\n".join(sorted(set(maps[0].values()))))
+PY
+)"
+  if [[ "$t10_declared" != "$(printf '%s\n' "${t10_shipped[@]}" | LC_ALL=C sort)" ]]; then
+    echo "ERROR: T10: the shipped-script list differs from p4/public-payload.py REPO_SOURCES" >&2; exit 1
+  fi
+  t10_drift='checked against REPO_SOURCES'
+else
+  t10_drift='REPO_SOURCES not in this tree'
+fi
+t10_absent=()
+for s in "${t10_shipped[@]}" scripts/m11/instrumentation/journal.sh; do
+  if [[ -f "$root/$s" ]]; then t10_files+=("$root/$s")
+  elif [[ "$s" == "$t10_private_only" ]]; then t10_absent+=("$s")
+  else echo "ERROR: T10: shipped script $s missing" >&2; exit 1; fi
+done
+t10_hits="$(t10_scan "${t10_files[@]}")"
+if [[ -n "$t10_hits" ]]; then echo "ERROR: T10: SysRq named in P4 PID1 inputs: $t10_hits" >&2; exit 1; fi
+echo "PASS T10 source layer: no P4 PID1 input names the SysRq trigger (${#t10_units[@]} build.sh units, $t10_headers headers, the relay, $(( ${#t10_shipped[@]} - ${#t10_absent[@]} ))/${#t10_shipped[@]} shipped scripts ($t10_drift; not in this tree: ${t10_absent[*]:-none}) and journal.sh; every production anchor-native file)"
+for cm_cc in gcc clang; do
+  if [[ "$(t10_bin "$out/custodian-entry-$cm_cc")" != 0 ]]; then
+    echo "ERROR: T10: the linked PID1 ($cm_cc) carries a SysRq string" >&2; exit 1
+  fi
+done
+echo 'PASS T10 binary layer: the linked x64 PID1 (gcc, clang) carries no SysRq string'
+# Self-test: the source layer flags a P4 unit outside anchor-native and a shipped script; the binary
+# layer flags a split literal that the source layer cannot see.
+t10_mut="$out/t10-mutant"; mkdir -p "$t10_mut/src" "$t10_mut/bin"
+t10_source_mutant() { # original-path line
+  local orig="$1" copy="$t10_mut/src/$(basename "$1")" sub=() f got
+  { cat "$orig"; printf '%s\n' "$2"; } > "$copy"
+  for f in "${t10_files[@]}"; do [[ "$f" == "$orig" ]] && sub+=("$copy") || sub+=("$f"); done
+  got="$(t10_scan "${sub[@]}")"
+  if [[ "$got" != "$copy" ]]; then echo "ERROR: T10 source layer missed a SysRq name in $orig (got '$got')" >&2; exit 1; fi
+}
+t10_source_mutant "$own/m11_pid1_anchor.c" '/* T10 self-test: writes /proc/sysrq-trigger */'
+t10_source_mutant "$root/scripts/m11/run23/control" '# T10 self-test: echo b > /proc/sysrq-trigger'
+{ cat "$own/m11_pid1_anchor.c"; printf '%s\n' 'const char m11_t10_probe[] = "/proc/sys" "rq-trigger";'; } > "$t10_mut/bin/m11_pid1_anchor.c"
+t10_main=(); for f in "${p3_main[@]}"; do [[ "$f" == "$own/m11_pid1_anchor.c" ]] && t10_main+=("$t10_mut/bin/m11_pid1_anchor.c") || t10_main+=("$f"); done
+gcc "${p2_flags[@]}" "${t10_main[@]}" -o "$t10_mut/bin/pid1"
+if [[ -n "$(t10_scan "$t10_mut/bin/m11_pid1_anchor.c")" || "$(t10_bin "$t10_mut/bin/pid1")" == 0 ]]; then
+  echo "ERROR: T10 binary layer self-test: a split SysRq literal was not caught by the binary layer alone" >&2; exit 1
+fi
+echo 'PASS T10 self-test: the source layer flags an ownership unit and a shipped script; the binary layer flags a split literal the source layer cannot see'
 # P4 item 1: the environment phase (Run23's pre-owned path) over shell stand-ins and an ELF helper
 # stand-in; as root (sudo) the helpers drop to uid 65534 with no capabilities.
 gcc -std=c11 -O1 -Wall -Wextra -Werror "$here/test-p4-helper.c" -o "$out/p4-helper"

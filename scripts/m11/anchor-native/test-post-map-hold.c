@@ -8,7 +8,9 @@
  *      write, lost response, response without a handle, transport/PDR error)
  *   T6 a late MAP NACK through reconcile is held
  *   T7 the UNMAP research path (driven directly, no journal in this rig) never releases a transmitted region
- *   T8 a pre-TX failure releases, and only with proof that write_fn was never entered */
+ *   T8 a pre-TX failure releases, and only with proof that write_fn was never entered (alloc, import; submit
+ *      refused with the engine closed, PDR latched, token space exhausted or no slot)
+ *   T3b PD down while held is recorded as unknown through the region manager, with no UNMAP and no release */
 #ifndef M11_OWNERSHIP_OFFLINE
 #error "test-post-map-hold.c builds only in the offline qualification mode"
 #endif
@@ -203,7 +205,51 @@ int main(void) {
     assert(prc < 0 && eng.last_tx_status == M11_GPR_TX_NOT_ATTEMPTED && mock.map_cmd_count == 0);
     assert(pre.map_tx_started && pre.map_tx_unsent_proof && pre.state == M11_SHMEM_STATE_RELEASED);
     assert(mgr.active_dma_fds == 0 && mgr.active_mmaps == 0 && mgr.active_ion_imports == 0 && !mock_held());
-    puts("PASS T8 pre-TX failures (alloc, import, submit refused before write_fn) release; only NOT_ATTEMPTED is proof (write errors are held, T5)");
+    /* T8b: PDR latched before the submit (region manager driven directly: the custodian refuses a MAP on a
+     * latched engine before it records any intent) */
+    fixture(); memset(&pre, 0, sizeof pre);
+    eng.pdr_down = true;
+    prc = m11_shmem_alloc_and_map(&mgr, M11_SHMEM_MODE_DMA_ION_OFFSET, 4096, false, &pre);
+    printf("INFO pre-TX PDR rc=%d tx_status=%d state=%s\n", prc, (int)eng.last_tx_status, m11_shmem_state_name(pre.state));
+    assert(prc == -ENETRESET && eng.last_tx_status == M11_GPR_TX_NOT_ATTEMPTED && mock.map_cmd_count == 0 && mock.tx_pkt_count == 0);
+    assert(pre.map_tx_started && pre.map_tx_unsent_proof && pre.state == M11_SHMEM_STATE_RELEASED);
+    assert(mgr.active_dma_fds == 0 && mgr.active_mmaps == 0 && mgr.active_ion_imports == 0 && !mock_held());
+    assert(m11_shmem_note_pd_down(&mgr, &pre) == -EINVAL && pre.state == M11_SHMEM_STATE_RELEASED); /* never sent */
+    /* T8c: token space exhausted, through the custodian (the MAP intent is recorded first) */
+    fixture(); s = UINT_MAX;
+    eng.token_space_exhausted = true;
+    assert(m11_custodian_map(&c, 4096, ++now, &s) == -EOVERFLOW && s < M11_CUSTODIAN_REGIONS);
+    assert(eng.last_tx_status == M11_GPR_TX_NOT_ATTEMPTED && mock.map_cmd_count == 0 && mock.tx_pkt_count == 0);
+    r = &c.regions[s];
+    assert(r->map_tx_started && r->map_tx_unsent_proof && r->state == M11_SHMEM_STATE_RELEASED && !c.occupied[s]);
+    assert(mgr.active_dma_fds == 0 && mgr.active_mmaps == 0 && mgr.active_ion_imports == 0 && !mock_held());
+    assert(boot.dsp_map_attempted && m11_custodian_terminal_action(&c) == M11_TERMINAL_RESET_RETAINING_ANCHORS);
+    /* T8d: every engine slot reserved (region manager driven directly: the custodian refuses while any
+     * request is pending) */
+    fixture(); memset(&pre, 0, sizeof pre);
+    for (unsigned k = 0; k < M11_GPR_MAX_PENDING; k++) eng.slots[k].in_use = true;
+    prc = m11_shmem_alloc_and_map(&mgr, M11_SHMEM_MODE_DMA_ION_OFFSET, 4096, false, &pre);
+    assert(prc == -ENOSPC && eng.last_tx_status == M11_GPR_TX_NOT_ATTEMPTED && mock.map_cmd_count == 0 && mock.tx_pkt_count == 0);
+    assert(pre.map_tx_started && pre.map_tx_unsent_proof && pre.state == M11_SHMEM_STATE_RELEASED);
+    assert(mgr.active_dma_fds == 0 && mgr.active_mmaps == 0 && mgr.active_ion_imports == 0 && !mock_held());
+    puts("PASS T8 pre-TX failures (alloc, import; submit refused before write_fn: engine closed, PDR latched, token space exhausted, no slot) release; only NOT_ATTEMPTED is proof (write errors are held, T5)");
+
+    /* T3b: PD down while a transmitted region is held. The region manager records UNKNOWN (cause MAP_PDR)
+     * with no UNMAP and no release, once, and only on a PDR-latched engine. */
+    fixture(); s = UINT_MAX;
+    assert(m11_custodian_map(&c, 4096, ++now, &s) == 0);
+    r = &c.regions[s];
+    uint32_t tx1 = mock.tx_pkt_count;
+    assert(m11_shmem_note_pd_down(&mgr, r) == -EINVAL && r->state == M11_SHMEM_STATE_DSP_MAP_ACKNOWLEDGED); /* engine live */
+    eng.pdr_down = true;
+    assert(m11_shmem_note_pd_down(&mgr, r) == -ENETRESET);
+    assert(r->state == M11_SHMEM_STATE_OWNERSHIP_UNRESOLVED && r->cause == M11_SHMEM_CAUSE_MAP_PDR && r->blocker != NULL);
+    assert(held(r) && mock_held() && mock.tx_pkt_count == tx1 && mock.unmap_cmd_count == 0 && mgr.unresolved_regions == 1);
+    assert(m11_shmem_note_pd_down(&mgr, r) == -EINVAL && mgr.unresolved_regions == 1); /* once */
+    assert(m11_shmem_unmap_and_free(&mgr, r) == -EBUSY && held(r) && mock.unmap_cmd_count == 0);
+    m11_custodian_pd_down(&c, ++now);
+    assert(m11_custodian_terminal_action(&c) == M11_TERMINAL_RESET_RETAINING_ANCHORS && c.occupied[s]);
+    puts("PASS T3b PD down while held: recorded as unknown (OWNERSHIP_UNRESOLVED, cause MAP_PDR) with no UNMAP and no release; a live engine is refused");
 
     puts("PASS post-MAP hold layers (real custodian L1 and region manager L3; strict mock; offline)");
     return 0;

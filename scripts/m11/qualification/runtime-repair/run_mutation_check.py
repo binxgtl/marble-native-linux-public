@@ -195,6 +195,15 @@ MUTANTS = [
            "    rep->safety_ctx_is_hardware_evidence = false;",
            "    rep->safety_ctx_is_hardware_evidence = true; /* MUTANT */",
            "treat the caller-asserted context as hardware evidence"),
+    # ---- post-MAP hold (CP2 criterion 5): the simulator teardown and the PD-down record ------
+    Mutant("M29", "HOLD", "m11_offline_sim.c",
+           "    if (!hold && (all_cleanup_acked || gpr->pdr_down) &&",
+           "    if ((!hold || gpr->pdr_down) && (all_cleanup_acked || gpr->pdr_down) && /* MUTANT */",
+           "enter the UNMAP call on a latched PDR under the hold (quiet only through the engine latch)"),
+    Mutant("M30", "HOLD", "m11_shmem.c",
+           "    mark_unresolved(mgr, region, M11_SHMEM_CAUSE_MAP_PDR, -ENETRESET, M11_SHMEM_ORPHAN_NONE, 0u, B_PDR);",
+           "    (void)0; /* MUTANT: PD down while held not recorded */",
+           "leave a held region DSP_MAP_ACKNOWLEDGED after PD down"),
 ]
 
 

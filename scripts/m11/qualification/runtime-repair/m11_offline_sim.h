@@ -81,9 +81,12 @@ typedef struct {
      * the retaining reset. retaining_teardown: that end, with every graph STOP/CLOSE ACKed and
      * nothing unresolved, pending or outstanding. clean_teardown keeps its meaning (everything
      * released and the endpoint closed), so it is never true after a transmitted MAP.
+     * unmap_attempted: the teardown entered the UNMAP call (m11_shmem_unmap_and_free); never
+     * under the hold, a latched PDR included (that is recorded with m11_shmem_note_pd_down).
      */
     bool              post_map_hold;
     bool              retaining_teardown;
+    bool              unmap_attempted;
     const char       *simulation_boundary;
 } m11_sim_report_t;
 

@@ -86,11 +86,13 @@ typedef struct {
  *  ORDERLY_SHUTDOWN   clean, nothing mapped/open, endpoint already closed once, and no
  *                     region was ever DSP-mapped in this boot: reboot(2)/poweroff may
  *                     run device_shutdown().
- *  HOLD               clean but regions/graphs/endpoint still held: orderly teardown
- *                     first. reboot(2) is FORBIDDEN while anything is mapped:
- *                     device_shutdown() runs arm_smmu_device_shutdown() ("disabling
- *                     translation") and the ADSP remoteproc has no .shutdown.
- *  HOLD_RECONCILE     tainted, live owner, before the immutable deadline.
+ *  HOLD               never-mapped boot, clean, endpoint still open: the orderly close
+ *                     first (rev 5: a boot with any MAP intent never reaches HOLD, so no
+ *                     region or graph is ever waited for here). reboot(2) is FORBIDDEN
+ *                     while anything is mapped: device_shutdown() runs
+ *                     arm_smmu_device_shutdown() ("disabling translation") and the ADSP
+ *                     remoteproc has no .shutdown.
+ *  HOLD_RECONCILE     never-mapped boot, tainted, live owner, before the immutable deadline.
  *  RESET_RETAINING_ANCHORS
  *                     end the boot with the anchors still held: PID1 exits, which
  *                     panics before exit_files(); PANIC_TIMEOUT=-1 then calls

@@ -20,7 +20,7 @@ int m11_intent_format(char *buf, size_t cap, uint64_t epoch, uint32_t seq, const
         break;
     }
     case M11_APM_CMD_SHARED_MEM_UNMAP_REGIONS:
-        return -EPERM; /* CP2 post-MAP hold: no UNMAP ever leaves PID1 (no record, no TX) */
+        return -EPERM; /* CP2 post-MAP hold L2: no UNMAP is journaled (no record, no TX through the journal) */
     case M11_APM_CMD_GET_SPF_STATE:
     case M11_APM_CMD_GRAPH_OPEN: case M11_APM_CMD_GRAPH_PREPARE: case M11_APM_CMD_GRAPH_START:
     case M11_APM_CMD_GRAPH_STOP: case M11_APM_CMD_GRAPH_CLOSE:

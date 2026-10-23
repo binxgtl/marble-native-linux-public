@@ -733,7 +733,10 @@ static void test_gate_e_simulator_and_mutations(void) {
     assert(rep.primary_errno == -ENETRESET);
     assert(!rep.clean_teardown && !rep.retaining_teardown);
     assert(rep.final_shmem_state == M11_SHMEM_STATE_OWNERSHIP_UNRESOLVED);
-    assert(mock.unmap_cmd_count == 0u); /* on latched PDR the research call sends nothing */
+    assert(mock.unmap_cmd_count == 0u);
+    /* Post-MAP hold: PD down while held is recorded as unknown without entering the UNMAP call */
+    assert(rep.post_map_hold && !rep.unmap_attempted && rep.shmem_cause == M11_SHMEM_CAUSE_MAP_PDR);
+    assert(rep.cleanup_errno == -ENETRESET && rep.retained_region_valid && rep.endpoint_close_deferred);
 }
 
 int main(void) {

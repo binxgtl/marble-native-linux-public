@@ -647,6 +647,17 @@ int m11_shmem_unmap_and_free(m11_shmem_mgr_t *mgr, m11_shmem_region_t *region) {
     return release_local_handles(mgr, region);
 }
 
+int m11_shmem_note_pd_down(m11_shmem_mgr_t *mgr, m11_shmem_region_t *region) {
+    if (!mgr || !region || !mgr->gpr || !mgr->gpr->pdr_down) return -EINVAL;
+    if (!region->map_tx_started || region->map_tx_unsent_proof ||
+        region->state != M11_SHMEM_STATE_DSP_MAP_ACKNOWLEDGED) {
+        return -EINVAL;
+    }
+    /* No UNMAP, no release: only the ownership record changes (the handles stay held). */
+    mark_unresolved(mgr, region, M11_SHMEM_CAUSE_MAP_PDR, -ENETRESET, M11_SHMEM_ORPHAN_NONE, 0u, B_PDR);
+    return -ENETRESET;
+}
+
 int m11_shmem_reconcile(m11_shmem_mgr_t *mgr, m11_shmem_region_t *region, uint32_t timeout_ms) {
     if (!mgr || !region) return -EINVAL;
     if (region->state != M11_SHMEM_STATE_OWNERSHIP_UNRESOLVED) return -EINVAL;

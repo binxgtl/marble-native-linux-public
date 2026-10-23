@@ -112,7 +112,8 @@ typedef enum {
     M11_SHMEM_CAUSE_MAP_SHORT_WRITE,     /* write_fn short after MAP; packet fate unknown */
     M11_SHMEM_CAUSE_MAP_TIMEOUT,         /* MAP sent, no response inside the deadline */
     M11_SHMEM_CAUSE_MAP_TRANSPORT_ERR,   /* transport errno while waiting for the MAP response */
-    M11_SHMEM_CAUSE_MAP_PDR,             /* ENETRESET: remote state cannot be determined */
+    M11_SHMEM_CAUSE_MAP_PDR,             /* ENETRESET during the MAP, or PD down while a transmitted
+                                            MAP is held: remote state cannot be determined */
     M11_SHMEM_CAUSE_MAP_AMBIGUOUS_RSP,   /* response without a usable mem_map_handle */
     M11_SHMEM_CAUSE_UNMAP_WRITE_ERROR,
     M11_SHMEM_CAUSE_UNMAP_SHORT_WRITE,
@@ -299,6 +300,16 @@ int m11_shmem_unmap_and_free(m11_shmem_mgr_t *mgr, m11_shmem_region_t *region);
  * token and peer changes ownership state.
  */
 int m11_shmem_reconcile(m11_shmem_mgr_t *mgr, m11_shmem_region_t *region, uint32_t timeout_ms);
+
+/*
+ * POST-MAP HOLD: the engine latched PDR (PD down) while a region whose MAP may have reached the
+ * ADSP (map_tx_started, no unsent proof) is DSP_MAP_ACKNOWLEDGED. Its recorded handle can no
+ * longer be trusted, so ownership becomes UNKNOWN: OWNERSHIP_UNRESOLVED, cause MAP_PDR, PDR
+ * blocker. Sends nothing and releases nothing (no UNMAP; the handles stay held).
+ *   -ENETRESET  the region was marked
+ *   -EINVAL     any other region, or an engine without the PDR latch: nothing changed
+ */
+int m11_shmem_note_pd_down(m11_shmem_mgr_t *mgr, m11_shmem_region_t *region);
 
 const char *m11_shmem_cause_name(m11_shmem_cause_t cause);
 

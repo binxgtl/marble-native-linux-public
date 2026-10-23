@@ -347,7 +347,7 @@ static void fuzz_deadline(long iters) {
  * F4: whole simulation under random fault injection
  * ---------------------------------------------------------------------------------------- */
 static long st_ok, st_map, st_vi, st_rx, st_cal, st_start, st_unres, st_pend, st_clean, st_dirty;
-static long st_deferred, st_graph_unknown, st_retained, st_retaining, st_hold;
+static long st_deferred, st_graph_unknown, st_retained, st_retaining, st_hold, st_hold_pdr;
 
 static uint32_t mock_live_slots(const m11_strict_mock_t *m) {
     uint32_t n = 0;
@@ -411,10 +411,14 @@ static void fuzz_sim(long iters) {
         st_dirty += (!rep.clean_teardown);
         st_retaining += rep.retaining_teardown;
         st_hold += rep.post_map_hold;
+        st_hold_pdr += (rep.post_map_hold && e.pdr_down);
         /* Post-MAP hold: the sim's one MAP is never followed by an UNMAP, and once it may have
          * been transmitted its backing stays held (never released, never clean). */
         if (m.unmap_cmd_count != 0u) {
             VIOL(V_SIM_POST_MAP_HOLD, i, "UNMAP sent (%u) after a MAP", m.unmap_cmd_count);
+        }
+        if (rep.post_map_hold && rep.unmap_attempted) {
+            VIOL(V_SIM_POST_MAP_HOLD, i, "UNMAP call entered under the hold (pdr=%d)", e.pdr_down);
         }
         if (rep.post_map_hold &&
             (!rep.retained_region_valid || rep.clean_teardown || !rep.endpoint_close_deferred ||
@@ -785,8 +789,8 @@ int main(int argc, char **argv) {
     printf("F5 shmem state machine: %ld scenarios\n", n / 8);
     printf("F4 containment coverage: deferred=%ld graph_unknown=%ld retained=%ld\n",
            st_deferred,st_graph_unknown,st_retained);
-    printf("post-MAP hold coverage: F4 hold=%ld retaining_teardown=%ld; F5 held after UNMAP ACK=%ld\n",
-           st_hold, st_retaining, sm_held_end);
+    printf("post-MAP hold coverage: F4 hold=%ld retaining_teardown=%ld hold_pdr=%ld; F5 held after UNMAP ACK=%ld\n",
+           st_hold, st_retaining, st_hold_pdr, sm_held_end);
 
     long coverage_problems = 0;
     if (n >= 4000) {
@@ -794,10 +798,10 @@ int main(int argc, char **argv) {
         if (st_ok == 0 || st_unres == 0 || st_pend == 0 || st_cal == 0 ||
             st_map == 0 || st_vi == 0 || st_rx == 0 || st_start == 0 ||
             st_clean == 0 || st_dirty == 0 || st_deferred == 0 || st_retained == 0 ||
-            st_hold == 0 || st_retaining == 0 || sm_held_end == 0) {
+            st_hold == 0 || st_retaining == 0 || st_hold_pdr == 0 || sm_held_end == 0) {
             printf("COVERAGE PROBLEM: ok=%ld unresolved=%ld local_pending=%ld cal_ok=%ld clean=%ld hold=%ld "
-                   "retaining=%ld held_end=%ld\n", st_ok, st_unres, st_pend, st_cal, st_clean, st_hold,
-                   st_retaining, sm_held_end);
+                   "retaining=%ld hold_pdr=%ld held_end=%ld\n", st_ok, st_unres, st_pend, st_cal, st_clean, st_hold,
+                   st_retaining, st_hold_pdr, sm_held_end);
             coverage_problems++;
         }
     }

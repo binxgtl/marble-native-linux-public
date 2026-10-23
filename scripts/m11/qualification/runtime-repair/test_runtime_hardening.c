@@ -1935,6 +1935,28 @@ static void sim_local_release_failure_is_reported_as_pending(void) {
     CHECK(!rep.post_map_hold && !rep.retaining_teardown && !rep.shmem_mapped);
     CHECK(SIMM.map_cmd_count == 0u && SIMM.unmap_cmd_count == 0u, "nothing may be sent");
 }
+
+/*
+ * Post-MAP hold: PD down after the MAP ACK. The teardown never enters the UNMAP call (the engine's
+ * PDR latch is not what keeps the wire quiet); the region manager records the unknown remote state
+ * (cause MAP_PDR, not UNMAP_PDR) and the region stays held.
+ */
+static void sim_pdr_while_held_records_unknown_without_unmap(void) {
+    m11_strict_mock_init(&SIMM);
+    SIMM.pdr_on_graph_prepare = true;
+    m11_sim_report_t rep;
+    int rc = sim_run(&rep);
+    CHECK(rc == -ENETRESET && rep.primary_errno == -ENETRESET, "rc=%d", rc);
+    CHECK(rep.post_map_hold && !rep.unmap_attempted, "unmap_attempted=%d", rep.unmap_attempted);
+    CHECK(rep.final_shmem_state == M11_SHMEM_STATE_OWNERSHIP_UNRESOLVED, "state=%s",
+          m11_shmem_state_name(rep.final_shmem_state));
+    CHECK(rep.shmem_cause == M11_SHMEM_CAUSE_MAP_PDR && rep.shmem_blocker != NULL, "cause=%s",
+          m11_shmem_cause_name(rep.shmem_cause));
+    CHECK(rep.cleanup_errno == -ENETRESET && !rep.clean_teardown && !rep.retaining_teardown);
+    CHECK(rep.retained_region_valid && rep.retained_region.dma_buf_fd >= 0 && rep.retained_region.vaddr != NULL &&
+          rep.retained_region.ion_imported && rep.endpoint_close_deferred);
+    CHECK(SIMM.map_cmd_count == 1u && SIMM.unmap_cmd_count == 0u && SIMM.unsafe_release_attempts == 0u);
+}
 #endif
 
 int main(void) {
@@ -2037,6 +2059,7 @@ int main(void) {
     RUN(sim_write_error_with_late_ack_is_reconciled_and_held);
     RUN(sim_unanswered_map_stays_unresolved_with_a_reason);
     RUN(sim_local_release_failure_is_reported_as_pending);
+    RUN(sim_pdr_while_held_records_unknown_without_unmap);
 #endif
 
     printf("== %d/%d cases passed, %d/%d checks passed ==\n", g_cases - g_cases_failed, g_cases,

@@ -294,13 +294,19 @@ cleanup:
      */
     const bool hold = shmem_reg.map_tx_started && !shmem_reg.map_tx_unsent_proof;
     out_report->post_map_hold = hold;
+    /* PD down while held: the handle can no longer be trusted. Record UNKNOWN through the
+     * region manager (no UNMAP, nothing released); the UNMAP call below is never entered. */
+    if (hold && gpr->pdr_down) {
+        (void)m11_shmem_note_pd_down(shmem, &shmem_reg);
+        all_cleanup_acked = false;
+        if (cleanup_err == 0) cleanup_err = -ENETRESET;
+    }
     /* A lost OPEN/CLOSE/STOP result leaves possible graph access to the backing.
      * Do not race UNMAP against that access just to reach zero local counters. */
-    /* On latched PDR the release routine sends nothing (the submit is refused before write_fn)
-     * and records UNKNOWN; that holds under the post-MAP hold too. */
-    if ((!hold || gpr->pdr_down) && (all_cleanup_acked || gpr->pdr_down) &&
+    if (!hold && (all_cleanup_acked || gpr->pdr_down) &&
         shmem_reg.state != M11_SHMEM_STATE_NOT_ALLOCATED &&
         shmem_reg.state != M11_SHMEM_STATE_RELEASED) {
+        out_report->unmap_attempted = true;
         int urc = m11_shmem_unmap_and_free(shmem, &shmem_reg);
         if (urc < 0 || shmem_reg.state != M11_SHMEM_STATE_RELEASED) {
             all_cleanup_acked = false;

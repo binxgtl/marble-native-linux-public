@@ -5,8 +5,9 @@
  *  1. decodes the GPR packet and refuses (-EPERM, nothing written) any opcode outside the
  *     custodian's set: GET_SPF_STATE, SHARED_MEM_MAP_REGIONS, GRAPH_OPEN/PREPARE/START/STOP/
  *     CLOSE, SET_CFG, GET_CFG. APM_CMD_CLOSE_ALL is therefore never sent from userspace, and
- *     SHARED_MEM_UNMAP_REGIONS is refused unconditionally (CP2 post-MAP hold,
- *     docs/m11-argon-cp2-c5-hold-design.md: no UNMAP ever leaves PID1);
+ *     SHARED_MEM_UNMAP_REGIONS is refused unconditionally (CP2 post-MAP hold layer L2,
+ *     docs/m11-argon-cp2-c5-hold-design.md: no UNMAP is journaled, so none is written through
+ *     this wrapper; L2 covers journaled writes only, L1 and L3 the custodian and region manager);
  *  2. requires the custodian's ledger intent first: a MAP only once dsp_map_attempted is set
  *     (-EPERM otherwise; the former UNMAP clause is unreachable after step 1);
  *  3. appends one record (boot epoch, sequence, opcode, token, client data; for a MAP the dma-buf
