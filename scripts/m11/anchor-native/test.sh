@@ -790,11 +790,11 @@ echo 'PASS production P3 PID1 entry (gcc, clang, ASan+UBSan, root when sudo); th
 # T10 (R4 rule; docs/m11-argon-cp2-c5-hold-design.md): nothing the P4 PID1 runs names the SysRq trigger
 # (a 'b'/'c' write would end the boot outside the custodian's terminal decision).
 #  - source layer: every production anchor-native file; every unit p4/build.sh compiles into the PID1
-#    (read from build.sh itself and required to equal the x64 PID1 linked above) with every header
-#    they include, transitively; the relay; every repository script the P4 payload ships
-#    (public-payload.py REPO_SOURCES) and the Run14 journal.sh it reuses;
-#  - binary layer: the strings of the linked x64 PID1 (gcc, clang), which also show literals the
-#    compiler joins ("/proc/sys" "rq-trigger");
+#    (read from build.sh itself and required to equal the PID1 linked above) with every header they
+#    include, transitively; the relay; every repository script the P4 payload ships (public-payload.py
+#    REPO_SOURCES) and the Run14 journal.sh it reuses;
+#  - binary layer: the strings of the PID1 linked above on this runner (x64 or ARM64; gcc, clang),
+#    which also show literals the compiler joins ("/proc/sys" "rq-trigger");
 #  - a self-test per layer. A name assembled at run time evades both layers (review residual).
 t10_scan() { LC_ALL=C grep -Il -i sysrq "$@" || true; }
 t10_bin() { LC_ALL=C grep -a -c -i sysrq "$1" || true; }
@@ -808,7 +808,7 @@ done
 t10_a="$(for f in "${t10_units[@]}"; do basename "$f"; done | sort)"
 t10_b="$(for f in "${p3_main[@]}"; do basename "$f"; done | sort)"
 if [[ "${#t10_units[@]}" -lt 20 || "$t10_a" != "$t10_b" ]]; then
-  echo "ERROR: T10: the p4/build.sh PID1 units differ from the x64 PID1 linked above" >&2
+  echo "ERROR: T10: the p4/build.sh PID1 units differ from the PID1 linked above" >&2
   diff <(printf '%s\n' "$t10_a") <(printf '%s\n' "$t10_b") >&2 || true; exit 1
 fi
 t10_files=("${t10_units[@]}" "$here/p4/kmsg-relay.c"); t10_queue=("${t10_files[@]}"); t10_seen=" "
@@ -862,7 +862,7 @@ for cm_cc in gcc clang; do
     echo "ERROR: T10: the linked PID1 ($cm_cc) carries a SysRq string" >&2; exit 1
   fi
 done
-echo 'PASS T10 binary layer: the linked x64 PID1 (gcc, clang) carries no SysRq string'
+echo 'PASS T10 binary layer: the PID1 linked on this runner (gcc, clang) carries no SysRq string'
 # Self-test: the source layer flags a P4 unit outside anchor-native and a shipped script; the binary
 # layer flags a split literal that the source layer cannot see.
 t10_mut="$out/t10-mutant"; mkdir -p "$t10_mut/src" "$t10_mut/bin"
