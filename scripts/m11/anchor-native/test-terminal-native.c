@@ -173,12 +173,14 @@ static unsigned map_one(void) {
 static void c_never_mapped(void) { world(0, 0, 2); assert(m11_custodian_close(&cust) == 0); end_and_report(); }
 static void c_mapped(void) {
     world(1, 1, 2); unsigned s = map_one();
-    assert(m11_custodian_retire(&cust, s, ms()) == 0 && m11_custodian_close(&cust) == 0);
+    /* post-MAP hold: retire and close are refused; the region stays mapped and held to the end */
+    assert(m11_custodian_retire(&cust, s, ms()) == -EPERM && m11_custodian_close(&cust) == -EPERM);
     end_and_report();
 }
 static void c_mapped_unresolved(void) { world(1, 1, 2); (void)map_one(); m11_custodian_pd_down(&cust, ms()); end_and_report(); }
 static void c_unpooled(void) { world(1, 0, 2); (void)map_one(); m11_custodian_pd_down(&cust, ms()); end_and_report(); }
-static void c_hold(void) { world(0, 0, 2); (void)map_one(); end_and_report(); }
+/* HOLD exists only for a never-mapped boot (rev 5): here the endpoint was never closed. */
+static void c_hold(void) { world(0, 0, 2); end_and_report(); }
 static void c_pd_down(void) { world(0, 0, 2); m11_custodian_pd_down(&cust, ms()); end_and_report(); }
 static void c_anchor_lent(void) {
     world(0, 0, 2); assert(m11_custodian_close(&cust) == 0);
@@ -204,7 +206,7 @@ static void c_teardown_fails(void) { teardown_case(-EIO, 1); }
 static void c_teardown_no_hold(void) { teardown_case(0, 0); }
 static void c_teardown_mapped(void) { /* a mapped boot never reaches the teardown */
     world(1, 1, 2); unsigned s = map_one();
-    assert(m11_custodian_retire(&cust, s, ms()) == 0 && m11_custodian_close(&cust) == 0);
+    assert(m11_custodian_retire(&cust, s, ms()) == -EPERM && m11_custodian_close(&cust) == -EPERM);
     teardown_rc = 0; term.ops.teardown_fn = t_teardown; term.ops.hold_fn = t_hold;
     end_and_report();
 }
@@ -258,9 +260,9 @@ int main(void) {
     st = run(c_mapped, rep, sizeof rep);
     printf("INFO %s", rep);
     assert(st == 42 && strstr(rep, "EXIT fds_open=4/4 pool_open=4/4") && strstr(rep, "end=pid1_exit anchors_held=2/2 anchor_fds_open=4/4 pool=held"));
-    assert(region_in_pool(rep) && strstr(rep, "reset_path=immediate map_attempted=1 unmap_attempted=1 regions=0 in_pool=0 note=mapped_boot"));
+    assert(region_in_pool(rep) && strstr(rep, "reset_path=immediate map_attempted=1 unmap_attempted=0 regions=1 in_pool=1 note=mapped_boot"));
     assert(journaled(rep));
-    printf("PASS mapped boot, torn down: the mapped dma-buf was a pool buffer; PID1 exit with every anchor and pool fd held; no reboot\n");
+    printf("PASS mapped boot, retire and close refused (post-MAP hold): the mapped dma-buf is a pool buffer and stays mapped; PID1 exit with every anchor and pool fd held; no reboot\n");
 
     st = run(c_mapped_unresolved, rep, sizeof rep);
     printf("INFO %s", rep);
@@ -275,7 +277,7 @@ int main(void) {
     st = run(c_hold, rep, sizeof rep);
     printf("INFO %s", rep);
     assert(st == 0 && strstr(rep, "RET=-16 fds_open=4/4") && strstr(rep, "sink_writes=0"));
-    printf("PASS HOLD (a region still mapped, PD up): the end is refused, nothing closed, nothing journaled\n");
+    printf("PASS HOLD (never-mapped, endpoint not yet closed): the end is refused, nothing closed, nothing journaled\n");
 
     set_panic("0\n");
     st = run(c_pd_down, rep, sizeof rep);

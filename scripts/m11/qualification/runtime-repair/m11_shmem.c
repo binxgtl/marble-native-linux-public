@@ -31,6 +31,9 @@ static const char B_NO_PROOF[] =
     "local release requested without proof that the ADSP no longer maps the pages";
 static const char B_UNKNOWN_TX[] =
     "request was handed to write_fn but its fate is unknown and no response can be correlated";
+static const char B_MAP_NACK[] =
+    "DSP refused SHARED_MEM_MAP_REGIONS after TX; no firmware contract proves that no mapping "
+    "exists, so the backing is held until the retaining reset (post-MAP hold)";
 
 const char *m11_shmem_state_name(m11_shmem_state_t state) {
     switch (state) {
@@ -64,6 +67,7 @@ const char *m11_shmem_cause_name(m11_shmem_cause_t cause) {
         case M11_SHMEM_CAUSE_UNMAP_PDR:            return "UNMAP_PDR";
         case M11_SHMEM_CAUSE_UNMAP_NACK:           return "UNMAP_NACK";
         case M11_SHMEM_CAUSE_LOCAL_RELEASE_FAILED: return "LOCAL_RELEASE_FAILED";
+        case M11_SHMEM_CAUSE_MAP_NACK:             return "MAP_NACK";
         default:                                   return "INVALID_SHMEM_CAUSE";
     }
 }
@@ -255,7 +259,9 @@ int m11_shmem_end_cpu_access(m11_shmem_mgr_t *mgr, m11_shmem_region_t *region) {
 
 /*
  * Releases the LOCAL handles (END bracket, msm_audio_ion import, mmap, dma-buf fd). Callable
- * ONLY when the ADSP is proven not to map the pages (region->remote_inactive).
+ * ONLY when the ADSP is proven not to map the pages (region->remote_inactive), and NEVER for a
+ * region whose MAP may have reached write_fn (post-MAP hold: the single release choke point of
+ * this module; every release in this file goes through here).
  *
  * Every step is idempotent through the handle it owns (ion_imported / vaddr / dma_buf_fd), so a
  * failed step leaves the region in LOCAL_RELEASE_PENDING and a later call resumes exactly at the
@@ -263,6 +269,9 @@ int m11_shmem_end_cpu_access(m11_shmem_mgr_t *mgr, m11_shmem_region_t *region) {
  */
 static int release_local_handles(m11_shmem_mgr_t *mgr, m11_shmem_region_t *region) {
     int sync_error = 0;
+    /* Post-MAP hold choke point: the MAP packet may have reached the ADSP. Whatever a later ACK/NACK
+     * or the UNMAP research path claims, the backing stays held until the retaining reset. */
+    if (region->map_tx_started && !region->map_tx_unsent_proof) return -EPERM;
     if (!region->remote_inactive) {
         /* Defence in depth: refuse, touch nothing. */
         return -EBUSY;
@@ -432,6 +441,8 @@ int m11_shmem_alloc_and_map(m11_shmem_mgr_t *mgr, m11_shmem_mode_t mode,
     cmd.mem_size_bytes = (uint32_t)aligned;
 
     uint32_t tok = 0;
+    /* Post-MAP hold: from here on write_fn may be entered. Monotonic; nothing below clears it. */
+    out_region->map_tx_started = true;
     rc = m11_gpr_engine_submit_ex(mgr->gpr, M11_GPR_CLIENT_DATA_SHMEM_OFFSET_MODE,
                                   M11_APM_MODULE_IID, M11_APM_CMD_SHARED_MEM_MAP_REGIONS,
                                   &cmd, sizeof(cmd), &tok);
@@ -440,8 +451,11 @@ int m11_shmem_alloc_and_map(m11_shmem_mgr_t *mgr, m11_shmem_mode_t mode,
             /*
              * Proven pre-write failure in userspace (write_fn was never invoked): the kernel
              * driver and RPMSG transport never saw the packet, so the ADSP maps nothing and
-             * the local handles can be released.
+             * the local handles can be released. This is the ONLY post-intent failure that
+             * releases (the engine sets NOT_ATTEMPTED on entry and changes it only after
+             * write_fn returns).
              */
+            out_region->map_tx_unsent_proof = true;
             out_region->last_error = rc;
             (void)release_local_handles(mgr, out_region);
             return rc;
@@ -476,12 +490,11 @@ int m11_shmem_alloc_and_map(m11_shmem_mgr_t *mgr, m11_shmem_mode_t mode,
     if (rc < 0) {
         if (rc == -EREMOTEIO && dsp_status != 0u) {
             /*
-             * Explicit DSP NACK (0x02001005 with non-zero status) for THIS token: the ADSP
-             * rejected the request, so it created no mapping. Roll back local resources.
+             * Explicit DSP NACK (0x02001005 with non-zero status) for THIS token. No firmware
+             * contract proves that a NACK means no mapping was created, so the backing is held
+             * (post-MAP hold, CP2 criterion 5): OWNERSHIP_UNRESOLVED, never released locally.
              */
-            out_region->remote_inactive = true;
-            out_region->last_error = rc;
-            (void)release_local_handles(mgr, out_region);
+            mark_unresolved(mgr, out_region, M11_SHMEM_CAUSE_MAP_NACK, rc, M11_SHMEM_ORPHAN_NONE, 0u, B_MAP_NACK);
             return rc;
         }
         if (rc == -ENOSPC && !m11_gpr_engine_orphan_tracked(mgr->gpr, tok)) {
@@ -668,14 +681,11 @@ int m11_shmem_reconcile(m11_shmem_mgr_t *mgr, m11_shmem_region_t *region, uint32
         /* The late response was an explicit DSP NACK for our token (consumed by the engine). */
         clear_orphan(region);
         if (is_map) {
-            /* MAP refused: the ADSP created no mapping, local handles are free to go. */
-            uncount_unresolved(mgr, region);
-            region->remote_inactive = true;
-            region->cause = M11_SHMEM_CAUSE_NONE;
-            region->blocker = NULL;
+            /* Late MAP NACK: held like an in-flight NACK (post-MAP hold); no release. */
+            region->cause = M11_SHMEM_CAUSE_MAP_NACK;
+            region->blocker = B_MAP_NACK;
             region->last_error = -EREMOTEIO;
-            int lrc = release_local_handles(mgr, region);
-            return (lrc < 0) ? lrc : 0;
+            return -EREMOTEIO; /* late MAP NACK: held */
         }
         region->cause = M11_SHMEM_CAUSE_UNMAP_NACK;
         region->blocker = B_UNMAP_NACK;

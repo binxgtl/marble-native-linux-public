@@ -19,13 +19,8 @@ int m11_intent_format(char *buf, size_t cap, uint64_t epoch, uint32_t seq, const
                  c.shm_addr_lsw, c.shm_addr_msw, c.mem_size_bytes, c.mem_pool_id, c.num_regions, c.property_flag);
         break;
     }
-    case M11_APM_CMD_SHARED_MEM_UNMAP_REGIONS: {
-        m11_apm_cmd_shared_mem_unmap_regions_t c;
-        if (pll != sizeof c) return -EBADMSG;
-        memcpy(&c, pl, sizeof c);
-        snprintf(tail, sizeof tail, " handle=%08x", c.mem_map_handle);
-        break;
-    }
+    case M11_APM_CMD_SHARED_MEM_UNMAP_REGIONS:
+        return -EPERM; /* CP2 post-MAP hold: no UNMAP ever leaves PID1 (no record, no TX) */
     case M11_APM_CMD_GET_SPF_STATE:
     case M11_APM_CMD_GRAPH_OPEN: case M11_APM_CMD_GRAPH_PREPARE: case M11_APM_CMD_GRAPH_START:
     case M11_APM_CMD_GRAPH_STOP: case M11_APM_CMD_GRAPH_CLOSE:

@@ -149,7 +149,11 @@ int main(void) {
     assert(m11_intent_format(rec, sizeof rec, 7, 3, pkt, 10) == -EBADMSG);
     assert(m11_gpr_pack_packet(pkt, sizeof pkt, &pl, M11_APM_MODULE_IID, 0x0100u, 0x2b, M11_APM_CMD_CLOSE_ALL, NULL, 0) == 0);
     assert(m11_intent_format(rec, sizeof rec, 7, 3, pkt, pl) == -EPERM);
-    printf("PASS record format: MAP fields (fd, size, pool, flags), kmsg level, size and malformed checks, CLOSE_ALL outside the set\n");
+    /* CP2 post-MAP hold: the UNMAP opcode is outside the set too (no record, so never a TX). */
+    assert(m11_shmem_pack_unmap_regions_pkt(pkt, sizeof pkt, &pl, 0x0100u, 0x2c, 0xA0000001u) == 0);
+    int un = m11_intent_format(rec, sizeof rec, 7, 3, pkt, pl);
+    assert(un == -EPERM);
+    printf("PASS record format: MAP fields (fd, size, pool, flags), kmsg level, size and malformed checks, CLOSE_ALL and UNMAP outside the set\n");
 
     /* 2. the production fd sink */
     int p[2]; m11_intent_fd_sink s; m11_intent_sink sk;
@@ -161,17 +165,21 @@ int main(void) {
     close(p[1]);
     printf("PASS fd sink: one write(2) per record; a failed write is -EIO\n");
 
-    /* 3. MAP then UNMAP through the custodian: both journaled before TX (checked by the peer). */
+    /* 3. MAP through the custodian, journaled before TX (checked by the peer); then the post-MAP hold:
+     *    retire is refused at the custodian, so there is no UNMAP record and no second packet, and
+     *    the region keeps its import, mapping and dma-buf fd. */
     start(&r);
     assert(m11_custodian_map(&r.cust, 4096, ms(), &slot) == 0);
     char want[96];
     snprintf(want, sizeof want, " fd=%d msw=0 bytes=4096 pool=3 regions=1 flags=4\n", r.cust.regions[slot].dma_buf_fd);
     assert(jcount == 1 && strstr(jr[0], "boot=7 seq=1 op=0100100c ") && strstr(jr[0], " cd=1 ") && strstr(jr[0], want));
-    assert(m11_custodian_retire(&r.cust, slot, ms()) == 0);
-    assert(jcount == 2 && strstr(jr[1], "seq=2 op=0100100d ") && strstr(jr[1], " handle=a0000001\n"));
-    assert(r.ilink.journaled == 2 && r.glink.writes == 2);
-    assert(stop(&r) == 2);
-    printf("PASS MAP and UNMAP journaled before TX (the peer saw each record before its packet), with fd, size and handle\n");
+    assert(m11_custodian_retire(&r.cust, slot, ms()) == -EPERM);
+    assert(jcount == 1 && r.ilink.journaled == 1 && r.glink.writes == 1 && r.ilink.refused == 0);
+    assert(r.cust.occupied[slot] && r.cust.regions[slot].state == M11_SHMEM_STATE_DSP_MAP_ACKNOWLEDGED &&
+           r.cust.regions[slot].ion_imported && r.cust.regions[slot].vaddr && r.cust.regions[slot].dma_buf_fd >= 0);
+    assert(m11_custodian_terminal_action(&r.cust) == M11_TERMINAL_RESET_RETAINING_ANCHORS);
+    assert(stop(&r) == 1);
+    printf("PASS MAP journaled before TX (the peer saw its record before the packet), with fd and size; retire refused after the MAP: no UNMAP record, no TX, region held, retaining end\n");
 
     /* 4. the sink fails: nothing transmitted, and the engine records an unknown TX (fail closed). */
     start(&r);
@@ -180,11 +188,12 @@ int main(void) {
     assert(rc < 0 && r.glink.writes == 0 && r.ilink.sink_failures == 1);
     assert(r.cust.regions[slot].state == M11_SHMEM_STATE_OWNERSHIP_UNRESOLVED &&
            r.cust.regions[slot].cause == M11_SHMEM_CAUSE_MAP_WRITE_ERROR);
-    assert(jcount == 0 && m11_custodian_terminal_action(&r.cust) == M11_TERMINAL_HOLD_RECONCILE);
+    /* the MAP intent was recorded, so the only end is the retaining reset (post-MAP hold) */
+    assert(jcount == 0 && m11_custodian_terminal_action(&r.cust) == M11_TERMINAL_RESET_RETAINING_ANCHORS);
     assert(stop(&r) == 0);
     printf("PASS sink failure: no TX; the region stays unresolved (unknown TX, fail closed)\n");
 
-    /* 5. ledger intent first: a MAP or UNMAP the ledger has not recorded is never sent. */
+    /* 5. ledger intent first: a MAP the ledger has not recorded is never sent; an UNMAP is never sent. */
     start(&r);
     m11_apm_cmd_shared_mem_map_regions_t cmd = {.mem_pool_id = 3, .num_regions = 1, .property_flag = 4,
                                                .shm_addr_lsw = 5, .mem_size_bytes = 4096};
@@ -194,8 +203,12 @@ int main(void) {
     m11_apm_cmd_shared_mem_unmap_regions_t ucmd = {.mem_map_handle = 0xA0000001u};
     rc = m11_gpr_engine_submit_ex(&r.eng, 0, M11_APM_MODULE_IID, M11_APM_CMD_SHARED_MEM_UNMAP_REGIONS, &ucmd, sizeof ucmd, &tok);
     assert(rc < 0 && r.glink.writes == 0 && r.ilink.refused == 2 && jcount == 0);
+    r.boot.dsp_unmap_attempted = true; /* even with the ledger's UNMAP intent, an UNMAP never leaves */
+    rc = m11_gpr_engine_submit_ex(&r.eng, 0, M11_APM_MODULE_IID, M11_APM_CMD_SHARED_MEM_UNMAP_REGIONS, &ucmd, sizeof ucmd, &tok);
+    int unmap_wire = rc < 0 && r.glink.writes == 0 && r.ilink.refused == 3 && jcount == 0;
+    assert(unmap_wire);
     assert(stop(&r) == 0);
-    printf("PASS ledger first: MAP and UNMAP without the ledger's intent are refused before the journal and TX\n");
+    printf("PASS ledger first: a MAP without the ledger's intent is refused before the journal and TX; an UNMAP is refused even with the intent recorded\n");
 
     /* 6. the opcode set: GET_SPF_STATE passes; CLOSE_ALL and unknown opcodes never leave. */
     start(&r);

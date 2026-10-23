@@ -148,16 +148,18 @@ int main(void) {
     signal(SIGPIPE, SIG_IGN);
     struct rig r; unsigned slot; int rc; m11_terminal_action term; uint64_t t0; long el;
 
-    /* A. UP throughout (PD traffic during both transactions): nothing reported. */
+    /* A. UP throughout (PD traffic during the MAP): nothing reported. Post-MAP hold: the only end is
+     *    the retaining reset, and retire is refused (no UNMAP packet). */
     start(&r, ANSWER);
     assert(m11_custodian_map(&r.cust, 4096, ms(), &slot) == 0);
     assert(r.cust.regions[slot].state == M11_SHMEM_STATE_DSP_MAP_ACKNOWLEDGED);
-    assert(m11_pdr_loop_settle(&r.loop, ms()) == M11_TERMINAL_HOLD && !r.loop.down_reported);
+    assert(m11_pdr_loop_settle(&r.loop, ms()) == M11_TERMINAL_RESET_RETAINING_ANCHORS && !r.loop.down_reported);
     assert(m11_pdr_loop_idle(&r.loop, 50, ms()) == 0 && !r.loop.down_reported);
-    assert(m11_custodian_retire(&r.cust, slot, ms()) == 0);
-    assert(m11_pdr_loop_settle(&r.loop, ms()) == M11_TERMINAL_HOLD && !r.glink.pd_down && r.glink.pd_pumps >= 4);
-    assert(stop(&r) == 2);
-    printf("PASS UP throughout: PD traffic during MAP and UNMAP changes nothing; idle wait pumps the monitor\n");
+    assert(m11_custodian_retire(&r.cust, slot, ms()) == -EPERM);
+    assert(m11_pdr_loop_settle(&r.loop, ms()) == M11_TERMINAL_RESET_RETAINING_ANCHORS && !r.glink.pd_down && r.glink.pd_pumps >= 4);
+    assert(fx_imported[r.cust.regions[slot].dma_buf_fd] && r.cust.regions[slot].vaddr);
+    assert(stop(&r) == 1);
+    printf("PASS UP throughout: PD traffic during the MAP changes nothing; idle wait pumps the monitor; retire refused, backing held\n");
 
     /* B. DOWN while the MAP is in flight: the wait ends at once, the region stays unresolved. */
     start(&r, DOWN_ON_MAP);
@@ -172,20 +174,23 @@ int main(void) {
     assert(term == M11_TERMINAL_RESET_RETAINING_ANCHORS && (r.boot.reasons & M11_TAINT_PD_DOWN) && r.cust.kernel_imports_lost);
     assert(fx_imported[g->dma_buf_fd] && fcntl(g->dma_buf_fd, F_GETFD) != -1 && g->vaddr);
     assert(m11_shmem_unmap_and_free(&r.mgr, g) == -EBUSY && fx_imported[g->dma_buf_fd]);
-    assert(m11_custodian_retire(&r.cust, slot, ms()) == -EOWNERDEAD);
+    assert(m11_custodian_retire(&r.cust, slot, ms()) == -EPERM); /* post-MAP hold, before the imports-lost check */
     assert(stop(&r) == 1);
     printf("PASS DOWN during MAP: wait ends with -ENETRESET (%ld ms of 300), region unresolved (PDR), custodian told once, RESET_RETAINING_ANCHORS, backing retained\n", el);
 
-    /* C. DOWN while the UNMAP is in flight. */
+    /* C. DOWN while an UNMAP is in flight. The custodian never starts one (post-MAP hold), so the
+     *    research path is driven directly through the manager (this rig has no journal): the
+     *    region stays unresolved and its backing is held. */
     start(&r, DOWN_ON_UNMAP);
     assert(m11_custodian_map(&r.cust, 4096, ms(), &slot) == 0);
-    rc = m11_custodian_retire(&r.cust, slot, ms());
+    assert(m11_custodian_retire(&r.cust, slot, ms()) == -EPERM);
     g = &r.cust.regions[slot];
+    rc = m11_shmem_unmap_and_free(&r.mgr, g);
     assert(rc == -ENETRESET && g->state == M11_SHMEM_STATE_OWNERSHIP_UNRESOLVED && g->cause == M11_SHMEM_CAUSE_UNMAP_PDR);
     assert(m11_pdr_loop_settle(&r.loop, ms()) == M11_TERMINAL_RESET_RETAINING_ANCHORS);
-    assert(fx_imported[g->dma_buf_fd] && g->vaddr && r.boot.dsp_unmap_attempted);
+    assert(fx_imported[g->dma_buf_fd] && g->vaddr);
     assert(stop(&r) == 2);
-    printf("PASS DOWN during UNMAP: region unresolved (PDR), RESET_RETAINING_ANCHORS, backing retained\n");
+    printf("PASS DOWN during an UNMAP (research path, driven directly): region unresolved (PDR), RESET_RETAINING_ANCHORS, backing retained\n");
 
     /* D. DOWN just before the MAP ACK: the DOWN wins; the ACK is never adopted. */
     start(&r, DOWN_THEN_ACK);

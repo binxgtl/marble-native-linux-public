@@ -449,9 +449,12 @@ static int s_map_hold(void *u, m11_entry *e) {
     (void)u; handshake(e);
     unsigned s; int rc = m11_crunner_map(&e->runner, 4096, m11_entry_now_ms(), &s);
     char b[160]; snprintf(b, sizeof b, "MAP rc=%d busy=%d intents=%u\n", rc, e->pdmon.pds.resources_busy, e->runner.map_intents); say(b);
-    cmd("D"); /* the PD goes DOWN while the region is mapped; nothing pumps it before the end */
-    return rc;
+    return rc; /* the PD stays UP: the post-MAP hold ends retaining at once, it waits on nothing */
 }
+/* never mapped, but a token consumed outside the custodian (the single-owner precondition broken):
+ * the close is refused and tainted, the end holds (HOLD_RECONCILE) on the monitor until the
+ * recovery deadline */
+static int s_foreign_hold(void *u, m11_entry *e) { (void)u; e->runner.eng.next_token++; return 0; }
 static int s_down_on_map(void *u, m11_entry *e) {
     (void)u; handshake(e); cmd("M");
     unsigned s; int rc = m11_crunner_map(&e->runner, 4096, m11_entry_now_ms(), &s);
@@ -478,6 +481,7 @@ static void entry_case(const char *cmdline, enum pmode pm, int (*session)(void *
 }
 static void c_never_mapped(void) { entry_case(GOOD, P_UP, NULL); }
 static void c_map_hold(void) { entry_case(GOOD, P_UP, s_map_hold); }
+static void c_foreign_hold(void) { entry_case(GOOD, P_UP, s_foreign_hold); }
 static void c_down_on_map(void) { entry_case(GOOD, P_UP, s_down_on_map); }
 static void c_down_unmapped(void) { entry_case(GOOD, P_UP, s_down_unmapped); }
 static void c_pd_never_up(void) { entry_case(GOOD, P_NEVER_UP, NULL); }
@@ -694,13 +698,20 @@ int main(int argc, char **argv) {
     printf("PASS entry, production shape (no session): P1 UP, P2 boot (nodes made, bound, sealed, removed), runner start, close, G8 orderly end: both anchors final-closed, reboot; nothing sent\n");
 
     keep_as = "map-hold"; st = run(c_map_hold, rep, sizeof rep); keep_as = NULL; printf("INFO st=%d %s", st, rep);
-    assert(strstr(rep, "MAP rc=0 busy=1 intents=1") && strstr(rep, "PEER n=1") && strstr(rep, "PEER down_sent") && !strstr(rep, "PEER_VIOLATION"));
-    assert(st == 42 && strstr(rep, "EXIT phase=7 ") && strstr(rep, "busy=1 deferred=1 acks_sent=0") && strstr(rep, "anchors_open=4/4"));
-    assert(hold_of(rep) >= 1 && strstr(rep, "action=RESET_RETAINING_ANCHORS end=pid1_exit"));
-    assert(strstr(rep, "phases=journal,cmdline,pd_up,boot,runner,session,hold,seal lines=10 ")); /* + the MAP intent and G8 records: the burst of 10 */
+    assert(strstr(rep, "MAP rc=0 busy=1 intents=1") && strstr(rep, "PEER n=1") && !strstr(rep, "PEER down_sent") && !strstr(rep, "PEER_VIOLATION"));
+    assert(st == 42 && strstr(rep, "EXIT phase=7 ") && strstr(rep, "busy=1 deferred=0 acks_sent=0") && strstr(rep, "anchors_open=4/4"));
+    assert(hold_of(rep) == 0 && strstr(rep, "action=RESET_RETAINING_ANCHORS end=pid1_exit")); /* post-MAP hold: no HOLD wait */
+    assert(strstr(rep, "map_attempted=1 unmap_attempted=0 regions=1 in_pool=1 note=mapped_boot") && !strstr(rep, "REBOOT"));
+    assert(strstr(rep, "phases=journal,cmdline,pd_up,boot,runner,session,seal lines=9 ")); /* + the MAP intent and G8 records */
     assert(strstr(rep, "td=0/0 step=2") && strstr(rep, "jobs=seal ") && !strstr(rep, "PEER unregister")); /* a mapped boot: only the seal (D2) */
     assert(settle_of(rep) >= 100 && strstr(rep, "action=RESET_RETAINING_ANCHORS")); /* E-1 before the D2 seal */
-    printf("PASS entry with a mapped region left: the MAP intent latched resources busy before the TX; the end holds (HOLD) waiting on the monitor until the PD DOWN, which is NOT acknowledged; then the retaining end holding every anchor\n");
+    printf("PASS entry with a mapped region left (PD UP throughout): the MAP intent latched resources busy before the TX; close refused, no HOLD wait: the retaining end at once, holding every anchor and the mapped region (post-MAP hold)\n");
+
+    keep_as = "foreign-hold"; st = run(c_foreign_hold, rep, sizeof rep); keep_as = NULL; printf("INFO st=%d %s", st, rep);
+    assert(st == 42 && strstr(rep, "EXIT phase=7 ") && hold_of(rep) >= 2 && strstr(rep, "intents=0") && strstr(rep, "anchors_open=4/4"));
+    assert(strstr(rep, "action=RESET_RETAINING_ANCHORS end=pid1_exit") && strstr(rep, "map_attempted=0 unmap_attempted=0 regions=0 in_pool=0 note=tainted"));
+    assert(strstr(rep, "phases=journal,cmdline,pd_up,boot,runner,session,hold,seal lines=9 ") && strstr(rep, "jobs=seal ") && !strstr(rep, "PEER unregister") && !strstr(rep, "REBOOT"));
+    printf("PASS entry never mapped with foreign GPR traffic: close refused (tainted), the end holds (HOLD_RECONCILE) and asks again on the monitor until the recovery deadline; then the retaining end holding every anchor\n");
 
     st = run(c_down_on_map, rep, sizeof rep); printf("INFO st=%d %s", st, rep);
     assert(strstr(rep, "MAP rc=-102 unresolved=1 busy=1 deferred=1 acks_sent=0") && strstr(rep, "PEER n=1"));

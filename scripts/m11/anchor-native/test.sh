@@ -74,6 +74,86 @@ if "$tc_mut/bin" > "$tc_mut/log" 2>&1; then
   echo "ERROR: cross-check did not detect a diverging terminal core" >&2; exit 1
 fi
 echo 'PASS cross-check detects a diverging terminal core'
+# CP2 criterion 5, post-MAP hold (docs/m11-argon-cp2-c5-hold-design.md): the REAL custodian (L1) and
+# region manager (L3) against the strict mock, offline only. One mutant per layer guard below.
+for pmh_mode in gcc clang sanitize; do
+  pmh_cc=gcc
+  pmh_flags=(-std=c11 -O1 -g -Wall -Wextra -Werror -DM11_OWNERSHIP_OFFLINE -I "$own" -I "$repair" -I "$here")
+  [[ "$pmh_mode" == clang ]] && pmh_cc=clang
+  [[ "$pmh_mode" == sanitize ]] && pmh_flags+=(-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer)
+  pmh_srcs=(); for u in "${tc_units[@]}"; do pmh_srcs+=("$repair/$u.c"); done
+  "$pmh_cc" "${pmh_flags[@]}" "${pmh_srcs[@]}" "$own/m11_custodian.c" "$here/test-post-map-hold.c" -o "$out/post-map-hold-$pmh_mode"
+  "$out/post-map-hold-$pmh_mode" | tee "$out/post-map-hold-$pmh_mode.log"
+done
+echo 'PASS post-MAP hold layers (gcc, clang, ASan+UBSan)'
+pmh_mutant() { # name custodian|shmem pattern replacement assertion last-pass (same detection rule as gtn_mutant)
+  local name="$1" which="$2" pat="$3" rep="$4" want="$5" last="$6" dir="$out/pmh-mutant-$1" rc=0 got src file
+  case "$which" in
+    custodian) src="$own/m11_custodian.c" ;;
+    shmem) src="$repair/m11_shmem.c" ;;
+    *) echo "ERROR: post-MAP hold mutant $name: unknown file $which" >&2; exit 1 ;;
+  esac
+  file="$(basename "$src")"
+  mkdir -p "$dir"
+  awk -v pat="$pat" -v rep="$rep" 'index($0,pat){n++; print rep; next} {print} END{if(n!=1) exit 3}' "$src" > "$dir/$file"
+  local srcs=() u
+  for u in "${tc_units[@]}"; do [[ "$u.c" == "$file" ]] && srcs+=("$dir/$file") || srcs+=("$repair/$u.c"); done
+  [[ "$file" == m11_custodian.c ]] && srcs+=("$dir/$file") || srcs+=("$own/m11_custodian.c")
+  gcc -std=c11 -O1 -g -Wall -Wextra -Werror -DM11_OWNERSHIP_OFFLINE -I "$own" -I "$repair" -I "$here" \
+    "${srcs[@]}" "$here/test-post-map-hold.c" -o "$dir/bin"
+  timeout 120 "$dir/bin" > "$dir/log" 2>&1 || rc=$?
+  got="$(grep '^PASS ' "$dir/log" | tail -n1 || true)"
+  if [[ "$rc" != 134 ]] || ! grep -qF -- "Assertion \`$want' failed" "$dir/log" || [[ "$got" != "$last" ]]; then
+    echo "ERROR: post-MAP hold mutant $name not detected for the expected reason (rc=$rc, last PASS: '${got}')" >&2
+    cat "$dir/log" >&2; exit 1
+  fi
+  echo "PASS post-MAP hold test detects mutant $name: Assertion \`$want'"
+}
+# M1 (L1): retire reaches the legacy UNMAP body. The L3 choke point still refuses the release
+# (so retire even returns -EPERM), but the UNMAP went on the wire.
+pmh_mutant retire-guard-removed custodian 'if (!c->boot || c->boot->dsp_map_attempted) return -EPERM;' '    (void)0;' \
+  'mock.unmap_cmd_count == 0 && mock.tx_pkt_count == tx0' \
+  'PASS P1 never-mapped boot unchanged: retire -EINVAL, HOLD while open, one close, then ORDERLY_SHUTDOWN'
+# M2 (L1): close after a MAP intent falls to the legacy checks (-EBUSY with a region open).
+pmh_mutant close-guard-removed custodian 'if (c->boot->dsp_map_attempted) return -EPERM;' '    (void)0;' \
+  'm11_custodian_close(&c) == -EPERM' \
+  'PASS T1 retire after a MAP ACK is refused at the custodian: no UNMAP on the wire, nothing released, no taint'
+# M3 (L1): a clean mapped boot is HOLD again (waits for a teardown that can never come).
+pmh_mutant terminal-rule-removed custodian 'if (b->dsp_map_attempted) return M11_TERMINAL_RESET_RETAINING_ANCHORS;' '    (void)0;' \
+  'final_action(a)' \
+  'PASS T2 close after a MAP intent is refused: the endpoint last-close never runs'
+# M5 (L3): an in-flight MAP NACK is not held as OWNERSHIP_UNRESOLVED (it tries the release).
+pmh_mutant nack-releases shmem 'mark_unresolved(mgr, out_region, M11_SHMEM_CAUSE_MAP_NACK, rc, M11_SHMEM_ORPHAN_NONE, 0u, B_MAP_NACK);' \
+  '            out_region->remote_inactive = true; (void)release_local_handles(mgr, out_region);' \
+  'r->state == M11_SHMEM_STATE_OWNERSHIP_UNRESOLVED && r->cause != M11_SHMEM_CAUSE_NONE' \
+  'PASS T3 every mapped state (clean, worker exit, PD down, global cleanup, owner exit, supervisor exit, deadline) ends retaining; retire and close refused'
+# M6 (L3): a late MAP NACK through reconcile tries the release.
+pmh_mutant late-nack-releases shmem 'return -EREMOTEIO; /* late MAP NACK: held */' \
+  '            region->remote_inactive = true; return release_local_handles(mgr, region);' \
+  'lrc == -EREMOTEIO' \
+  'PASS T5 post-TX MAP failures (NACK, write error, delivered then error, short write, lost response, no handle, PDR) keep backing and ownership'
+# M7 (L3): the single release choke point removed: the UNMAP research path releases after its ACK.
+pmh_mutant choke-point-removed shmem 'if (region->map_tx_started && !region->map_tx_unsent_proof) return -EPERM;' '    (void)0;' \
+  'urc == -EPERM && r->state == M11_SHMEM_STATE_DSP_UNMAP_ACKNOWLEDGED && held(r) && mock_held()' \
+  'PASS T6 a late MAP NACK through reconcile is held (OWNERSHIP_UNRESOLVED, cause MAP_NACK)'
+# M8 (L3): MAP_TX_STARTED never set (the choke point would see an untransmitted region).
+pmh_mutant tx-started-not-set shmem 'out_region->map_tx_started = true;' '    (void)0;' \
+  'c.regions[i].state == M11_SHMEM_STATE_DSP_MAP_ACKNOWLEDGED && c.regions[i].map_tx_started && !c.regions[i].map_tx_unsent_proof' \
+  'PASS P1 never-mapped boot unchanged: retire -EINVAL, HOLD while open, one close, then ORDERLY_SHUTDOWN'
+# M9 (L3): the unsent proof forged on a write error (write_fn was entered).
+pmh_mutant proof-forged shmem 'm11_shmem_cause_t cause = M11_SHMEM_CAUSE_MAP_WRITE_ERROR;' \
+  '        out_region->map_tx_unsent_proof = true; m11_shmem_cause_t cause = M11_SHMEM_CAUSE_MAP_WRITE_ERROR;' \
+  'r->map_tx_started && !r->map_tx_unsent_proof' \
+  'PASS T3 every mapped state (clean, worker exit, PD down, global cleanup, owner exit, supervisor exit, deadline) ends retaining; retire and close refused'
+# M10 (L3): the unsent proof never set: a proven pre-TX failure would leak the backing (C1).
+pmh_mutant proof-never-set shmem 'out_region->map_tx_unsent_proof = true;' '            (void)0;' \
+  'pre.map_tx_started && pre.map_tx_unsent_proof && pre.state == M11_SHMEM_STATE_RELEASED' \
+  'PASS T7 UNMAP research path (driven directly): ACK, late ACK and LOCAL_RELEASE_PENDING never release a transmitted region'
+# T10: no production anchor-native source names the SysRq trigger (the independent review's bypass:
+# an 'b'/'c' write would end the boot outside the custodian's terminal decision).
+sysrq_hits="$(grep -rIl -i --exclude='test*' --exclude='*.md' sysrq "$here" || true)"
+if [[ -n "$sysrq_hits" ]]; then echo "ERROR: SysRq named in production anchor-native sources: $sysrq_hits" >&2; exit 1; fi
+echo 'PASS no production anchor-native source names the SysRq trigger'
 # G1 (docs/m11-custodian-native-integration.md): the reviewed M11_CUSTODIAN_NATIVE build mode. It
 # selects the build only (no native backend yet); custodian, anchor and terminal core share one
 # terminal enum and one boot ledger.
@@ -353,13 +433,13 @@ g6_mutant() { # name file pattern replacement assertion last-pass (same detectio
 }
 g6_mutant wait-ignores-monitor gpr_transport_native.c 'nfds_t nfds = l->pd ? 2 : 1;' '        nfds_t nfds = 1;' \
   'rc == -ENETRESET && el < 250' \
-  'PASS UP throughout: PD traffic during MAP and UNMAP changes nothing; idle wait pumps the monitor'
+  'PASS UP throughout: PD traffic during the MAP changes nothing; idle wait pumps the monitor; retire refused, backing held'
 g6_mutant tx-after-down gpr_transport_native.c '/* no TX once DOWN */' '    rc = 0; (void)rc;' \
   'rc == -ENETRESET && r.glink.writes == 0' \
   'PASS DOWN before the ACK: the DOWN wins, the late ACK is not adopted'
 g6_mutant settle-silent pdr_loop_native.c 'm11_custodian_pd_down(l->c, now_ms);' '        (void)now_ms;' \
   'term == M11_TERMINAL_RESET_RETAINING_ANCHORS && (r.boot.reasons & M11_TAINT_PD_DOWN) && r.cust.kernel_imports_lost' \
-  'PASS UP throughout: PD traffic during MAP and UNMAP changes nothing; idle wait pumps the monitor'
+  'PASS UP throughout: PD traffic during the MAP changes nothing; idle wait pumps the monitor; retire refused, backing held'
 g6_mutant idle-ignores-hangup pdr_loop_native.c 'if (!rc && (p.revents & (POLLHUP | POLLERR | POLLNVAL))) {' '        if (0) {' \
   'rc == -ENETRESET && r.glink.pd_down && r.loop.down_reported' \
   'PASS DOWN while idle: the idle wait reports it, MAP refused, no packet ever transmitted'
@@ -399,12 +479,15 @@ g7_mutant no-journal-append 'int arc = l->sink->append_fn(l->sink->user, rec, (s
   'PASS fd sink: one write(2) per record; a failed write is -EIO'
 g7_mutant tx-despite-sink-failure '/* no TX without its journal record */' '    (void)arc;' \
   'rc < 0 && r.glink.writes == 0 && r.ilink.sink_failures == 1' \
-  'PASS MAP and UNMAP journaled before TX (the peer saw each record before its packet), with fd, size and handle'
+  'PASS MAP journaled before TX (the peer saw its record before the packet), with fd and size; retire refused after the MAP: no UNMAP record, no TX, region held, retaining end'
 g7_mutant no-ledger-check 'if ((h.opcode == M11_APM_CMD_SHARED_MEM_MAP_REGIONS && !l->boot->dsp_map_attempted) ||' '    if ((0) ||' \
   'rc < 0 && r.glink.writes == 0 && r.ilink.refused == 1' \
   'PASS sink failure: no TX; the region stays unresolved (unknown TX, fail closed)'
 g7_mutant close-all-allowed "return -EPERM; /* outside the custodian's set" '        break;' \
   'm11_intent_format(rec, sizeof rec, 7, 3, pkt, pl) == -EPERM' ''
+# Post-MAP hold L2: an UNMAP is never journaled, so never transmitted (design M4).
+g7_mutant journal-allows-unmap 'return -EPERM; /* CP2 post-MAP hold: no UNMAP ever leaves PID1' '        break;' \
+  'un == -EPERM' ''
 # G8: the native end of a custodian boot over real adapters (stand-ins), the real owner seal and the
 # real custodian, manager and engine; test exit/reboot hooks report the fds at the moment of the end.
 g8_srcs=("${tc_srcs[@]}" "$own/m11_custodian.c" "$here/gpr_transport_native.c" "$here/shmem_backend_native.c"
@@ -552,7 +635,7 @@ cr_mutant not-one-shot 'if (crunner_started_once) return -EALREADY;' '    (void)
   'PASS composed tree census: a process gone between readdir and read is not counted'
 cr_mutant map-intent-not-required 'if (!r->cfg.map_intent_fn) return -EPERM;' '    (void)0;' \
   'strstr(rep, "MAP rc=-1 slot=-1 intents=0 attempted=0") && peer_count(rep) == 0' \
-  'PASS composed journal failure: no TX, region unresolved, the end is held (HOLD_RECONCILE)'
+  'PASS composed journal failure: no TX, region unresolved and held, the end is the retaining reset (post-MAP hold)'
 cr_mutant map-intent-not-called 'r->cfg.map_intent_fn(r->cfg.map_intent_user);' '    (void)0;' \
   'intents == 1 && R.map_intents == 1' ''
 cr_mutant map-intent-orderly 'else if (r->map_intents && m11_custodian_terminal_action(&r->cust) == M11_TERMINAL_ORDERLY_SHUTDOWN) {' '    } else if (0) {' \
@@ -851,11 +934,13 @@ p3_mutant no-cmdline-record 0 'phase_record(e, "phase=cmdline %s", summary);' ' 
   'strstr(rep, "action=START_FAILED end=reboot phase=cmdline step=3 rc=-1 anchors_held=0/2 boot_stage=0") && strstr(rep, "phases=journal,cmdline,teardown lines=4 ")' \
   "PASS entry refused when the journal is not the kernel log: nothing written to it, no socket; nothing audio opened, so Run23's sealed teardown (CYAN), then reboot"
 p3_mutant map-intent-not-busy 1 'm11_pds_resources_busy(&e->pdmon.pds);' '    (void)e;' \
-  'strstr(rep, "MAP rc=0 busy=1 intents=1") && strstr(rep, "PEER n=1") && strstr(rep, "PEER down_sent") && !strstr(rep, "PEER_VIOLATION")' \
+  'strstr(rep, "MAP rc=0 busy=1 intents=1") && strstr(rep, "PEER n=1") && !strstr(rep, "PEER down_sent") && !strstr(rep, "PEER_VIOLATION")' \
   'PASS entry, production shape (no session): P1 UP, P2 boot (nodes made, bound, sealed, removed), runner start, close, G8 orderly end: both anchors final-closed, reboot; nothing sent'
+# Post-MAP hold: a mapped boot never holds (its end is the retaining reset at once), so the HOLD
+# wait is driven by the never-mapped foreign-traffic case (HOLD_RECONCILE until the deadline).
 p3_mutant hold-not-waited 1 'if (rc != -EBUSY) return rc;' '        return rc;' \
-  'st == 42 && strstr(rep, "EXIT phase=7 ") && strstr(rep, "busy=1 deferred=1 acks_sent=0") && strstr(rep, "anchors_open=4/4")' \
-  'PASS entry, production shape (no session): P1 UP, P2 boot (nodes made, bound, sealed, removed), runner start, close, G8 orderly end: both anchors final-closed, reboot; nothing sent'
+  'st == 42 && strstr(rep, "EXIT phase=7 ") && hold_of(rep) >= 2 && strstr(rep, "intents=0") && strstr(rep, "anchors_open=4/4")' \
+  'PASS entry with a mapped region left (PD UP throughout): the MAP intent latched resources busy before the TX; close refused, no HOLD wait: the retaining end at once, holding every anchor and the mapped region (post-MAP hold)'
 # Run25 readiness R1/D2: the pre-bind failure end tears down sealed (CYAN) before the reboot; every
 # retaining exit seals first.
 p3_mutant fail-teardown-skipped 0 'if (e->cfg.teardown_count && fail_teardown(e)) { /* R1' '        if (0 && fail_teardown(e)) {' \
@@ -865,7 +950,7 @@ p3_mutant failure-colour-green 0 'e->result = "cyan";' '    e->result = "green";
   'strstr(rep, "jobs=seal,usb_stop,stop_adsp,common,checkpoint-cyan,unmount ") && strstr(rep, "td=0/0 step=8 ")' \
   'PASS entry calls: not PID1 and a bad configuration touch nothing and do not count; the first real call does, a second is refused and changes nothing'
 p3_mutant seal-before-exit-skipped 1 'if (!c->teardown_count || e->steps_started || e->boot.spawner.pid <= 0) return;' '    if (c) return;' \
-  'strstr(rep, "phases=journal,cmdline,pd_up,boot,runner,session,hold,seal lines=10 ")' \
+  'strstr(rep, "phases=journal,cmdline,pd_up,boot,runner,session,seal lines=9 ")' \
   'PASS entry, production shape (no session): P1 UP, P2 boot (nodes made, bound, sealed, removed), runner start, close, G8 orderly end: both anchors final-closed, reboot; nothing sent'
 # E-1: the last record gets seal_settle_ms of relay rounds before the seal's logger.stop.
 p3_mutant seal-settle-skipped 0 'while (m11_entry_now_ms() < settle_until) sleep_until(settle_until);' '    (void)settle_until; (void)sleep_until;' \

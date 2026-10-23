@@ -237,7 +237,11 @@ static void c_happy(void) {
     assert(intents == 1 && R.map_intents == 1); /* the intent hook ran once, before the MAP */
     region_fd = R.cust.regions[s].dma_buf_fd;
     assert(m11_crunner_idle(&R, 50, ms()) == 0);
-    assert(m11_crunner_retire(&R, s, ms()) == 0 && m11_crunner_close(&R) == 0);
+    /* Post-MAP hold (CP2 criterion 5): retire and close are refused at the custodian; the region keeps
+     * its ION import, mapping and pool buffer; no UNMAP is ever sent. */
+    assert(m11_crunner_retire(&R, s, ms()) == -EPERM && m11_crunner_close(&R) == -EPERM);
+    assert(R.cust.occupied[s] && R.cust.regions[s].state == M11_SHMEM_STATE_DSP_MAP_ACKNOWLEDGED &&
+           R.cust.regions[s].ion_imported && is_open(region_fd));
     (void)m11_crunner_end(&R, ms());
     _exit(99);
 }
@@ -376,9 +380,11 @@ static void c_sink_fails(void) {
     int step; assert(world(ANSWER, GOOD, &step) == 0);
     sink_fail = 1;
     unsigned s; int rc = m11_crunner_map(&R, 4096, ms(), &s);
-    int ret = m11_crunner_end(&R, ms());
-    char b[160]; snprintf(b, sizeof b, "MAP rc=%d unresolved=%d END=%d records=%u\n", rc,
-                          R.cust.regions[s].state == M11_SHMEM_STATE_OWNERSHIP_UNRESOLVED, ret, nrec);
+    char b[160]; snprintf(b, sizeof b, "MAP rc=%d unresolved=%d records=%u\n", rc,
+                          R.cust.regions[s].state == M11_SHMEM_STATE_OWNERSHIP_UNRESOLVED, nrec);
+    say(b);
+    int ret = m11_crunner_end(&R, ms()); /* post-MAP hold: the retaining end, PID1 exit (never returns) */
+    snprintf(b, sizeof b, "END returned %d\n", ret);
     say(b); _exit(0);
 }
 
@@ -433,10 +439,11 @@ int main(void) {
     st = run(c_happy, rep, sizeof rep);
     printf("INFO %s", rep);
     assert(strstr(rep, "START rc=0 step=0 heap_open=0"));
-    assert(st == 42 && strstr(rep, "EXIT anchors=4/4 pool=4/4 region_in_pool=1 records=3 map=1 unmap=1 terminal=1"));
+    assert(st == 42 && strstr(rep, "EXIT anchors=4/4 pool=4/4 region_in_pool=1 records=2 map=1 unmap=0 terminal=1"));
     assert(strstr(rep, "action=RESET_RETAINING_ANCHORS end=pid1_exit anchors_held=2/2 anchor_fds_open=4/4 pool=held"));
-    assert(peer_count(rep) == 2 && !strstr(rep, "PEER_VIOLATION"));
-    printf("PASS composed boot: start (gate, PD up, pool from the heap, heap closed, seals, journal, census), MAP of a pool buffer, idle, UNMAP, close, PID1 exit holding every anchor and pool fd; each packet's record preceded it\n");
+    assert(strstr(rep, "regions=1 in_pool=1 note=mapped_boot"));
+    assert(peer_count(rep) == 1 && !strstr(rep, "PEER_VIOLATION"));
+    printf("PASS composed boot: start (gate, PD up, pool from the heap, heap closed, seals, journal, census), MAP of a pool buffer, idle, retire and close refused (post-MAP hold, no UNMAP), PID1 exit holding every anchor, pool fd and the mapped region; the packet's record preceded it\n");
 
     st = run(c_never_mapped, rep, sizeof rep);
     printf("INFO %s", rep);
@@ -525,8 +532,9 @@ int main(void) {
 
     st = run(c_sink_fails, rep, sizeof rep);
     printf("INFO %s", rep);
-    assert(st == 0 && strstr(rep, "unresolved=1 END=-16 records=0") && peer_count(rep) == 0);
-    printf("PASS composed journal failure: no TX, region unresolved, the end is held (HOLD_RECONCILE)\n");
+    assert(strstr(rep, "unresolved=1 records=0") && peer_count(rep) == 0 && !strstr(rep, "END returned"));
+    assert(st == 42 && strstr(rep, "EXIT anchors=4/4 pool=4/4") && strstr(rep, "action=RESET_RETAINING_ANCHORS end=pid1_exit"));
+    printf("PASS composed journal failure: no TX, region unresolved and held, the end is the retaining reset (post-MAP hold)\n");
 
     st = run(c_no_intent, rep, sizeof rep);
     printf("INFO %s", rep);

@@ -3,13 +3,15 @@
  *
  * A transport wrapper around the native transport (G2/G6). Its write_fn, for every packet:
  *  1. decodes the GPR packet and refuses (-EPERM, nothing written) any opcode outside the
- *     custodian's set: GET_SPF_STATE, SHARED_MEM_MAP/UNMAP_REGIONS, GRAPH_OPEN/PREPARE/START/STOP/
- *     CLOSE, SET_CFG, GET_CFG. APM_CMD_CLOSE_ALL is therefore never sent from userspace;
- *  2. requires the custodian's ledger intent first: a MAP only once dsp_map_attempted is set, an
- *     UNMAP only once dsp_unmap_attempted is set (-EPERM otherwise);
+ *     custodian's set: GET_SPF_STATE, SHARED_MEM_MAP_REGIONS, GRAPH_OPEN/PREPARE/START/STOP/
+ *     CLOSE, SET_CFG, GET_CFG. APM_CMD_CLOSE_ALL is therefore never sent from userspace, and
+ *     SHARED_MEM_UNMAP_REGIONS is refused unconditionally (CP2 post-MAP hold,
+ *     docs/m11-argon-cp2-c5-hold-design.md: no UNMAP ever leaves PID1);
+ *  2. requires the custodian's ledger intent first: a MAP only once dsp_map_attempted is set
+ *     (-EPERM otherwise; the former UNMAP clause is unreachable after step 1);
  *  3. appends one record (boot epoch, sequence, opcode, token, client data; for a MAP the dma-buf
- *     fd number, size, pool and flags; for an UNMAP the map handle) to the sink, and transmits only
- *     after the sink accepted it whole (-EIO otherwise, nothing written);
+ *     fd number, size, pool and flags) to the sink, and transmits only after the sink accepted it
+ *     whole (-EIO otherwise, nothing written);
  *  4. then calls the inner write_fn unchanged.
  * Any refusal happens after the engine called write_fn, so the engine records an UNKNOWN TX
  * (WRITE_ERROR) and the region manager keeps the region unresolved: fail closed, never "not sent".

@@ -288,13 +288,13 @@ int main(void) {
             unsigned slot=0; assert(!m11_custodian_map(&c,4096,100,&slot));
             w=lend(); assert(km_kill(&k,w)); assert(!m11_anchor_lend_end(&a,M11_WORKER_EXIT_ABNORMAL));
             assert(boot.reasons & M11_TAINT_WORKER_EXIT);
-            assert(m11_custodian_terminal_action(&c)==M11_TERMINAL_HOLD_RECONCILE);
-            assert(m11_anchor_end_boot(&a,m11_custodian_terminal_action(&c),&end)==-EBUSY);
+            /* rev 5 (post-MAP hold): a mapped boot never waits in HOLD_RECONCILE */
+            assert(m11_custodian_terminal_action(&c)==M11_TERMINAL_RESET_RETAINING_ANCHORS);
             assert(m11_custodian_tick(&c,201)==-EOWNERDEAD);
             assert(m11_custodian_terminal_action(&c)==M11_TERMINAL_RESET_RETAINING_ANCHORS);
             assert(!m11_anchor_end_boot(&a,m11_custodian_terminal_action(&c),&end) && end==M11_ANCHOR_END_RETAIN);
             km_exit(&k,0); assert(k.panicked && k.endpoint_releases==0);
-            pass("ledger: DSP-mapped boot, worker killed -> taint -> deadline -> PID1 exit, no release");
+            pass("ledger: DSP-mapped boot, worker killed -> taint -> retaining reset at once (post-MAP hold) -> PID1 exit, no release");
         } else {
             int intruder2=km_fork(&k,0); km_exec(&k,intruder2); assert(km_open(&k,intruder2,true)>=0);
             assert(m11_anchor_check(&a)==-EBUSY && c.kernel_imports_lost);

@@ -223,6 +223,10 @@ int m11_custodian_map(m11_custodian *c, size_t bytes, uint64_t now, unsigned *sl
 }
 int m11_custodian_retire(m11_custodian *c, unsigned i, uint64_t now) {
     if (!c || i>=M11_CUSTODIAN_REGIONS || !c->occupied[i]) return -EINVAL;
+    /* Post-MAP hold (CP2 criterion 5): after the first MAP intent no region is retired, no
+     * reconcile or UNMAP is started and nothing is released; regions stay held until the
+     * retaining reset. Refused before any tick, taint or engine call. */
+    if (!c->boot || c->boot->dsp_map_attempted) return -EPERM;
     int rc=m11_custodian_tick(c, now);
     if (rc) return rc;
     if (foreign_traffic(c, now)) return -EBUSY;
@@ -422,6 +426,9 @@ void m11_custodian_supervisor_exit(m11_custodian *c, bool was_global_init, uint6
 int m11_custodian_close(m11_custodian *c) {
     if (!c || !c->boot) return -EINVAL;
     if (c->closed) return -EALREADY;
+    /* Post-MAP hold: the endpoint last-close (CLOSE_ALL + global ION cleanup) never runs after
+     * any MAP intent of this boot. */
+    if (c->boot->dsp_map_attempted) return -EPERM;
     if (foreign_traffic(c, c->boot->last_ms)) return -EOWNERDEAD;
     if (c->boot->state != M11_ADSP_CLEAN || !c->boot->owner_alive ||
         c->kernel_imports_lost || c->call_inflight) return -EOWNERDEAD;
@@ -449,11 +456,11 @@ m11_terminal_action m11_custodian_terminal_action(const m11_custodian *c) {
     if (b->state == M11_RECOVERY_REQUIRED || !b->owner_alive || c->kernel_imports_lost ||
         (b->recovery_deadline_set && b->last_ms >= b->recovery_due_ms))
         return M11_TERMINAL_RESET_RETAINING_ANCHORS;
+    /* Post-MAP hold (CP2 criterion 5): after any MAP intent of this boot the only end is the
+     * retaining reset. Regions are held (never retired), so there is no reconciliation to wait
+     * for, and device_shutdown() must never run after a possible DSP MAP. */
+    if (b->dsp_map_attempted) return M11_TERMINAL_RESET_RETAINING_ANCHORS;
     bool torn_down = !any_region(c) && !graphs_active(c) && c->closed;
-    /* A clean orderly teardown does not prove ADSP quiescence; device_shutdown() must not
-     * run after any DSP MAP of this boot. Once torn down nothing is left to reconcile and
-     * nothing can be mapped again, so this decision is final even if a taint follows. */
-    if (torn_down && b->dsp_map_attempted) return M11_TERMINAL_RESET_RETAINING_ANCHORS;
     if (b->state == M11_ADSP_TAINTED) return M11_TERMINAL_HOLD_RECONCILE;
     if (!torn_down) return M11_TERMINAL_HOLD;
     return M11_TERMINAL_ORDERLY_SHUTDOWN;

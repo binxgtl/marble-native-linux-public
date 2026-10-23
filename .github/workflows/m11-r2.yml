@@ -1,8 +1,9 @@
-name: M11 R2 offline (journal stamp fix, anchor-native suites, graph plan, P4 binaries)
+name: M11 R2 offline (journal stamp fix, anchor-native suites, custodian and runtime-repair suites, graph plan, P4 binaries)
 # Offline only, on x64 and native ARM64: the integrated anchor suite (runner control flow, PDR
 # model, census, stand-in GET_SPF_STATE, the Run22 journal-stamp fix through the real journal.sh
-# with BusyBox and the unmodified evidence rule, mutants), the anchor qualification suite and the
-# synthetic AudioReach graph-plan parser tests.
+# with BusyBox and the unmodified evidence rule, mutants), the anchor qualification suite, the
+# custodian and runtime-repair suites (post-MAP hold) and the synthetic AudioReach graph-plan
+# parser tests.
 # No candidate, no device, driver, firmware, ROM payload or proprietary module.
 on:
   workflow_dispatch:
@@ -11,6 +12,7 @@ on:
     paths:
       - 'scripts/m11/anchor-native/**'
       - 'scripts/m11/qualification/ownership/**'
+      - 'scripts/m11/qualification/runtime-repair/**'
       - 'scripts/m11/instrumentation/**'
       - 'scripts/m11/runtime/**'
       - 'scripts/m11/r2/**'
@@ -50,6 +52,42 @@ jobs:
         if: always()
         with:
           name: r2-suites-${{ runner.arch }}-${{ github.sha }}
+          path: |
+            artifacts/m11/r2/**/*.log
+            artifacts/m11/r2/**/*.txt
+            artifacts/m11/r2/**/*.sha256
+  # CP2 criterion 5, post-MAP hold (docs/m11-argon-cp2-c5-hold-design.md): the offline custodian
+  # suite (taint/ACK/graph ledger, before/after witnesses on pinned baselines, adversarial matrices,
+  # seeded fuzz with rule mutants, W3 cmdline differential) and the runtime-repair suite (repaired,
+  # hardening and fuzz suites, Python oracle, review and hardening baselines, mutation check).
+  # Mocks only; no device, firmware or proprietary input.
+  custodian:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang
+          gcc --version | head -1; clang --version | head -1; uname -m
+      - name: Pinned ACK reference sources for W3 (sha256-checked, not committed)
+        run: bash scripts/m11/qualification/ownership/fetch_ack_ref_sources.sh "$RUNNER_TEMP/ack"
+      - name: Offline custodian suite (post-MAP hold)
+        env:
+          M11_ACK_SRC: ${{ runner.temp }}/ack
+        run: bash scripts/m11/qualification/ownership/run_tests.sh artifacts/m11/r2/custodian
+      - name: Runtime-repair suite (post-MAP hold, baselines, mutation check)
+        if: always()
+        run: bash scripts/m11/qualification/runtime-repair/run_tests.sh artifacts/m11/r2/runtime-repair
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: r2-custodian-${{ runner.arch }}-${{ github.sha }}
           path: |
             artifacts/m11/r2/**/*.log
             artifacts/m11/r2/**/*.txt

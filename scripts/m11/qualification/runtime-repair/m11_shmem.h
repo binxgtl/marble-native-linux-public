@@ -12,6 +12,13 @@ extern "C" {
 #endif
 
 /*
+ * API marker of the post-MAP hold (CP2 criterion 5, layer L3, docs/m11-argon-cp2-c5-hold-design.md):
+ * a region whose MAP may have been transmitted is never released locally. Tests that are also
+ * built against older trees (the hardening baseline) use it to pick their expectations.
+ */
+#define M11_SHMEM_POST_MAP_HOLD 1
+
+/*
  * Stock marble /dev/msm_audio_ion ioctl numbers.
  * Verified against:
  *   - audpkt_ion_dlkm.ko (audpkt_ion_ioctl @ 0x1017bc)
@@ -113,7 +120,8 @@ typedef enum {
     M11_SHMEM_CAUSE_UNMAP_TRANSPORT_ERR,
     M11_SHMEM_CAUSE_UNMAP_PDR,
     M11_SHMEM_CAUSE_UNMAP_NACK,          /* DSP refused UNMAP: mapping state unknown */
-    M11_SHMEM_CAUSE_LOCAL_RELEASE_FAILED /* remote proven gone, a local step failed */
+    M11_SHMEM_CAUSE_LOCAL_RELEASE_FAILED, /* remote proven gone, a local step failed */
+    M11_SHMEM_CAUSE_MAP_NACK             /* DSP refused MAP after TX: held (no contract that nothing mapped) */
 } m11_shmem_cause_t;
 
 typedef enum {
@@ -186,6 +194,17 @@ typedef struct {
     const char       *blocker;
     bool              counted_unresolved;      /* counted once in mgr->unresolved_regions */
     bool              counted_local_pending;   /* counted once in mgr->local_release_pending_regions */
+    /*
+     * Post-MAP hold (CP2 criterion 5, docs/m11-argon-cp2-c5-hold-design.md). Both are monotonic for
+     * the life of the region: no ACK, NACK, reconciliation or cleanup clears them.
+     * map_tx_started: set immediately before the MAP packet is handed to the engine, i.e. before
+     *   write_fn can be entered.
+     * map_tx_unsent_proof: set only when that submit failed with M11_GPR_TX_NOT_ATTEMPTED (write_fn
+     *   provably never invoked).
+     * A region with map_tx_started && !map_tx_unsent_proof is never released locally.
+     */
+    bool              map_tx_started;
+    bool              map_tx_unsent_proof;
 } m11_shmem_region_t;
 
 /*
@@ -239,6 +258,14 @@ int m11_shmem_mgr_init(m11_shmem_mgr_t *mgr, const m11_shmem_backend_t *backend,
 int m11_shmem_begin_cpu_access(m11_shmem_mgr_t *mgr, m11_shmem_region_t *region);
 int m11_shmem_end_cpu_access(m11_shmem_mgr_t *mgr, m11_shmem_region_t *region);
 
+/*
+ * Allocates, imports and MAPs one region. Local handles are released on failure ONLY before TX,
+ * or when the MAP submit failed with M11_GPR_TX_NOT_ATTEMPTED (write_fn provably never invoked).
+ * Every failure after the packet may have reached write_fn (write error, short write, NACK,
+ * timeout, ambiguous response, PDR) leaves the region OWNERSHIP_UNRESOLVED with its backing held.
+ * Precondition: out_region is not a region the caller still holds (it is overwritten); the
+ * custodian never reuses an occupied slot, and a held region stays occupied.
+ */
 int m11_shmem_alloc_and_map(m11_shmem_mgr_t *mgr, m11_shmem_mode_t mode,
                             size_t requested_bytes, bool hyp_assign,
                             m11_shmem_region_t *out_region);
@@ -249,6 +276,10 @@ int m11_shmem_alloc_and_map(m11_shmem_mgr_t *mgr, m11_shmem_mode_t mode,
  *   - LOCAL_RELEASE_PENDING              -> retries ONLY the remaining local steps; no DSP
  *                                           command is sent again
  *   - DSP_MAP_ACKNOWLEDGED               -> sends one UNMAP; local release only after its ACK
+ * POST-MAP HOLD (CP2 criterion 5): a region whose MAP was handed to write_fn is never released
+ * locally (-EPERM, handles untouched), whatever an UNMAP ACK says. The UNMAP path is kept for
+ * research and regression only; the custodian (retire refused after any MAP intent) and the G7
+ * journal (UNMAP opcode refused) keep it unreachable in the native composition.
  * A successful handle release can still have cleanup_error < 0 for END_RW.
  * Enclosing cleanup must inspect it before claiming a clean teardown.
  */
@@ -256,8 +287,11 @@ int m11_shmem_unmap_and_free(m11_shmem_mgr_t *mgr, m11_shmem_region_t *region);
 
 /*
  * Collects the late response of an outstanding MAP/UNMAP for an UNRESOLVED region.
- *   0       ownership resolved (MAP ACK adopted -> DSP_MAP_ACKNOWLEDGED; MAP NACK -> local
- *           release done; UNMAP ACK -> remote released)
+ *   0       late MAP ACK adopted -> DSP_MAP_ACKNOWLEDGED
+ *   -EPERM  late UNMAP ACK on a transmitted region: the remote event is recorded
+ *           (DSP_UNMAP_ACKNOWLEDGED) but the local handles stay held (post-MAP hold)
+ *   -EREMOTEIO for a late MAP NACK: the region stays OWNERSHIP_UNRESOLVED (cause MAP_NACK) with
+ *           its backing held
  *   -ETIMEDOUT / transport errno: still unresolved, a later call may succeed
  *   -ENETRESET / -ENOENT / -EPROTO / -EREMOTEIO: unresolved with a recorded blocker; the
  *           region stays OWNERSHIP_UNRESOLVED and nothing is freed

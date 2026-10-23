@@ -268,7 +268,8 @@ int main(void) {
     assert(fd_open(fd) && b.close_fd_fn(b.user, fd) == 0);
     printf("PASS a forked process is refused by the link\n");
 
-    /* 12. end to end: the MAP names the same fd number the ION list imported; UNMAP ACK frees. */
+    /* 12. end to end: the MAP names the same fd number the ION list imported; the UNMAP research
+     * path (driven directly) is ACKed but releases nothing: post-MAP hold (CP2 criterion 5). */
     struct rig r; m11_shmem_region_t reg;
     rig_start(&r, ANSWER);
     assert(m11_shmem_alloc_and_map(&r.mgr, M11_SHMEM_MODE_DMA_ION_OFFSET, 100, false, &reg) == 0);
@@ -278,11 +279,25 @@ int main(void) {
     memset(reg.vaddr, 0x11, 4096);
     assert(m11_shmem_end_cpu_access(&r.mgr, &reg) == 0 && reg.cpu_cache_clean_for_dsp);
     int mapped_fd = reg.dma_buf_fd;
-    assert(m11_shmem_unmap_and_free(&r.mgr, &reg) == 0 && reg.state == M11_SHMEM_STATE_RELEASED);
-    assert(!fx.imported[mapped_fd] && !fd_open(mapped_fd) && m11_shmem_native_held(&r.slink) == 0);
+    assert(m11_shmem_unmap_and_free(&r.mgr, &reg) == -EPERM && reg.state == M11_SHMEM_STATE_DSP_UNMAP_ACKNOWLEDGED);
+    assert(reg.map_tx_started && !reg.map_tx_unsent_proof && reg.dma_buf_fd == mapped_fd && reg.vaddr && reg.ion_imported);
+    assert(fx.imported[mapped_fd] && fd_open(mapped_fd) && m11_shmem_native_held(&r.slink) == 1);
+    memset(reg.vaddr, 0x33, 4096); /* the backing is still mapped */
+    assert(m11_shmem_unmap_and_free(&r.mgr, &reg) == -EPERM && fd_open(mapped_fd)); /* a retry releases nothing either */
     assert(m11_shmem_mgr_audit(&r.mgr, &reg, 1) == 0 && reg.cleanup_error == 0);
     assert(rig_stop(&r) == 2);
-    printf("PASS end to end: MAP carries the imported fd number; UNMAP ACK releases import, mapping and fd\n");
+    printf("PASS end to end: MAP carries the imported fd number; the UNMAP research path's ACK releases nothing (post-MAP hold): import, mapping and fd retained\n");
+
+    /* 12b. end to end: a submit refused before write_fn (engine closed: NOT_ATTEMPTED) is the only
+     * post-intent failure that releases; the native unimport, munmap and close all run. */
+    rig_start(&r, ANSWER);
+    assert(m11_gpr_engine_close(&r.eng) == 0);
+    assert(m11_shmem_alloc_and_map(&r.mgr, M11_SHMEM_MODE_DMA_ION_OFFSET, 4096, false, &reg) < 0);
+    assert(r.eng.last_tx_status == M11_GPR_TX_NOT_ATTEMPTED && reg.map_tx_started && reg.map_tx_unsent_proof);
+    assert(reg.state == M11_SHMEM_STATE_RELEASED && reg.dma_buf_fd < 0 && !reg.vaddr && !reg.ion_imported);
+    assert(m11_shmem_native_held(&r.slink) == 0 && m11_shmem_mgr_audit(&r.mgr, &reg, 1) == 0 && reg.cleanup_error == 0);
+    assert(rig_stop(&r) == 0);
+    printf("PASS end to end: a MAP refused before write_fn (proven unsent) releases import, mapping and fd; nothing sent\n");
 
     /* 13. end to end: no MAP answer -> ownership unresolved, every local handle retained. */
     rig_start(&r, SILENT);

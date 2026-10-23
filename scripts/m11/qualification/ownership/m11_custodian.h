@@ -22,8 +22,12 @@
 /* 3: graph ledger, foreign-traffic latch, engine clock, terminal boundary, next_arg gate.
  * 4: one-shot regions (no MAP after the first DSP UNMAP of a boot) and no reboot(2) after
  *    any DSP MAP of a boot. Both are fail-closed narrowing rules; neither proves ADSP DMA
- *    quiescence. */
-#define M11_CUSTODIAN_API_REVISION 4
+ *    quiescence.
+ * 5: post-MAP hold (CP2 criterion 5, docs/m11-argon-cp2-c5-hold-design.md): after the first
+ *    MAP intent of a boot, retire and close are refused (-EPERM), no UNMAP is started, no
+ *    region is released, and the only end is RESET_RETAINING_ANCHORS. The shmem layer holds
+ *    every region whose MAP may have reached write_fn (NACK included). */
+#define M11_CUSTODIAN_API_REVISION 5
 #define M11_CUSTODIAN_REGIONS 4u
 #define M11_CUSTODIAN_GRAPHS 2u
 typedef enum { M11_ADSP_CLEAN, M11_ADSP_TAINTED, M11_RECOVERY_REQUIRED } m11_adsp_state;
@@ -91,8 +95,8 @@ typedef struct {
  *                     end the boot with the anchors still held: PID1 exits, which
  *                     panics before exit_files(); PANIC_TIMEOUT=-1 then calls
  *                     emergency_restart() without device_shutdown(). Never close an
- *                     anchor, never reboot(2). Also the only end of a boot that ever
- *                     DSP-mapped a region, even after a clean orderly teardown.
+ *                     anchor, never reboot(2). Also the only end of any boot with a MAP
+ *                     intent (rev 5: decided before the HOLD branches).
  *  UNSAFE_LAST_CLOSE_OCCURRED
  *                     the model recorded that a non-PID1 final-anchor holder died, so
  *                     the kernel release path (CLOSE_ALL + global ION cleanup) ran
@@ -127,7 +131,9 @@ int m11_custodian_init(m11_custodian *, m11_boot_ledger *, m11_shmem_mgr_t *,
                        const m11_custodian_model_contract *, uint32_t recovery_budget_ms);
 /* -EPERM once any DSP UNMAP was attempted in this boot (one-shot regions). */
 int m11_custodian_map(m11_custodian *, size_t bytes, uint64_t now_ms, unsigned *slot);
-/* Refused for the rest of the boot once FOREIGN_TRAFFIC or GRAPH_UNKNOWN is latched. */
+/* -EPERM after any MAP intent of this boot (rev 5 post-MAP hold): no reconcile, UNMAP or release.
+ * The pre-rev-5 retire body (FOREIGN_TRAFFIC / GRAPH_UNKNOWN latches, reconcile, UNMAP) is kept
+ * for research and regression and is unreachable in a boot. */
 int m11_custodian_retire(m11_custodian *, unsigned slot, uint64_t now_ms);
 /* Graph commands are custodian-mediated; workers request them, never send them. */
 int m11_custodian_graph_open(m11_custodian *, unsigned region, uint32_t shm_offset,
@@ -144,6 +150,7 @@ void m11_custodian_pd_down(m11_custodian *, uint64_t now_ms);
 /* Model of the final-anchor holder dying. Not callable by anything that survived it. */
 void m11_custodian_supervisor_exit(m11_custodian *, bool was_global_init, uint64_t now_ms);
 int m11_custodian_tick(m11_custodian *, uint64_t now_ms);
+/* -EPERM after any MAP intent of this boot (rev 5): the endpoint last-close never runs then. */
 int m11_custodian_close(m11_custodian *);
 /* There is no qualified same-boot ADSP quiescence/restart boundary. Always -ENOTSUP. */
 int m11_custodian_request_recovery(m11_custodian *);
