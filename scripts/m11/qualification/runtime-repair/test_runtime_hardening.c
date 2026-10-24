@@ -1872,18 +1872,28 @@ static void p7_data_commands_complete_on_their_own_responses(void) {
                                     M11_DATA_CMD_RD_SH_MEM_EP_DATA_BUFFER_V2 };
     static const size_t lens[] = { 32u, 8u, 56u };
     for (size_t i = 0; i < 3; i++) {
+        const int eos = ops[i] == M11_DATA_CMD_WR_SH_MEM_EP_EOS;
         sc_setup(gen_data_rsp, false);
+        SC.gen_arg1 = eos ? 1u : 0u; /* success: data status 0; EOS render status 1 (rendered) */
         uint32_t dsp = 99;
         size_t len = 0;
         int rc = p7_send(ops[i], &dsp, &len);
         CHECK(rc == 0 && dsp == 0u && len == lens[i], "opcode 0x%08x: rc=%d dsp=%u len=%zu", ops[i], rc, dsp, len);
         sc_teardown();
         sc_setup(gen_data_rsp, false);
-        SC.gen_arg1 = 5u; /* a non-zero data / render status fails the command */
+        SC.gen_arg1 = eos ? 2u : 5u; /* a data error, or an EOS dropped, fails the command */
         rc = p7_send(ops[i], &dsp, &len);
-        CHECK(rc == -EREMOTEIO && dsp == 5u, "opcode 0x%08x status 5: rc=%d dsp=%u", ops[i], rc, dsp);
+        CHECK(rc == -EREMOTEIO && dsp == SC.gen_arg1, "opcode 0x%08x status %u: rc=%d dsp=%u", ops[i], SC.gen_arg1, rc, dsp);
         sc_teardown();
     }
+    /* an EOS render status 0 is not "rendered" (stock: invalid) */
+    sc_setup(gen_data_rsp, false);
+    SC.gen_arg1 = 0u;
+    uint32_t dsp0 = 0;
+    size_t len0 = 0;
+    int rc0 = p7_send(M11_DATA_CMD_WR_SH_MEM_EP_EOS, &dsp0, &len0);
+    CHECK(rc0 == -EREMOTEIO && dsp0 == UINT32_MAX, "EOS render status 0: rc=%d dsp=%u", rc0, dsp0);
+    sc_teardown();
 }
 
 static void p7_malformed_or_misrouted_completions_are_dropped(void) {

@@ -217,6 +217,10 @@ MUTANTS = [
            "            return M11_DATA_CMD_RSP_WR_SH_MEM_EP_DATA_BUFFER_DONE_V2;",
            "            return M11_GPR_IBASIC_RSP_RESULT; /* MUTANT: buffer done not correlated */",
            "never complete a write buffer on its BUFFER_DONE"),
+    Mutant("M34", "P7", "m11_gpr_engine.c",
+           "            if (hdr.opcode == M11_DATA_CMD_RSP_WR_SH_MEM_EP_EOS_RENDERED) st = st == 1u ? 0u : st ? st : UINT32_MAX;",
+           "            (void)0; /* MUTANT: the EOS render status read as an error code */",
+           "fail a rendered EOS (render status 1) and pass an invalid one (0)"),
 ]
 
 

@@ -1021,7 +1021,7 @@ w5_mutant bypass-custodian speaker_session_native.c 'int rc = m11_custodian_grap
   '    uint32_t st_ = 0; int rc = m11_apm_transact_graph_mgmt(eng(s), opcode, s->io->cust->graphs[g].sgs, s->io->cust->graphs[g].num_sgs, 300, &st_); /* MUTANT */' \
   'rc == 0 && rep.stage == M11_SPK_EOS && rep.amp_off_verified && !rep.teardown_rc' "$w5_spk_plan"
 # W5b: every out-of-band payload written at the same offset (a payload whose reply never came may still be read)
-w5_mutant oob-reused speaker_session_native.c 's->oob_next = (uint32_t)(((size_t)s->oob_next + len + OOB_ALIGN - 1u) / OOB_ALIGN * OOB_ALIGN);' \
+w5_mutant oob-reused speaker_session_native.c 's->oob_next = (uint32_t)ALIGN_UP((size_t)s->oob_next + len);' \
   '    (void)0; /* MUTANT */' \
   '!memcmp(cmdr, plan.vi.open.data, plan.vi.open.len) && !memcmp(cmdr + 4096, plan.vi.cal.data, plan.vi.cal.len) && !memcmp(cmdr + 8192, plan.rx.open.data, plan.rx.open.len) && !memcmp(cmdr + 12288, plan.rx.cal.data, plan.rx.cal.len)' \
   "$w5_spk_plan"

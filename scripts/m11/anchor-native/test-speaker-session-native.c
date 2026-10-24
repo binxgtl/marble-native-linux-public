@@ -213,7 +213,7 @@ static void peer(int ep, peer_cfg c) {
             uint32_t w[14] = {0};
             reply(ep, &h, M11_DATA_CMD_RSP_RD_SH_MEM_EP_DATA_BUFFER_DONE_V2, w, sizeof w);
         } else if (h.opcode == M11_DATA_CMD_WR_SH_MEM_EP_EOS) {
-            uint32_t w[2] = {h.dst_port, 0};
+            uint32_t w[2] = {h.dst_port, 1}; /* render status 1: rendered */
             reply(ep, &h, M11_DATA_CMD_RSP_WR_SH_MEM_EP_EOS_RENDERED, w, sizeof w);
         } else {
             m11_gpr_ibasic_rsp_t r = {.cmd_opcode = h.opcode, .status = 0};

@@ -58,7 +58,8 @@ extern "C" {
 #define M11_DATA_CMD_WR_SH_MEM_EP_EOS                      0x04001002u
 #define M11_DATA_CMD_RD_SH_MEM_EP_DATA_BUFFER_V2           0x0400100Bu
 #define M11_DATA_CMD_RSP_WR_SH_MEM_EP_DATA_BUFFER_DONE_V2  0x05001004u /* 32 B, status at +12 */
-#define M11_DATA_CMD_RSP_WR_SH_MEM_EP_EOS_RENDERED         0x05001001u /* 8 B, status at +4 */
+#define M11_DATA_CMD_RSP_WR_SH_MEM_EP_EOS_RENDERED         0x05001001u /* 8 B, render status at +4: 1 rendered
+                                                                         * (completes), 2 dropped, else invalid */
 #define M11_DATA_CMD_RSP_RD_SH_MEM_EP_DATA_BUFFER_DONE_V2  0x05001005u /* 56 B, status at +0 */
 
 #define M11_GPR_HDR_VERSION   0u

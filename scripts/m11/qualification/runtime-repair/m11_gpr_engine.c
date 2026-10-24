@@ -452,6 +452,9 @@ int m11_gpr_engine_pump_once(m11_gpr_engine_t *eng, uint32_t timeout_ms) {
             }
             uint32_t st;
             memcpy(&st, pl + at, sizeof(st));
+            /* EOS RENDERED carries a render status, not an error code: 1 rendered, 2 dropped; stock gsl_handle_eos
+             * (libar-gsl gsl_gpr_callback, 0x120238) calls any other value invalid. Only "rendered" completes. */
+            if (hdr.opcode == M11_DATA_CMD_RSP_WR_SH_MEM_EP_EOS_RENDERED) st = st == 1u ? 0u : st ? st : UINT32_MAX;
             slot->dsp_status = st;
         }
     } else {

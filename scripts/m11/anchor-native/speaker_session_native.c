@@ -13,7 +13,10 @@
 
 #define RD_BUFFERS 2u
 #define RD_BUFFER_MS 20u
+/* every payload and buffer in a region starts on its own 4 KiB boundary (stock gsl_shmem_alloc_ext sub-allocates
+ * shared pages at 1 KiB granularity, libar-gsl 0x124bb8) */
 #define OOB_ALIGN 4096u
+#define ALIGN_UP(n) ((((n) + OOB_ALIGN - 1u) / OOB_ALIGN) * OOB_ALIGN)
 #define AW_SWITCH_0 "aw_dev_0_switch"
 #define AW_SWITCH_1 "aw_dev_1_switch"
 
@@ -66,7 +69,7 @@ static int oob_place(sess *s, uint32_t len, uint32_t *off) {
     const size_t cap = s->io->cust->regions[s->cmd].aligned_bytes;
     if (!len || (size_t)s->oob_next + len > cap) return -E2BIG;
     *off = s->oob_next;
-    s->oob_next = (uint32_t)(((size_t)s->oob_next + len + OOB_ALIGN - 1u) / OOB_ALIGN * OOB_ALIGN);
+    s->oob_next = (uint32_t)ALIGN_UP((size_t)s->oob_next + len);
     return 0;
 }
 
@@ -149,8 +152,8 @@ static int submit_write(sess *s, unsigned i, uint32_t off, uint32_t len) {
     return rc;
 }
 
-/* the PCM through write_buffers buffers; each completed buffer is refilled with the next chunk */
-static int play(sess *s, uint32_t chunk) {
+/* the PCM through write_buffers buffers (stride bytes apart); each completed buffer is refilled with the next chunk */
+static int play(sess *s, uint32_t chunk, uint32_t stride) {
     const m11_speaker_io *io = s->io;
     const m11_plan_blob *pcm = &io->plan->pcm;
     uint32_t next = 0;
@@ -158,8 +161,8 @@ static int play(sess *s, uint32_t chunk) {
     uint32_t sent_len[8] = {0};
     for (unsigned i = 0; i < io->write_buffers && next < pcm->len; i++) {
         uint32_t len = pcm->len - next < chunk ? pcm->len - next : chunk;
-        int rc = region_write(s, i * chunk, pcm->data + next, len);
-        if (!rc) rc = submit_write(s, i, i * chunk, len);
+        int rc = region_write(s, i * stride, pcm->data + next, len);
+        if (!rc) rc = submit_write(s, i, i * stride, len);
         if (rc) return rc;
         sent_len[i] = len;
         next += len;
@@ -177,8 +180,8 @@ static int play(sess *s, uint32_t chunk) {
         inflight--;
         if (next < pcm->len) {
             uint32_t len = pcm->len - next < chunk ? pcm->len - next : chunk;
-            if ((rc = region_write(s, head * chunk, pcm->data + next, len)) ||
-                (rc = submit_write(s, head, head * chunk, len)))
+            if ((rc = region_write(s, head * stride, pcm->data + next, len)) ||
+                (rc = submit_write(s, head, head * stride, len)))
                 return rc;
             sent_len[head] = len;
             next += len;
@@ -271,7 +274,8 @@ static int run(sess *s) {
     const uint32_t frame = p->stream_channels * 2u;
     const uint32_t chunk = p->stream_rate / 1000u * io->buffer_ms * frame;
     const uint32_t rd_chunk = p->vi_rate / 1000u * RD_BUFFER_MS * p->vi_channels * 2u;
-    if (!chunk || (size_t)chunk * io->write_buffers + (size_t)rd_chunk * RD_BUFFERS > io->region_bytes)
+    const uint32_t wr_stride = ALIGN_UP(chunk), rd_stride = ALIGN_UP(rd_chunk);
+    if (!chunk || !rd_chunk || (size_t)wr_stride * io->write_buffers + (size_t)rd_stride * RD_BUFFERS > io->region_bytes)
         return fail(s, M11_SPK_PLAN, "plan", -E2BIG);
     done(s, M11_SPK_PLAN, "plan");
     if ((rc = set_switches(s, "Disable")) || (rc = switches_read(s, "Disable")))
@@ -311,9 +315,9 @@ static int run(sess *s) {
     if ((rc = mgmt(s, s->g_vi, M11_APM_CMD_GRAPH_START))) return fail(s, M11_SPK_VI_START, "vi_start", rc);
     r->vi_started = 1;
     done(s, M11_SPK_VI_START, "vi_start");
-    const uint32_t rd_base = chunk * io->write_buffers;
+    const uint32_t rd_base = wr_stride * io->write_buffers;
     for (unsigned i = 0; i < RD_BUFFERS; i++) {
-        uint32_t cmd[8] = {rd_base + i * rd_chunk, 0u, io->cust->regions[s->data].mem_map_handle, rd_chunk, 0u, 0u, 0u, 0u};
+        uint32_t cmd[8] = {rd_base + i * rd_stride, 0u, io->cust->regions[s->data].mem_map_handle, rd_chunk, 0u, 0u, 0u, 0u};
         rc = m11_custodian_data_submit(io->cust, s->g_vi, p->rd_ep, M11_DATA_CMD_RD_SH_MEM_EP_DATA_BUFFER_V2, cmd,
                                        sizeof cmd, now(s), &s->rd_tok[i]);
         pdr_note(s);
@@ -366,7 +370,7 @@ static int run(sess *s) {
     done(s, M11_SPK_RX_BE_PREPARE, "rx_be_prepare");
 
     /* 7. play, then EOS */
-    if ((rc = play(s, chunk))) return fail(s, M11_SPK_PLAYED, "play", rc);
+    if ((rc = play(s, chunk, wr_stride))) return fail(s, M11_SPK_PLAYED, "play", rc);
     done(s, M11_SPK_PLAYED, "play");
     uint32_t policy = 1u, eos_tok = 0u, dsp = UINT32_MAX;
     rc = m11_custodian_data_submit(io->cust, s->g_rx, p->wr_ep, M11_DATA_CMD_WR_SH_MEM_EP_EOS, &policy, sizeof policy,

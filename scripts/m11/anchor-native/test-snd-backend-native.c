@@ -246,8 +246,8 @@ int main(void) {
     const char *bad_proc[] = {
         "00-31: TDM-LPAIF-RX-TERTIARY multicodec-31 :  : playback 1\n00-33: TDM-LPAIF-TX-TERTIARY x :  : capture 1\n",
         "00-32: TDM-LPAIF-RX-TERTIARY-VIRT-2 a :  : capture 1\n00-33: TDM-LPAIF-TX-TERTIARY x :  : capture 1\n",
-        "00-32: TDM-LPAIF-RX-TERTIARY-VIRT-2 a :  : playback 1\n00-34: TDM-LPAIF-RX-TERTIARY-VIRT-2 b :  : playback 1\n"
-        "00-33: TDM-LPAIF-TX-TERTIARY x :  : capture 1\n",
+        ("00-32: TDM-LPAIF-RX-TERTIARY-VIRT-2 a :  : playback 1\n00-34: TDM-LPAIF-RX-TERTIARY-VIRT-2 b :  : playback 1\n"
+         "00-33: TDM-LPAIF-TX-TERTIARY x :  : capture 1\n"), /* one element (parenthesized for clang) */
         "00-32: TDM-LPAIF-RX-TERTIARY-VIRT-22 a :  : playback 1\n00-33: TDM-LPAIF-TX-TERTIARY x :  : capture 1\n",
     };
     const int want[] = {-ENODEV, -ENODEV, -EEXIST, -ENODEV};
