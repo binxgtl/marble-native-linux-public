@@ -48,6 +48,12 @@ jobs:
           mkdir -p artifacts/m11/r2/graph-plan
           (cd scripts/m11/r2 && python3 test_graph_plan.py -v) 2>&1 | tee artifacts/m11/r2/graph-plan/test.log
           test "${PIPESTATUS[0]}" -eq 0
+      - name: Speaker session plan generator (synthetic ACDB/XML/calibration only)
+        if: always()
+        run: |
+          mkdir -p artifacts/m11/r2/speaker-plan
+          python3 -I scripts/m11/r2/test_speaker_plan.py -v 2>&1 | tee artifacts/m11/r2/speaker-plan/test.log
+          test "${PIPESTATUS[0]}" -eq 0
       - uses: actions/upload-artifact@v4
         if: always()
         with:

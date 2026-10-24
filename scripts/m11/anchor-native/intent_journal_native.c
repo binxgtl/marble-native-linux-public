@@ -27,6 +27,22 @@ int m11_intent_format(char *buf, size_t cap, uint64_t epoch, uint32_t seq, const
     case M11_APM_CMD_SET_CFG: case M11_APM_CMD_GET_CFG:
         snprintf(tail, sizeof tail, " pl=%zu", pll);
         break;
+    case M11_DATA_CMD_WR_SH_MEM_EP_DATA_BUFFER_V2:
+    case M11_DATA_CMD_RD_SH_MEM_EP_DATA_BUFFER_V2: {
+        /* P5 speaker session data path: <addr lsw, addr msw, map handle, size, ...> */
+        uint32_t w[4];
+        if (pll != (h.opcode == M11_DATA_CMD_RD_SH_MEM_EP_DATA_BUFFER_V2 ? 32u : 44u)) return -EBADMSG;
+        memcpy(w, pl, sizeof w);
+        snprintf(tail, sizeof tail, " addr=%u msw=%u map=%08x bytes=%u", w[0], w[1], w[2], w[3]);
+        break;
+    }
+    case M11_DATA_CMD_WR_SH_MEM_EP_EOS: {
+        uint32_t policy;
+        if (pll != sizeof policy) return -EBADMSG;
+        memcpy(&policy, pl, sizeof policy);
+        snprintf(tail, sizeof tail, " policy=%u", policy);
+        break;
+    }
     default:
         return -EPERM; /* outside the custodian's set, APM_CMD_CLOSE_ALL included */
     }
@@ -49,8 +65,11 @@ static int j_write(void *user, int fd, const uint8_t *buf, size_t len) {
     if (n < 0) { l->refused++; return n == -EPERM ? -EPERM : -EINVAL; }
     m11_gpr_hdr_t h; const uint8_t *pl; size_t pll;
     (void)m11_gpr_validate_packet(buf, len, &h, &pl, &pll); /* already validated by the format */
+    const int data = h.opcode == M11_DATA_CMD_WR_SH_MEM_EP_DATA_BUFFER_V2 ||
+                     h.opcode == M11_DATA_CMD_RD_SH_MEM_EP_DATA_BUFFER_V2 || h.opcode == M11_DATA_CMD_WR_SH_MEM_EP_EOS;
     if ((h.opcode == M11_APM_CMD_SHARED_MEM_MAP_REGIONS && !l->boot->dsp_map_attempted) ||
-        (h.opcode == M11_APM_CMD_SHARED_MEM_UNMAP_REGIONS && !l->boot->dsp_unmap_attempted)) {
+        (h.opcode == M11_APM_CMD_SHARED_MEM_UNMAP_REGIONS && !l->boot->dsp_unmap_attempted) ||
+        (data && !l->boot->dsp_map_attempted)) { /* a data command names mapped memory */
         l->refused++;
         return -EPERM; /* the ledger records the intent before the journal, the journal before TX */
     }
@@ -83,5 +102,32 @@ int m11_intent_sink_fd(m11_intent_fd_sink *s, int fd, m11_intent_sink *out) {
     if (!s || fd < 0 || !out) return -EINVAL;
     *s = (m11_intent_fd_sink){.fd = fd};
     *out = (m11_intent_sink){.append_fn = fd_append, .user = s};
+    return 0;
+}
+
+static int rot_append(void *user, const char *rec, size_t len) {
+    m11_intent_rotating_sink *s = user;
+    if (s->fd < 0) return -EBADF;
+    if (s->on_fd >= s->per_fd) {
+        /* a fresh open file: /dev/kmsg rate-limits each open file to a burst of 10 records */
+        int nfd = s->reopen_fn(s->reopen_user);
+        if (nfd < 0) { s->reopen_failures++; return -EIO; }
+        (void)close(s->fd);
+        s->fd = nfd;
+        s->on_fd = 0;
+        s->reopens++;
+    }
+    ssize_t n;
+    do n = write(s->fd, rec, len); while (n < 0 && errno == EINTR);
+    if (n != (ssize_t)len) return -EIO;
+    s->on_fd++;
+    s->writes++;
+    return 0;
+}
+int m11_intent_sink_rotating(m11_intent_rotating_sink *s, int fd, unsigned per_fd,
+                             int (*reopen_fn)(void *), void *reopen_user, m11_intent_sink *out) {
+    if (!s || fd < 0 || !per_fd || per_fd > 9u || !reopen_fn || !out) return -EINVAL;
+    *s = (m11_intent_rotating_sink){.fd = fd, .per_fd = per_fd, .reopen_fn = reopen_fn, .reopen_user = reopen_user};
+    *out = (m11_intent_sink){.append_fn = rot_append, .user = s};
     return 0;
 }

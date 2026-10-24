@@ -1832,6 +1832,95 @@ static void p6_spf_state_bare_ack_is_not_success(void) {
     sc_teardown();
 }
 
+#if defined(HARDENED) && defined(M11_DATA_CMD_WR_SH_MEM_EP_DATA_BUFFER_V2)
+#define DATAPATH 1
+/* ===========================================================================================
+ * P7 - shared-memory end point data commands (P5 speaker session): each completes on its own
+ * response opcode, with an exact payload size and the status word at its offset
+ * ========================================================================================= */
+#define P7_WR_EP 0x40BDu
+#define P7_RD_EP 0x4547u
+/* gen_arg0: payload length override (0 = exact), gen_arg1: data status, gen_arg2: 1 = answer from APM's
+ * port instead of the end point's, 2 = an IBASIC error instead of the completion */
+static void gen_data_rsp(sc_t *s, uint32_t token, uint32_t opcode) {
+    uint8_t pl[64], p[SC_PKT_MAX];
+    memset(pl, 0, sizeof(pl));
+    uint32_t rsp = 0, port = opcode == M11_DATA_CMD_RD_SH_MEM_EP_DATA_BUFFER_V2 ? P7_RD_EP : P7_WR_EP;
+    size_t len = 0, at = 0;
+    if (opcode == M11_DATA_CMD_WR_SH_MEM_EP_DATA_BUFFER_V2) { rsp = M11_DATA_CMD_RSP_WR_SH_MEM_EP_DATA_BUFFER_DONE_V2; len = 32; at = 12; }
+    else if (opcode == M11_DATA_CMD_WR_SH_MEM_EP_EOS) { rsp = M11_DATA_CMD_RSP_WR_SH_MEM_EP_EOS_RENDERED; len = 8; at = 4; }
+    else if (opcode == M11_DATA_CMD_RD_SH_MEM_EP_DATA_BUFFER_V2) { rsp = M11_DATA_CMD_RSP_RD_SH_MEM_EP_DATA_BUFFER_DONE_V2; len = 56; at = 0; }
+    if (s->gen_arg2 == 2u) { sc_push_ibasic(s, 0, port, token, opcode, 1u); return; }
+    if (s->gen_arg0) len = s->gen_arg0;
+    memcpy(pl + at, &s->gen_arg1, sizeof(uint32_t));
+    size_t n = sc_build(p, M11_GPR_DOMAIN_ADSP, s->gen_arg2 == 1u ? M11_APM_MODULE_IID : port, token, rsp, pl, len);
+    if (n) sc_push(s, 0, p, n);
+}
+
+static int p7_send(uint32_t opcode, uint32_t *dsp, size_t *len) {
+    uint8_t cmd[44];
+    uint8_t rsp[64];
+    memset(cmd, 0, sizeof(cmd));
+    *len = 0;
+    uint32_t port = opcode == M11_DATA_CMD_RD_SH_MEM_EP_DATA_BUFFER_V2 ? P7_RD_EP : P7_WR_EP;
+    size_t cmd_len = opcode == M11_DATA_CMD_WR_SH_MEM_EP_EOS ? 4u : opcode == M11_DATA_CMD_RD_SH_MEM_EP_DATA_BUFFER_V2 ? 32u : 44u;
+    return m11_gpr_engine_transact(&SCG, port, opcode, cmd, cmd_len, 30u, dsp, rsp, sizeof(rsp), len);
+}
+
+static void p7_data_commands_complete_on_their_own_responses(void) {
+    static const uint32_t ops[] = { M11_DATA_CMD_WR_SH_MEM_EP_DATA_BUFFER_V2, M11_DATA_CMD_WR_SH_MEM_EP_EOS,
+                                    M11_DATA_CMD_RD_SH_MEM_EP_DATA_BUFFER_V2 };
+    static const size_t lens[] = { 32u, 8u, 56u };
+    for (size_t i = 0; i < 3; i++) {
+        sc_setup(gen_data_rsp, false);
+        uint32_t dsp = 99;
+        size_t len = 0;
+        int rc = p7_send(ops[i], &dsp, &len);
+        CHECK(rc == 0 && dsp == 0u && len == lens[i], "opcode 0x%08x: rc=%d dsp=%u len=%zu", ops[i], rc, dsp, len);
+        sc_teardown();
+        sc_setup(gen_data_rsp, false);
+        SC.gen_arg1 = 5u; /* a non-zero data / render status fails the command */
+        rc = p7_send(ops[i], &dsp, &len);
+        CHECK(rc == -EREMOTEIO && dsp == 5u, "opcode 0x%08x status 5: rc=%d dsp=%u", ops[i], rc, dsp);
+        sc_teardown();
+    }
+}
+
+static void p7_malformed_or_misrouted_completions_are_dropped(void) {
+    static const uint32_t ops[] = { M11_DATA_CMD_WR_SH_MEM_EP_DATA_BUFFER_V2, M11_DATA_CMD_WR_SH_MEM_EP_EOS,
+                                    M11_DATA_CMD_RD_SH_MEM_EP_DATA_BUFFER_V2 };
+    static const uint32_t bad_lens[] = { 28u, 12u, 48u };
+    for (size_t i = 0; i < 3; i++) {
+        sc_setup(gen_data_rsp, false);
+        SC.gen_arg0 = bad_lens[i];
+        uint32_t dsp = 0;
+        size_t len = 0;
+        int rc = p7_send(ops[i], &dsp, &len);
+        CHECK(rc == -ETIMEDOUT && SCG.rx_dropped_malformed == 1u, "opcode 0x%08x short: rc=%d", ops[i], rc);
+        sc_teardown();
+        sc_setup(gen_data_rsp, false);
+        SC.gen_arg2 = 1u; /* the right token from the wrong port */
+        rc = p7_send(ops[i], &dsp, &len);
+        CHECK(rc == -ETIMEDOUT && SCG.rx_dropped_malformed == 1u, "opcode 0x%08x misrouted: rc=%d", ops[i], rc);
+        sc_teardown();
+    }
+}
+
+static void p7_data_command_nack_fails_fast(void) {
+    sc_setup(gen_data_rsp, false);
+    SC.gen_arg2 = 2u;
+    uint32_t dsp = 0;
+    size_t len = 0;
+    int rc = p7_send(M11_DATA_CMD_WR_SH_MEM_EP_DATA_BUFFER_V2, &dsp, &len);
+    CHECK(rc == -EREMOTEIO && dsp == 1u, "rc=%d dsp=%u", rc, dsp);
+    CHECK(!m11_gpr_opcode_retains_on_timeout(M11_DATA_CMD_WR_SH_MEM_EP_DATA_BUFFER_V2) &&
+          !m11_gpr_opcode_retains_on_timeout(M11_DATA_CMD_RD_SH_MEM_EP_DATA_BUFFER_V2) &&
+          !m11_gpr_opcode_retains_on_timeout(M11_DATA_CMD_WR_SH_MEM_EP_EOS),
+          "data commands carry no ownership: never retained as orphans");
+    sc_teardown();
+}
+#endif
+
 /* ===========================================================================================
  * Simulator integration (teardown behaviour with the hardened layers)
  * ========================================================================================= */
@@ -2052,6 +2141,12 @@ int main(void) {
     RUN(p6_explicit_nack_still_fails_fast);
     RUN(p6_ack_only_commands_still_complete_on_ibasic_zero);
     RUN(p6_spf_state_bare_ack_is_not_success);
+#ifdef DATAPATH
+    /* P7 */
+    RUN(p7_data_commands_complete_on_their_own_responses);
+    RUN(p7_malformed_or_misrouted_completions_are_dropped);
+    RUN(p7_data_command_nack_fails_fast);
+#endif
     /* Simulator integration */
     RUN(sim_positive_path_unchanged);
 #ifdef HARDENED

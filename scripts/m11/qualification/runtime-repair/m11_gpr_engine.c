@@ -48,6 +48,12 @@ static uint32_t expected_rsp_for_req(uint32_t req_opcode) {
             return M11_APM_CMDRSP_SHARED_MEM_MAP_REGIONS;
         case M11_APM_CMD_GET_CFG:
             return M11_APM_CMD_RSP_GET_CFG;
+        case M11_DATA_CMD_WR_SH_MEM_EP_DATA_BUFFER_V2:
+            return M11_DATA_CMD_RSP_WR_SH_MEM_EP_DATA_BUFFER_DONE_V2;
+        case M11_DATA_CMD_WR_SH_MEM_EP_EOS:
+            return M11_DATA_CMD_RSP_WR_SH_MEM_EP_EOS_RENDERED;
+        case M11_DATA_CMD_RD_SH_MEM_EP_DATA_BUFFER_V2:
+            return M11_DATA_CMD_RSP_RD_SH_MEM_EP_DATA_BUFFER_DONE_V2;
         default:
             return M11_GPR_IBASIC_RSP_RESULT;
     }
@@ -433,6 +439,20 @@ int m11_gpr_engine_pump_once(m11_gpr_engine_t *eng, uint32_t timeout_ms) {
             m11_apm_rsp_get_cfg_t gc;
             memcpy(&gc, pl, sizeof(gc));
             slot->dsp_status = gc.status;
+        } else {
+            /* the three data-command completions: exact sizes, the status word at its offset */
+            size_t want = 0u, at = 0u;
+            if (hdr.opcode == M11_DATA_CMD_RSP_WR_SH_MEM_EP_DATA_BUFFER_DONE_V2) { want = 32u; at = 12u; }
+            else if (hdr.opcode == M11_DATA_CMD_RSP_WR_SH_MEM_EP_EOS_RENDERED) { want = 8u; at = 4u; }
+            else if (hdr.opcode == M11_DATA_CMD_RSP_RD_SH_MEM_EP_DATA_BUFFER_DONE_V2) { want = 56u; at = 0u; }
+            if (!want || pl_len != want) {
+                eng->rx_dropped_malformed++;
+                eng->last_rx_status = M11_GPR_RX_DROPPED_PACKET;
+                return -EBADMSG;
+            }
+            uint32_t st;
+            memcpy(&st, pl + at, sizeof(st));
+            slot->dsp_status = st;
         }
     } else {
         eng->rx_dropped_malformed++;

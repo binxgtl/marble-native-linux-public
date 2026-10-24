@@ -90,6 +90,15 @@ static int tee_append(void *user, const char *rec, size_t len) {
 }
 static const m11_intent_sink jsink = {tee_append, NULL};
 
+/* the rotating sink's reopen: the next prepared pipe's write end */
+static int rot_next, rot_fail;
+static int (*rot_pipes)[2];
+static int rot_reopen(void *user) {
+    (void)user;
+    if (rot_fail) return -EACCES;
+    return rot_pipes[rot_next++][1];
+}
+
 static uint64_t ms(void) {
     struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t);
     return (uint64_t)t.tv_sec * 1000u + (uint64_t)t.tv_nsec / 1000000u;
@@ -154,6 +163,22 @@ int main(void) {
     int un = m11_intent_format(rec, sizeof rec, 7, 3, pkt, pl);
     assert(un == -EPERM);
     printf("PASS record format: MAP fields (fd, size, pool, flags), kmsg level, size and malformed checks, CLOSE_ALL and UNMAP outside the set\n");
+    /* P5 data commands: WR buffer (44 B), RD buffer (32 B), WR EOS (4 B); any other size is malformed */
+    uint8_t dpkt[96]; size_t dl = 0;
+    uint32_t wr[11] = {64, 0, 0xA0000001u, 3840, 0, 0, 0, 0, 0, 0, 0};
+    assert(m11_gpr_pack_packet(dpkt, sizeof dpkt, &dl, 0x40BDu, 0x0100u, 0x31, M11_DATA_CMD_WR_SH_MEM_EP_DATA_BUFFER_V2, wr, sizeof wr) == 0);
+    n = m11_intent_format(rec, sizeof rec, 7, 4, dpkt, dl);
+    assert(n > 0 && strstr(rec, "op=0400100a tok=00000031 cd=0 dst=000040bd addr=64 msw=0 map=a0000001 bytes=3840\n"));
+    assert(m11_gpr_pack_packet(dpkt, sizeof dpkt, &dl, 0x40BDu, 0x0100u, 0x32, M11_DATA_CMD_WR_SH_MEM_EP_DATA_BUFFER_V2, wr, 40) == 0);
+    assert(m11_intent_format(rec, sizeof rec, 7, 4, dpkt, dl) == -EBADMSG);
+    assert(m11_gpr_pack_packet(dpkt, sizeof dpkt, &dl, 0x4547u, 0x0100u, 0x33, M11_DATA_CMD_RD_SH_MEM_EP_DATA_BUFFER_V2, wr, 32) == 0);
+    assert(m11_intent_format(rec, sizeof rec, 7, 5, dpkt, dl) > 0 && strstr(rec, " map=a0000001 bytes=3840\n"));
+    uint32_t policy = 1;
+    assert(m11_gpr_pack_packet(dpkt, sizeof dpkt, &dl, 0x40BDu, 0x0100u, 0x34, M11_DATA_CMD_WR_SH_MEM_EP_EOS, &policy, 4) == 0);
+    assert(m11_intent_format(rec, sizeof rec, 7, 6, dpkt, dl) > 0 && strstr(rec, " policy=1\n"));
+    assert(m11_gpr_pack_packet(dpkt, sizeof dpkt, &dl, 0x40BDu, 0x0100u, 0x35, M11_DATA_CMD_WR_SH_MEM_EP_EOS, wr, 8) == 0);
+    assert(m11_intent_format(rec, sizeof rec, 7, 6, dpkt, dl) == -EBADMSG);
+    printf("PASS data command records: WR and RD buffer address, map handle and size; EOS policy; exact sizes\n");
 
     /* 2. the production fd sink */
     int p[2]; m11_intent_fd_sink s; m11_intent_sink sk;
@@ -164,6 +189,24 @@ int main(void) {
     assert(sk.append_fn(sk.user, "abc\n", 4) == -EIO && s.writes == 1); /* no reader: EPIPE */
     close(p[1]);
     printf("PASS fd sink: one write(2) per record; a failed write is -EIO\n");
+
+    /* 2b. the P5 rotating sink: a fresh file every per_fd records; a failed reopen is -EIO, old fd kept */
+    int rp[4][2];
+    for (int i = 0; i < 4; i++) assert(pipe2(rp[i], O_CLOEXEC) == 0);
+    rot_next = 1; rot_pipes = rp; rot_fail = 0;
+    m11_intent_rotating_sink rs; m11_intent_sink rk;
+    assert(m11_intent_sink_rotating(&rs, rp[0][1], 10, rot_reopen, NULL, &rk) == -EINVAL);
+    assert(m11_intent_sink_rotating(&rs, rp[0][1], 3, rot_reopen, NULL, &rk) == 0);
+    for (int i = 0; i < 7; i++) assert(rk.append_fn(rk.user, "r\n", 2) == 0);
+    assert(rs.writes == 7 && rs.reopens == 2 && rs.fd == rp[2][1] && rs.on_fd == 1);
+    char rb[8];
+    assert(read(rp[0][0], rb, sizeof rb) == 6 && read(rp[1][0], rb, sizeof rb) == 6 && read(rp[2][0], rb, sizeof rb) == 2);
+    assert(fcntl(rp[0][1], F_GETFD) == -1 && fcntl(rp[1][1], F_GETFD) == -1); /* the old files are closed */
+    assert(rk.append_fn(rk.user, "r\n", 2) == 0 && rk.append_fn(rk.user, "r\n", 2) == 0);
+    rot_fail = 1;
+    assert(rk.append_fn(rk.user, "r\n", 2) == -EIO && rs.reopen_failures == 1 && rs.fd == rp[2][1] && rs.writes == 9);
+    for (int i = 0; i < 4; i++) { close(rp[i][0]); if (i >= 2) close(rp[i][1]); }
+    printf("PASS rotating sink: a fresh file every per_fd (<= 9) records, the old one closed; a failed reopen is -EIO with no write\n");
 
     /* 3. MAP through the custodian, journaled before TX (checked by the peer); then the post-MAP hold:
      *    retire is refused at the custodian, so there is no UNMAP record and no second packet, and
@@ -220,6 +263,17 @@ int main(void) {
     assert(rc < 0 && r.glink.writes == 1 && r.ilink.refused == 2);
     assert(stop(&r) == 1);
     printf("PASS opcode set: GET_SPF_STATE journaled and sent; CLOSE_ALL and an unknown opcode refused\n");
+
+    /* P5 data commands: refused before any MAP intent (no record, no TX); journaled, then sent, after it */
+    start(&r);
+    uint32_t wrb[11] = {0, 0, 0xA0000001u, 3840, 0, 0, 0, 0, 0, 0, 0};
+    rc = m11_gpr_engine_submit_ex(&r.eng, 0, 0x40BDu, M11_DATA_CMD_WR_SH_MEM_EP_DATA_BUFFER_V2, wrb, sizeof wrb, &tok);
+    assert(rc == -EPERM && r.glink.writes == 0 && jcount == 0 && r.ilink.refused == 1);
+    assert(m11_custodian_map(&r.cust, 4096, ms(), &slot) == 0 && jcount == 1);
+    rc = m11_gpr_engine_submit_ex(&r.eng, 0, 0x40BDu, M11_DATA_CMD_WR_SH_MEM_EP_DATA_BUFFER_V2, wrb, sizeof wrb, &tok);
+    assert(rc == 0 && r.glink.writes == 2 && jcount == 2 && strstr(jr[1], "op=0400100a ") && strstr(jr[1], " bytes=3840\n"));
+    assert(stop(&r) == 2);
+    printf("PASS data commands: refused before the MAP intent; after it, journaled before the packet\n");
 
     m11_intent_link il; m11_gpr_transport_t out;
     assert(m11_intent_transport(&il, NULL, &jsink, &r.boot, &out) == -EINVAL);

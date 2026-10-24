@@ -204,6 +204,19 @@ MUTANTS = [
            "    mark_unresolved(mgr, region, M11_SHMEM_CAUSE_MAP_PDR, -ENETRESET, M11_SHMEM_ORPHAN_NONE, 0u, B_PDR);",
            "    (void)0; /* MUTANT: PD down while held not recorded */",
            "leave a held region DSP_MAP_ACKNOWLEDGED after PD down"),
+    # ---- P7: shared-memory end point data commands (P5 speaker session) -----------------------
+    Mutant("M31", "P7", "m11_gpr_engine.c",
+           "            if (!want || pl_len != want) {",
+           "            if (!want) { /* MUTANT: any payload length */",
+           "accept a data completion of the wrong size"),
+    Mutant("M32", "P7", "m11_gpr_engine.c",
+           "            slot->dsp_status = st;",
+           "            slot->dsp_status = 0u; (void)st; /* MUTANT: data status ignored */",
+           "report a failed buffer, EOS or read as success"),
+    Mutant("M33", "P7", "m11_gpr_engine.c",
+           "            return M11_DATA_CMD_RSP_WR_SH_MEM_EP_DATA_BUFFER_DONE_V2;",
+           "            return M11_GPR_IBASIC_RSP_RESULT; /* MUTANT: buffer done not correlated */",
+           "never complete a write buffer on its BUFFER_DONE"),
 ]
 
 

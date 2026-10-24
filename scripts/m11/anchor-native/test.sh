@@ -472,7 +472,7 @@ g7_mutant() { # name pattern replacement assertion last-pass (same detection rul
 }
 g7_mutant no-journal-append 'int arc = l->sink->append_fn(l->sink->user, rec, (size_t)n);' '    int arc = 0;' \
   'm11_custodian_map(&r.cust, 4096, ms(), &slot) == 0' \
-  'PASS fd sink: one write(2) per record; a failed write is -EIO'
+  'PASS rotating sink: a fresh file every per_fd (<= 9) records, the old one closed; a failed reopen is -EIO with no write'
 g7_mutant tx-despite-sink-failure '/* no TX without its journal record */' '    (void)arc;' \
   'rc < 0 && r.glink.writes == 0 && r.ilink.sink_failures == 1' \
   'PASS MAP journaled before TX (the peer saw its record before the packet), with fd and size; retire refused after the MAP: no UNMAP record, no TX, region held, retaining end'
@@ -484,6 +484,13 @@ g7_mutant close-all-allowed "return -EPERM; /* outside the custodian's set" '   
 # Post-MAP hold L2: an UNMAP is never journaled, so never transmitted (design M4).
 g7_mutant journal-allows-unmap 'return -EPERM; /* CP2 post-MAP hold L2: no UNMAP is journaled' '        break;' \
   'un == -EPERM' ''
+# P5: a data command before any MAP intent; a sink that never rotates past the kmsg burst.
+g7_mutant data-before-map '(data && !l->boot->dsp_map_attempted)) { /* a data command names mapped memory */' '        ((void)data, 0)) {' \
+  'rc == -EPERM && r.glink.writes == 0 && jcount == 0 && r.ilink.refused == 1' \
+  'PASS opcode set: GET_SPF_STATE journaled and sent; CLOSE_ALL and an unknown opcode refused'
+g7_mutant never-rotates 'if (s->on_fd >= s->per_fd) {' '    if (0) {' \
+  'rs.writes == 7 && rs.reopens == 2 && rs.fd == rp[2][1] && rs.on_fd == 1' \
+  'PASS fd sink: one write(2) per record; a failed write is -EIO'
 # G8: the native end of a custodian boot over real adapters (stand-ins), the real owner seal and the
 # real custodian, manager and engine; test exit/reboot hooks report the fds at the moment of the end.
 g8_srcs=("${tc_srcs[@]}" "$own/m11_custodian.c" "$here/gpr_transport_native.c" "$here/shmem_backend_native.c"
@@ -903,6 +910,111 @@ else
   echo "SKIP P4 environment root sections: no sudo"
 fi
 echo 'PASS P4 environment phase (gcc, clang, ASan+UBSan, root when sudo)'
+# P5 W3 (docs/m11-argon-speaker-run-design.md): the speaker back ends and amplifier controls through
+# PID1-private ALSA nodes, against fixture syscalls (no ALSA device).
+w3_srcs=("$here/snd_backend_native.c" "$here/test-snd-backend-native.c")
+for cm_cc in gcc clang; do
+  "$cm_cc" "${cm_flags[@]}" "${w3_srcs[@]}" -o "$out/snd-backend-native-$cm_cc"
+  timeout 120 "$out/snd-backend-native-$cm_cc" | tee "$out/snd-backend-native-$cm_cc.log"
+done
+gcc "${cm_flags[@]}" -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer \
+  "${w3_srcs[@]}" -o "$out/snd-backend-native-sanitize"
+timeout 120 "$out/snd-backend-native-sanitize" | tee "$out/snd-backend-native-sanitize.log"
+if gcc -std=c11 -DM11_ANCHOR_NATIVE -I "$own" -I "$repair" -I "$here" -c "$here/snd_backend_native.c" -o "$out/sbe-refused.o" 2>/dev/null; then
+  echo "ERROR: snd_backend_native compiled outside M11_CUSTODIAN_NATIVE" >&2; exit 1
+fi
+echo 'PASS W3 snd backend (gcc, clang, ASan+UBSan) and refused outside M11_CUSTODIAN_NATIVE'
+w3_mutant() { # name pattern replacement assertion last-pass (same detection rule as gtn_mutant)
+  local name="$1" pat="$2" rep="$3" want="$4" last="$5" dir="$out/sbe-mutant-$1" rc=0 got
+  mkdir -p "$dir"
+  awk -v pat="$pat" -v rep="$rep" 'index($0,pat){n++; print rep; next} {print} END{if(n!=1) exit 3}' \
+    "$here/snd_backend_native.c" > "$dir/snd_backend_native.c"
+  cp "$here/snd_backend_native.h" "$dir/"
+  gcc "${cm_flags[@]}" -I "$dir" "$dir/snd_backend_native.c" "$here/test-snd-backend-native.c" -o "$dir/bin"
+  timeout 120 "$dir/bin" > "$dir/log" 2>&1 || rc=$?
+  got="$(grep '^PASS ' "$dir/log" | tail -n1 || true)"
+  if [[ "$rc" != 134 ]] || ! grep -qF -- "Assertion \`$want' failed" "$dir/log" || [[ "$got" != "$last" ]]; then
+    echo "ERROR: W3 mutant $name not detected for the expected reason (rc=$rc, last PASS: '${got}')" >&2
+    cat "$dir/log" >&2; exit 1
+  fi
+  echo "PASS W3 test detects mutant $name: Assertion \`$want'"
+}
+w3_mutant node-kept-at-open 'int urc = b->sys->unlink_fn(path); /* the entry goes whatever the open did */' \
+  '    int urc = 0; (void)path;' 'dir_live && live_nodes() == 2 && open_fds() == 1' ''
+w3_mutant no-readback 'for (unsigned c = 0; c < count; c++) if (got[c] != want) return -EIO;' '    (void)got;' \
+  'm11_snd_ctl_set(&b, "aw_dev_1_switch", "Enable") == -EIO' \
+  'PASS prepare: exact names, playback/capture, MAJ:MIN; private 0700 directory; control opened and its node removed'
+w3_mutant mmap-access 'hw_set_mask(&hw, SNDRV_PCM_HW_PARAM_ACCESS, SNDRV_PCM_ACCESS_RW_INTERLEAVED);' \
+  '    hw_set_mask(&hw, SNDRV_PCM_HW_PARAM_ACCESS, SNDRV_PCM_ACCESS_MMAP_INTERLEAVED);' \
+  'h->masks[SNDRV_PCM_HW_PARAM_ACCESS - SNDRV_PCM_HW_PARAM_FIRST_MASK].bits[0] == 1u << SNDRV_PCM_ACCESS_RW_INTERLEAVED' \
+  'PASS controls: enumerated item by name, written then read back; unknown item or control, a read-back that differs, a non-enumerated or duplicated control refused'
+w3_mutant no-direction-check 'if (!strstr(buf + used, want)) return -ENODEV;' '                (void)want;' \
+  'prep(&b) == want[i] && !dir_live && live_nodes() == 0 && open_fds() == 0' \
+  'PASS prepare is separate and once-open; close is DROP then close; release leaves no fd, node or directory'
+w3_mutant period-check-removed 'if (ps->min != period || ps->max != period || pc->min != periods || pc->max != periods ||' \
+  '    if (period == 0 ||' \
+  'm11_snd_pcm_open(&b, M11_SND_RX, 96000, 3, SNDRV_PCM_FORMAT_S32_LE, 682, 2, 170, INT_MAX) == -EPROTO' \
+  'PASS prepare refused: missing, wrong-direction, duplicated or prefix-only name, malformed or mixed majors, existing directory, a node that opens another device; nothing left behind'
+# P5 W5 (docs/m11-argon-speaker-run-design.md, sections 3 and 4): the speaker session under the REAL custodian,
+# region manager, engine and intent journal; a forked ADSP stand-in; memfd and ALSA fixtures. No device.
+w5_srcs=("${tc_srcs[@]}" "$own/m11_custodian.c" "$here/gpr_transport_native.c" "$here/shmem_backend_native.c"
+         "$here/intent_journal_native.c" "$here/snd_backend_native.c" "$here/speaker_plan_native.c"
+         "$here/speaker_session_native.c" "$here/test-speaker-session-native.c")
+for cm_cc in gcc clang; do
+  "$cm_cc" "${cm_flags[@]}" "${w5_srcs[@]}" -o "$out/speaker-session-native-$cm_cc"
+  timeout 180 "$out/speaker-session-native-$cm_cc" | tee "$out/speaker-session-native-$cm_cc.log"
+done
+gcc "${cm_flags[@]}" -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer \
+  "${w5_srcs[@]}" -o "$out/speaker-session-native-sanitize"
+timeout 180 "$out/speaker-session-native-sanitize" | tee "$out/speaker-session-native-sanitize.log"
+for f in speaker_plan_native.c speaker_session_native.c; do
+  if gcc -std=c11 -DM11_ANCHOR_NATIVE -I "$own" -I "$repair" -I "$here" -c "$here/$f" -o "$out/spk-refused.o" 2>/dev/null; then
+    echo "ERROR: $f compiled outside M11_CUSTODIAN_NATIVE" >&2; exit 1
+  fi
+done
+echo 'PASS W5 speaker session (gcc, clang, ASan+UBSan) and refused outside M11_CUSTODIAN_NATIVE'
+w5_mutant() { # name file pattern replacement assertion last-pass (same detection rule as gtn_mutant)
+  local name="$1" file="$2" pat="$3" rep="$4" want="$5" last="$6" dir="$out/spk-mutant-$1" rc=0 got
+  mkdir -p "$dir"
+  awk -v pat="$pat" -v rep="$rep" 'index($0,pat){n++; print rep; next} {print} END{if(n!=1) exit 3}' \
+    "$here/$file" > "$dir/$file"
+  local srcs=() s
+  for s in "${w5_srcs[@]}"; do [[ "$(basename "$s")" == "$file" ]] && srcs+=("$dir/$file") || srcs+=("$s"); done
+  gcc "${cm_flags[@]}" "${srcs[@]}" -o "$dir/bin"
+  timeout 180 "$dir/bin" > "$dir/log" 2>&1 || rc=$?
+  got="$(grep '^PASS ' "$dir/log" | tail -n1 || true)"
+  if [[ "$rc" != 134 ]] || ! grep -qF -- "Assertion \`$want' failed" "$dir/log" || [[ "$got" != "$last" ]]; then
+    echo "ERROR: W5 mutant $name not detected for the expected reason (rc=$rc, last PASS: '${got}')" >&2
+    cat "$dir/log" >&2; exit 1
+  fi
+  echo "PASS W5 test detects mutant $name: Assertion \`$want'"
+}
+w5_spk_plan='PASS plan: generator format parsed (graphs, IDs, back ends, controls, Re, PCM); truncation, magic and section order refused'
+w5_spk_happy='PASS happy path: back ends before graphs, VI before RX, Re read back, gate, amplifier on, RX prepare, 13 buffers, EOS; amplifier off first, then stop, back-end close and close in order; regions held, no UNMAP'
+w5_spk_before='PASS before the gate: a refused RX START or a Re read-back that differs never writes Enable; started graphs stopped, back ends closed, graphs closed'
+# the amplifier switched on before the RX graph started: the gate's re-read catches it
+w5_mutant amp-before-start speaker_session_native.c 'done(s, M11_SPK_RX_PREPARE, "rx_prepare");' \
+  '    done(s, M11_SPK_RX_PREPARE, "rx_prepare"); (void)set_switches(s, "Enable"); /* MUTANT */' \
+  'rc == 0 && rep.stage == M11_SPK_EOS && rep.amp_off_verified && !rep.teardown_rc' "$w5_spk_plan"
+# a failed Re read-back does not stop the session
+w5_mutant re-unverified speaker_session_native.c 'if (rc || !r->re.pair_re_readback_verified) return fail(s, M11_SPK_RX_RE, "rx_re", rc ? rc : -EIO);' \
+  '    (void)rc;' \
+  'rc < 0 && rep.fail_step == M11_SPK_RX_RE && !rep.amp_touched && at("sw0=Enable") < 0' "$w5_spk_happy"
+# the teardown never drives the switches Disable
+w5_mutant amp-off-skipped speaker_session_native.c 'if (r->amp_touched) {' '    if (0) {' \
+  'rc == 0 && rep.stage == M11_SPK_EOS && rep.amp_off_verified && !rep.teardown_rc' "$w5_spk_plan"
+# a single-parameter config sent to APM instead of its module (the stock routing rule)
+w5_mutant cfg-to-apm speaker_session_native.c 'const uint32_t dst = (((first[2] + 7u) & ~7u) + 16u == b->len) ? first[0] : M11_APM_MODULE_IID;' \
+  '    const uint32_t dst = M11_APM_MODULE_IID; (void)first;' \
+  'count(op(M11_APM_CMD_SET_CFG, 1)) == 2 && count(op(M11_APM_CMD_SET_CFG, 0x428F)) == 3 + 6' "$w5_spk_plan"
+# the gate does not re-read the switches
+w5_mutant no-gate speaker_session_native.c 'if ((rc = switches_read(s, "Disable"))) { r->amp_touched = 1; return fail(s, M11_SPK_GATE, "gate", rc); }' \
+  '    (void)0;' \
+  'rc == -EIO && rep.fail_step == M11_SPK_GATE && !rep.amp_on && at("sw0=Enable") < 0 && last("sw0=Disable") > at("rx_hw") && rep.amp_off_verified' \
+  "$w5_spk_before"
+# the teardown leaves the RX back end open
+w5_mutant rx-be-left-open speaker_session_native.c 'rc = m11_snd_pcm_close(io->snd, M11_SND_RX);' '        rc = 0;' \
+  'amp_off < rx_stop && rx_stop < at("rx_drop") && at("rx_drop") < last(op(M11_APM_CMD_GRAPH_STOP, 1))' "$w5_spk_plan"
 p4e_mutant() { # name asroot pattern replacement assertion last-pass (same detection rule as gtn_mutant)
   local name="$1" asroot="$2" pat="$3" rep="$4" want="$5" last="$6" dir="$out/p4e-mutant-$1" rc=0 got file=p4_env_native.c
   if [[ "$asroot" == 1 && "$sudo_ok" != 1 ]]; then echo "SKIP P4 environment mutant $name: no sudo"; return; fi

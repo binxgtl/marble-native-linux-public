@@ -52,6 +52,15 @@ extern "C" {
 #define M11_GPR_IBASIC_RSP_RESULT             0x02001005u
 #define M11_APM_CMD_RSP_GET_SPF_STATE         0x02001007u
 
+/* Shared-memory end point data commands (wr_sh_mem_ep_api.h / rd_sh_mem_ep_api.h, P5 speaker session).
+ * They go to the end point's module instance, not to APM; each completes on its own response opcode. */
+#define M11_DATA_CMD_WR_SH_MEM_EP_DATA_BUFFER_V2           0x0400100Au
+#define M11_DATA_CMD_WR_SH_MEM_EP_EOS                      0x04001002u
+#define M11_DATA_CMD_RD_SH_MEM_EP_DATA_BUFFER_V2           0x0400100Bu
+#define M11_DATA_CMD_RSP_WR_SH_MEM_EP_DATA_BUFFER_DONE_V2  0x05001004u /* 32 B, status at +12 */
+#define M11_DATA_CMD_RSP_WR_SH_MEM_EP_EOS_RENDERED         0x05001001u /* 8 B, status at +4 */
+#define M11_DATA_CMD_RSP_RD_SH_MEM_EP_DATA_BUFFER_DONE_V2  0x05001005u /* 56 B, status at +0 */
+
 #define M11_GPR_HDR_VERSION   0u
 #define M11_GPR_HDR_DWORDS    6u
 #define M11_GPR_HDR_BYTES     24u

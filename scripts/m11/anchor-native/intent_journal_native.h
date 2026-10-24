@@ -8,8 +8,10 @@
  *     SHARED_MEM_UNMAP_REGIONS is refused unconditionally (CP2 post-MAP hold layer L2,
  *     docs/m11-argon-cp2-c5-hold-design.md: no UNMAP is journaled, so none is written through
  *     this wrapper; L2 covers journaled writes only, L1 and L3 the custodian and region manager);
- *  2. requires the custodian's ledger intent first: a MAP only once dsp_map_attempted is set
- *     (-EPERM otherwise; the former UNMAP clause is unreachable after step 1);
+ *     The P5 speaker session adds the shared-memory end point data commands (WR buffer, WR EOS, RD buffer);
+ *  2. requires the custodian's ledger intent first: a MAP only once dsp_map_attempted is set, and a
+ *     data command (it names mapped memory) likewise (-EPERM otherwise; the former UNMAP clause is
+ *     unreachable after step 1);
  *  3. appends one record (boot epoch, sequence, opcode, token, client data; for a MAP the dma-buf
  *     fd number, size, pool and flags) to the sink, and transmits only after the sink accepted it
  *     whole (-EIO otherwise, nothing written);
@@ -55,5 +57,19 @@ int m11_intent_format(char *buf, size_t cap, uint64_t boot_epoch, uint32_t seq,
 /* Production sink over an fd: one write(2) per record (EINTR retried), a short write is -EIO. */
 typedef struct { int fd; uint32_t writes; } m11_intent_fd_sink;
 int m11_intent_sink_fd(m11_intent_fd_sink *, int fd, m11_intent_sink *out);
+
+/* P5 sink: as the fd sink, but every `per_fd` records (1..9) it opens a fresh file through reopen_fn
+ * (which returns the new fd or a negative errno) and closes the old one, because /dev/kmsg rate-limits each
+ * open file to a burst of 10 records per 5 s and silently drops the excess. A failed reopen is -EIO (no TX
+ * without its record); the old fd stays open. */
+typedef struct {
+    int fd;
+    unsigned per_fd, on_fd;
+    int (*reopen_fn)(void *);
+    void *reopen_user;
+    uint32_t writes, reopens, reopen_failures;
+} m11_intent_rotating_sink;
+int m11_intent_sink_rotating(m11_intent_rotating_sink *, int fd, unsigned per_fd,
+                             int (*reopen_fn)(void *), void *reopen_user, m11_intent_sink *out);
 
 #endif
