@@ -1,5 +1,6 @@
 #include "m11_custodian.h"
 #include "../runtime-repair/m11_strict_mock.h"
+#include "../runtime-repair/m11_aw_protection.h"
 #include <assert.h>
 #include <errno.h>
 #include <limits.h>
@@ -65,6 +66,118 @@ static void start_rx(unsigned g, uint64_t now) {
     assert(c.graphs[g].state==M11_GRAPH_STARTED && mock.rx_started);
 }
 static void pass(const char *s) { ++cases; printf("PASS %s\n",s); }
+/* Rev 6 owner session calls (P5 speaker, W5b): the AW Re round trip through m11_custodian_cfg. */
+static unsigned rt_graph;
+static int via_custodian(void *u, uint32_t dst, uint32_t op, const void *pkt, size_t len, uint32_t t,
+                         void *rsp, size_t cap, size_t *rl, bool *handed) {
+    (void)u; (void)t;
+    return m11_custodian_cfg(&c,rt_graph,dst,op,pkt,(uint32_t)len,boot.last_ms,rsp,cap,rl,handed);
+}
+static void rev6_session(void) {
+    uint8_t blob[256]; m11_apm_cmd_header_t h; size_t w=0;
+    assert(!m11_apm_build_graph_open_oob(blob,sizeof blob,0,1,VI,2,&h,&w) && h.payload_size==w);
+    fixture(); unsigned i=map(), j=map(); uint32_t tx=mock.tx_pkt_count;
+    /* region_write: registry and bounds before any sync; the write ENDs the bracket (clean for the DSP) */
+    uint8_t pat[32]; memset(pat,0x5a,sizeof pat);
+    assert(m11_custodian_region_write(&c,i,(uint32_t)c.regions[i].aligned_bytes-4u,pat,8,101)==-EINVAL);
+    assert(m11_custodian_region_write(&c,3,0,pat,8,101)==-EINVAL);
+    assert(m11_custodian_region_write(&c,i,0,pat,0,101)==-EINVAL);
+    assert(!m11_custodian_region_write(&c,j,64,pat,32,101));
+    assert(!memcmp((uint8_t *)c.regions[j].vaddr+64,pat,32) && !c.regions[j].cpu_access_active &&
+           c.regions[j].cpu_cache_clean_for_dsp && mock.tx_pkt_count==tx);
+    /* GRAPH_OPEN with the caller's payload (a SUB_GRAPH_LIST block the strict mock parses) */
+    unsigned gv=UINT_MAX, gr=UINT_MAX, g2=UINT_MAX;
+    assert(m11_custodian_graph_open_blob(&c,i,4090,blob,h.payload_size,VI,2,102,&gv)==-EINVAL && gv==UINT_MAX);
+    assert(m11_custodian_graph_open_blob(&c,i,1024,blob,h.payload_size,VI,0,102,&gv)==-EINVAL);
+    assert(mock.tx_pkt_count==tx);
+    assert(!m11_custodian_graph_open_blob(&c,i,1024,blob,h.payload_size,VI,2,102,&gv));
+    assert(gv<M11_CUSTODIAN_GRAPHS && c.graphs[gv].state==M11_GRAPH_OPEN && mock.vi_tx_opened && c.region_graph_refs[i]==1);
+    assert(!memcmp((uint8_t *)c.regions[i].vaddr+1024,blob,h.payload_size));
+    assert(m11_custodian_graph_open_blob(&c,i,2048,blob,h.payload_size,VI,2,102,&g2)==-EEXIST && g2==UINT_MAX);
+    pass("rev 6: region_write and graph_open_blob refuse before any TX; the caller's GRAPH_OPEN payload opens a ledger graph");
+    /* cfg: in band only, SET/GET only, a live graph only; refused before any TX */
+    m11_apm_aw_re_cfg_pkt_t cfg; memset(&cfg,0,sizeof cfg);
+    cfg.cmd_hdr.payload_size=sizeof cfg.env;
+    assert(!m11_aw_build_re_envelope_48(0,6372,&cfg.env));
+    tx=mock.tx_pkt_count;
+    assert(m11_custodian_cfg(&c,gv^1u,0x42D3u,M11_APM_CMD_SET_CFG,&cfg,sizeof cfg,103,NULL,0,NULL,NULL)==-EPROTO);
+    assert(m11_custodian_cfg(&c,gv,0x42D3u,M11_APM_CMD_GRAPH_START,&cfg,sizeof cfg,103,NULL,0,NULL,NULL)==-EINVAL);
+    m11_apm_aw_re_cfg_pkt_t bad=cfg; bad.cmd_hdr.mem_map_handle=c.regions[i].mem_map_handle;
+    assert(m11_custodian_cfg(&c,gv,0x42D3u,M11_APM_CMD_SET_CFG,&bad,sizeof bad,103,NULL,0,NULL,NULL)==-EINVAL);
+    bad=cfg; bad.cmd_hdr.payload_size=8;
+    assert(m11_custodian_cfg(&c,gv,0x42D3u,M11_APM_CMD_SET_CFG,&bad,sizeof bad,103,NULL,0,NULL,NULL)==-EINVAL);
+    assert(m11_custodian_cfg(&c,gv,0x42D3u,M11_APM_CMD_SET_CFG,&cfg,20,103,NULL,0,NULL,NULL)==-EINVAL);
+    assert(mock.tx_pkt_count==tx);
+    /* the AW Re apply and read-back through the custodian (VI prepared, RX open) */
+    assert(!m11_custodian_graph_cmd(&c,gv,M11_APM_CMD_GRAPH_PREPARE,104) && mock.vi_tx_prepared);
+    assert(!m11_custodian_graph_open(&c,j,0,RX,4,104,&gr) && c.graphs[gr].state==M11_GRAPH_OPEN);
+    rt_graph=gr;
+    const m11_aw_safety_context_t ctx={.vi_tx_subgraph_opened=true,.vi_tx_subgraph_prepared=true,
+        .vi_tx_module_iid=M11_AW_VI_TX_MODULE_IID,.sp_rx_module_iid=M11_AW_SP_RX_MODULE_IID};
+    m11_aw_cal_pair_t cal={{6372,7003},{m11_aw_mohm_to_q12(6372),m11_aw_mohm_to_q12(7003)}};
+    m11_aw_apply_report_t rep;
+    assert(!m11_aw_apply_and_verify_re_via(via_custodian,NULL,&ctx,&cal,10,&rep) && rep.pair_re_readback_verified);
+    assert(mock.stored_q12_re[0]==cal.q12_re[0] && mock.stored_q12_re[1]==cal.q12_re[1]);
+    /* cfg_oob: the parameters at region:off, to APM. The strict mock models only the AW in-band SET_CFG,
+     * so it NACKs this one; a configuration never changes the graph */
+    tx=mock.tx_pkt_count;
+    assert(m11_custodian_cfg_oob(&c,gr,i,4090,pat,32,105)==-EINVAL);
+    assert(m11_custodian_cfg_oob(&c,7,i,2048,pat,32,105)==-EPROTO && mock.tx_pkt_count==tx);
+    assert(m11_custodian_cfg_oob(&c,gr,i,2048,pat,32,105)==-EREMOTEIO && mock.tx_pkt_count==tx+1);
+    assert(c.graphs[gr].state==M11_GRAPH_OPEN && !memcmp((uint8_t *)c.regions[i].vaddr+2048,pat,32));
+    pass("rev 6: cfg in band (the AW Re round trip verified through it) and cfg_oob; malformed or graphless refused before any TX");
+    /* data commands: a STARTED graph, a held region's handle, inside it; refused before any TX */
+    assert(!m11_custodian_graph_cmd(&c,gv,M11_APM_CMD_GRAPH_START,106) && c.graphs[gv].state==M11_GRAPH_STARTED);
+    const uint32_t hj=c.regions[j].mem_map_handle;
+    uint32_t rd[8]={0,0,hj,1024,0,0,0,0}, t1=0, t2=0, pol=1, dsp=0;
+    tx=mock.tx_pkt_count;
+    assert(m11_custodian_data_submit(&c,gr,0x4547u,M11_DATA_CMD_RD_SH_MEM_EP_DATA_BUFFER_V2,rd,sizeof rd,107,&t1)==-EPROTO);
+    rd[2]=0xDEADu;
+    assert(m11_custodian_data_submit(&c,gv,0x4547u,M11_DATA_CMD_RD_SH_MEM_EP_DATA_BUFFER_V2,rd,sizeof rd,107,&t1)==-EINVAL);
+    rd[2]=hj; rd[1]=1;
+    assert(m11_custodian_data_submit(&c,gv,0x4547u,M11_DATA_CMD_RD_SH_MEM_EP_DATA_BUFFER_V2,rd,sizeof rd,107,&t1)==-EINVAL);
+    rd[1]=0; rd[0]=4000;
+    assert(m11_custodian_data_submit(&c,gv,0x4547u,M11_DATA_CMD_RD_SH_MEM_EP_DATA_BUFFER_V2,rd,sizeof rd,107,&t1)==-EINVAL);
+    rd[0]=0; rd[3]=0;
+    assert(m11_custodian_data_submit(&c,gv,0x4547u,M11_DATA_CMD_RD_SH_MEM_EP_DATA_BUFFER_V2,rd,sizeof rd,107,&t1)==-EINVAL);
+    rd[3]=1024;
+    assert(m11_custodian_data_submit(&c,gv,0x4547u,M11_DATA_CMD_RD_SH_MEM_EP_DATA_BUFFER_V2,rd,28,107,&t1)==-EINVAL);
+    assert(m11_custodian_data_submit(&c,gv,0x4547u,M11_APM_CMD_SET_CFG,rd,sizeof rd,107,&t1)==-EINVAL);
+    assert(m11_custodian_data_submit(&c,gv,0x40BDu,M11_DATA_CMD_WR_SH_MEM_EP_EOS,&pol,8,107,&t1)==-EINVAL);
+    assert(mock.tx_pkt_count==tx);
+    assert(!m11_custodian_data_submit(&c,gv,0x4547u,M11_DATA_CMD_RD_SH_MEM_EP_DATA_BUFFER_V2,rd,sizeof rd,107,&t1) && t1);
+    assert(!m11_custodian_data_submit(&c,gv,0x40BDu,M11_DATA_CMD_WR_SH_MEM_EP_EOS,&pol,4,108,&t2) && t2 && mock.tx_pkt_count==tx+2);
+    /* the strict mock answers both with IBASIC status 1; the waits (no TX) collect them */
+    assert(m11_gpr_engine_wait_token(&eng,t1,10,&dsp,NULL,0,NULL)==-EREMOTEIO);
+    assert(m11_gpr_engine_wait_token(&eng,t2,10,&dsp,NULL,0,NULL)==-EREMOTEIO);
+    /* all of it was the custodian's own traffic: no latch, and a further MAP is admitted */
+    assert(!(boot.reasons & M11_TAINT_FOREIGN_TRAFFIC) && boot.state==M11_ADSP_CLEAN);
+    unsigned k=UINT_MAX;
+    assert(!m11_custodian_map(&c,4096,109,&k) && k<M11_CUSTODIAN_REGIONS);
+    pass("rev 6: data_submit (RD, EOS) for a STARTED graph inside a held region; all session traffic is the custodian's own (MAP still admitted)");
+    /* one command around the custodian is caught; after it, session calls are refused, teardown is not */
+    uint32_t raw=0;
+    assert(!m11_gpr_engine_submit_ex(&eng,0,0x4547u,M11_DATA_CMD_RD_SH_MEM_EP_DATA_BUFFER_V2,rd,sizeof rd,&raw));
+    assert(m11_custodian_cfg(&c,gr,0x42D3u,M11_APM_CMD_GET_CFG,&cfg,sizeof cfg,110,NULL,0,NULL,NULL)==-EOWNERDEAD);
+    assert(boot.reasons & M11_TAINT_FOREIGN_TRAFFIC);
+    tx=mock.tx_pkt_count;
+    assert(m11_custodian_region_write(&c,j,0,pat,8,111)==-EOWNERDEAD);
+    assert(m11_custodian_data_submit(&c,gv,0x40BDu,M11_DATA_CMD_WR_SH_MEM_EP_EOS,&pol,4,111,&t2)==-EOWNERDEAD);
+    assert(m11_custodian_cfg_oob(&c,gr,i,3072,pat,32,111)==-EOWNERDEAD && mock.tx_pkt_count==tx);
+    assert(!m11_custodian_graph_cmd(&c,gv,M11_APM_CMD_GRAPH_STOP,112) && !m11_custodian_graph_cmd(&c,gv,M11_APM_CMD_GRAPH_CLOSE,113));
+    assert(!m11_custodian_graph_cmd(&c,gr,M11_APM_CMD_GRAPH_CLOSE,114));
+    assert(c.region_graph_refs[i]==0 && c.region_graph_refs[j]==0);
+    assert(m11_custodian_terminal_action(&c)==M11_TERMINAL_RESET_RETAINING_ANCHORS && !mock.unmap_cmd_count);
+    pass("rev 6: a command around the custodian latches FOREIGN_TRAFFIC; session calls then refused before TX, graph teardown still allowed; regions held");
+    /* graph_open_blob outcomes: a failed END sends nothing (FREE); a lost reply is UNKNOWN */
+    fixture(); i=map(); tx=mock.tx_pkt_count; mock.fail_dma_buf_sync_end=true;
+    assert(m11_custodian_graph_open_blob(&c,i,1024,blob,h.payload_size,VI,2,101,&gv)<0 && gv==UINT_MAX);
+    assert(mock.tx_pkt_count==tx && c.graphs[0].state==M11_GRAPH_FREE && c.region_graph_refs[i]==0 && boot.state==M11_ADSP_CLEAN);
+    fixture(); i=map(); mock.drop_graph_open_rsp=true;
+    assert(m11_custodian_graph_open_blob(&c,i,1024,blob,h.payload_size,VI,2,101,&gv)==-ETIMEDOUT && gv<M11_CUSTODIAN_GRAPHS);
+    assert(c.graphs[gv].state==M11_GRAPH_UNKNOWN && (boot.reasons & M11_TAINT_GRAPH_UNKNOWN) && c.region_graph_refs[i]==1);
+    pass("rev 6: graph_open_blob with a failed END transmits nothing and leaves the ledger FREE; a lost reply leaves it UNKNOWN");
+}
 /* Post-MAP hold (rev 5, CP2 criterion 5): the region still owns its backing, its MAP may have
  * been transmitted, and nothing was ever sent or released to undo it. */
 static void held(unsigned i) {
@@ -504,6 +617,7 @@ int main(void) {
     for(unsigned k=0;k<2;k++) if(global_list[k].fd==100) { resolved=global_list[k].backing; break; }
     assert(resolved==&old_backing && resolved!=global_list[1].backing);
     pass("raw-fd global lookup aliases equal process fd numbers; exclusivity remains a precondition");
+    rev6_session();
     printf("Custodian qualification: %u cases PASS; physical runtime and recovery BLOCKED\n",cases);
     return 0;
 }

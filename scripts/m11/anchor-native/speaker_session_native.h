@@ -6,7 +6,9 @@
  *  1. plan and amplifier pre-checks: the AW module instances are the ones the Re code is written for, both
  *     amplifier switches are set Disable and both profiles to the plan's values, each read back;
  *  2. two regions mapped through the caller's map_fn (the custodian: MAP intent, census, PDR settle): the
- *     out-of-band command region and the data region;
+ *     out-of-band command region and the data region. Every DSP command from here on goes through the
+ *     custodian (W5b, rev 6 owner session calls: graph ledger, single-owner accounting); each out-of-band
+ *     payload gets its own 4 KiB-aligned offset of the command region, never reused;
  *  3. VI: TX back end open (HW_PARAMS), GRAPH_OPEN and calibration out of band, the in-band configs,
  *     PREPARE, START, the read buffers queued once (never re-queued: stock PAL never reads the VI front end),
  *     TX back end PREPARE;
@@ -21,9 +23,9 @@
  *     RENDERED, all inside amp_window_ms from the amplifier enable;
  *  8. teardown, always, from wherever the session stopped: both switches Disable first (read back) if
  *     either was ever written Enable, then GRAPH_STOP RX, RX back end close, GRAPH_STOP VI, TX back end
- *     close, GRAPH_CLOSE RX, GRAPH_CLOSE VI, each only if its counterpart ran (no DSP command once the
- *     engine latched PDR). No UNMAP, no unimport, no free: the regions stay held (post-MAP hold) and the
- *     caller ends the boot retaining.
+ *     close, GRAPH_CLOSE RX, GRAPH_CLOSE VI, each as the custodian's graph ledger allows (a graph left
+ *     UNKNOWN is never commanded again; no DSP command once the engine latched PDR). No UNMAP, no
+ *     unimport, no free: the regions stay held (post-MAP hold) and the caller ends the boot retaining.
  */
 #ifndef M11_SPEAKER_SESSION_NATIVE_H
 #define M11_SPEAKER_SESSION_NATIVE_H
@@ -33,19 +35,17 @@
 #include "speaker_plan_native.h"
 #include "snd_backend_native.h"
 #include "../qualification/runtime-repair/m11_aw_protection.h"
-#include "../qualification/runtime-repair/m11_shmem.h"
+#include "../qualification/ownership/m11_custodian.h"
 
 typedef struct {
-    m11_gpr_engine_t *eng;                  /* the journaled engine */
-    m11_shmem_mgr_t *mgr;
-    int (*map_fn)(void *user, size_t bytes, unsigned *slot);
-    m11_shmem_region_t *(*region_fn)(void *user, unsigned slot);
+    m11_custodian *cust;                    /* the owner; its engine is the journaled one */
+    int (*map_fn)(void *user, size_t bytes, unsigned *slot);   /* a custodian MAP; slot = its region */
     void *user;
     m11_snd_backend *snd;                   /* prepared before the seal */
     const m11_speaker_plan *plan;
     void (*record_fn)(void *user, const char *line);   /* one evidence record per call */
     uint64_t (*now_fn)(void *user);
-    uint32_t cmd_timeout_ms;                /* per DSP command */
+    uint32_t wait_timeout_ms;               /* per data buffer (commands use the custodian's budget) */
     uint32_t eos_timeout_ms;
     uint32_t amp_window_ms;                 /* amplifier enable -> disable */
     size_t region_bytes;                    /* each of the two regions */

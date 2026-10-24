@@ -386,6 +386,143 @@ int m11_custodian_graph_teardown(m11_custodian *c, uint64_t now) {
     return 0;
 }
 
+/* ------------------------- owner session commands (rev 6) ------------------------- */
+/* The admission every session command shares with graph_open (PREPARE/START rule: CLEAN only). */
+static int session_admit(m11_custodian *c, uint64_t now) {
+    int rc=m11_custodian_tick(c, now);
+    if (rc) return rc;
+    if (foreign_traffic(c, now)) return -EOWNERDEAD;
+    if (c->closed || c->boot->state != M11_ADSP_CLEAN || !c->boot->owner_alive || c->kernel_imports_lost)
+        return -EOWNERDEAD;
+    return c->call_inflight ? -EBUSY : 0;
+}
+static bool held_region(const m11_custodian *c, unsigned r) {
+    return r < M11_CUSTODIAN_REGIONS && c->occupied[r] &&
+           c->regions[r].state == M11_SHMEM_STATE_DSP_MAP_ACKNOWLEDGED &&
+           c->regions[r].vaddr && c->regions[r].mem_map_handle;
+}
+static bool inside(const m11_shmem_region_t *r, uint32_t off, uint32_t len) {
+    return len && (size_t)off + len <= r->aligned_bytes;
+}
+/* CPU write, then END so the DSP sees it (the m11_apm_transact_graph_open_region order); a
+ * failed END leaves the bracket open and nothing is sent. */
+static int write_region(m11_custodian *c, unsigned r, uint32_t off, const void *src, uint32_t len) {
+    m11_shmem_region_t *reg=&c->regions[r];
+    int rc;
+    if (!reg->cpu_access_active && (rc=m11_shmem_begin_cpu_access(c->mgr, reg))) return rc;
+    memcpy((uint8_t *)reg->vaddr + off, src, len);
+    if ((rc=m11_shmem_end_cpu_access(c->mgr, reg))) return rc;
+    return reg->cpu_access_active || !reg->cpu_cache_clean_for_dsp ? -EIO : 0;
+}
+static bool graph_live(const m11_custodian *c, unsigned g) {
+    return g < M11_CUSTODIAN_GRAPHS && (c->graphs[g].state == M11_GRAPH_OPEN ||
+           c->graphs[g].state == M11_GRAPH_PREPARED || c->graphs[g].state == M11_GRAPH_STARTED);
+}
+int m11_custodian_region_write(m11_custodian *c, unsigned r, uint32_t off, const void *src,
+                               uint32_t len, uint64_t now) {
+    if (!c || !src) return -EINVAL;
+    int rc=session_admit(c, now);
+    if (rc) return rc;
+    if (!held_region(c, r) || !inside(&c->regions[r], off, len)) return -EINVAL;
+    return write_region(c, r, off, src, len);
+}
+int m11_custodian_graph_open_blob(m11_custodian *c, unsigned r, uint32_t off, const void *blob,
+                                  uint32_t len, const uint32_t *sgs, uint32_t n, uint64_t now,
+                                  unsigned *out) {
+    if (!c || !out || !sgs || !blob) return -EINVAL;
+    *out = UINT_MAX;
+    int rc=session_admit(c, now);
+    if (rc) return rc;
+    if (!held_region(c, r) || !inside(&c->regions[r], off, len)) return -EINVAL;
+    if (!n || n > M11_APM_MAX_SUBGRAPHS_PER_CMD) return -EINVAL;
+    if (sgs_overlap(c, sgs, n)) return -EEXIST;
+    unsigned g;
+    for (g=0; g<M11_CUSTODIAN_GRAPHS && c->graphs[g].state != M11_GRAPH_FREE; ++g) {}
+    if (g == M11_CUSTODIAN_GRAPHS) return -ENOSPC;
+    uint32_t budget=wait_budget(c, now);
+    if (!budget) return -EOWNERDEAD;
+    m11_custodian_graph *gr=&c->graphs[g];
+    /* Intent before TX: the graph is UNKNOWN and its region pinned until an outcome. */
+    *gr = (m11_custodian_graph){.state=M11_GRAPH_UNKNOWN, .region=r, .num_sgs=n};
+    memcpy(gr->sgs, sgs, n*sizeof(*sgs));
+    c->region_graph_refs[r]++;
+    c->call_inflight=true; c->mgr->gpr->last_tx_status=M11_GPR_TX_NOT_ATTEMPTED;
+    rc=write_region(c, r, off, blob, len);
+    if (!rc) {
+        m11_apm_cmd_header_t h={off, 0u, c->regions[r].mem_map_handle, len};
+        uint32_t status=0;
+        rc=m11_gpr_engine_transact(c->mgr->gpr, M11_APM_MODULE_IID, M11_APM_CMD_GRAPH_OPEN, &h, sizeof h,
+                                   budget, &status, NULL, 0, NULL);
+    }
+    c->call_inflight=false; observe_own(c);
+    rc=graph_outcome(c, gr, rc, M11_GRAPH_FREE, M11_GRAPH_OPEN, now);
+    if (gr->state != M11_GRAPH_FREE) *out = g;
+    return rc;
+}
+int m11_custodian_cfg(m11_custodian *c, unsigned g, uint32_t dst, uint32_t op, const void *pl,
+                      uint32_t len, uint64_t now, void *rsp, size_t cap, size_t *rsp_len, bool *handed) {
+    if (handed) *handed=false;
+    if (!c || !pl || !dst || (op != M11_APM_CMD_SET_CFG && op != M11_APM_CMD_GET_CFG)) return -EINVAL;
+    int rc=session_admit(c, now);
+    if (rc) return rc;
+    m11_apm_cmd_header_t h;
+    if (len < sizeof h + 16u) return -EINVAL;
+    memcpy(&h, pl, sizeof h);
+    if (h.payload_address_lsw || h.payload_address_msw || h.mem_map_handle || h.payload_size != len - sizeof h)
+        return -EINVAL;
+    if (!graph_live(c, g)) return -EPROTO;
+    uint32_t budget=wait_budget(c, now);
+    if (!budget) return -EOWNERDEAD;
+    uint32_t status=0;
+    c->call_inflight=true; c->mgr->gpr->last_tx_status=M11_GPR_TX_NOT_ATTEMPTED;
+    rc=m11_gpr_engine_transact(c->mgr->gpr, dst, op, pl, len, budget, &status, rsp, cap, rsp_len);
+    if (handed) *handed = c->mgr->gpr->last_tx_status != M11_GPR_TX_NOT_ATTEMPTED;
+    c->call_inflight=false; observe_own(c);
+    return rc;
+}
+int m11_custodian_cfg_oob(m11_custodian *c, unsigned g, unsigned r, uint32_t off, const void *blob,
+                          uint32_t len, uint64_t now) {
+    if (!c || !blob) return -EINVAL;
+    int rc=session_admit(c, now);
+    if (rc) return rc;
+    if (!held_region(c, r) || !inside(&c->regions[r], off, len)) return -EINVAL;
+    if (!graph_live(c, g)) return -EPROTO;
+    uint32_t budget=wait_budget(c, now);
+    if (!budget) return -EOWNERDEAD;
+    c->call_inflight=true; c->mgr->gpr->last_tx_status=M11_GPR_TX_NOT_ATTEMPTED;
+    rc=write_region(c, r, off, blob, len);
+    if (!rc) {
+        m11_apm_cmd_header_t h={off, 0u, c->regions[r].mem_map_handle, len};
+        uint32_t status=0;
+        rc=m11_gpr_engine_transact(c->mgr->gpr, M11_APM_MODULE_IID, M11_APM_CMD_SET_CFG, &h, sizeof h,
+                                   budget, &status, NULL, 0, NULL);
+    }
+    c->call_inflight=false; observe_own(c);
+    return rc;
+}
+int m11_custodian_data_submit(m11_custodian *c, unsigned g, uint32_t dst, uint32_t op, const void *pl,
+                              uint32_t len, uint64_t now, uint32_t *tok) {
+    if (!c || !pl || !tok || !dst) return -EINVAL;
+    *tok=0;
+    int rc=session_admit(c, now);
+    if (rc) return rc;
+    if (op == M11_DATA_CMD_WR_SH_MEM_EP_DATA_BUFFER_V2 || op == M11_DATA_CMD_RD_SH_MEM_EP_DATA_BUFFER_V2) {
+        if (len != (op == M11_DATA_CMD_WR_SH_MEM_EP_DATA_BUFFER_V2 ? 44u : 32u)) return -EINVAL;
+        uint32_t w[4];
+        memcpy(w, pl, sizeof w);
+        unsigned r;
+        for (r=0; r<M11_CUSTODIAN_REGIONS && !(held_region(c, r) && c->regions[r].mem_map_handle == w[2]); ++r) {}
+        if (r == M11_CUSTODIAN_REGIONS || w[1] || !inside(&c->regions[r], w[0], w[3])) return -EINVAL;
+    } else if (op != M11_DATA_CMD_WR_SH_MEM_EP_EOS || len != 4u) {
+        return -EINVAL;
+    }
+    if (g >= M11_CUSTODIAN_GRAPHS || c->graphs[g].state != M11_GRAPH_STARTED) return -EPROTO;
+    c->call_inflight=true; c->mgr->gpr->last_tx_status=M11_GPR_TX_NOT_ATTEMPTED;
+    rc=m11_gpr_engine_submit_ex(c->mgr->gpr, M11_GPR_CLIENT_DATA_DEFAULT, dst, op, pl, len, tok);
+    c->call_inflight=false; observe_own(c);
+    return rc;
+}
+
 /* ------------------------------- lifetime events ---------------------------------- */
 void m11_custodian_worker_exit(m11_custodian *c, uint64_t now) {
     if (!c || !c->boot) return;

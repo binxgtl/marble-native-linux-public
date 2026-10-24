@@ -215,6 +215,27 @@ int m11_aw_apply_and_verify_re_dsp_ex(m11_gpr_engine_t *gpr,
                                       uint32_t timeout_ms,
                                       m11_aw_apply_report_t *report);
 
+/*
+ * One SET_CFG / GET_CFG round trip for the apply below: 0, -EREMOTEIO for a DSP status, or the
+ * transport error, as m11_gpr_engine_transact returns; *out_handed_to_write says whether the
+ * packet reached write_fn (only then may the DSP have acted on it).
+ */
+typedef int (*m11_aw_round_trip_fn)(void *user, uint32_t dst_port, uint32_t opcode,
+                                    const void *pkt, size_t pkt_len, uint32_t timeout_ms,
+                                    void *out_rsp, size_t rsp_cap, size_t *out_rsp_len,
+                                    bool *out_handed_to_write);
+
+/*
+ * The same apply and verification through the caller's round trip (P5: the custodian's
+ * m11_custodian_cfg, so the owner's single-owner accounting sees the traffic). _ex is this with
+ * the engine's submit and wait.
+ */
+int m11_aw_apply_and_verify_re_via(m11_aw_round_trip_fn round_trip, void *user,
+                                   const m11_aw_safety_context_t *safety_ctx,
+                                   const m11_aw_cal_pair_t *cal,
+                                   uint32_t timeout_ms,
+                                   m11_aw_apply_report_t *report);
+
 /* Compatibility wrapper: returns report.primary_error of the _ex variant. */
 int m11_aw_apply_and_verify_re_dsp(m11_gpr_engine_t *gpr,
                                    const m11_aw_safety_context_t *safety_ctx,

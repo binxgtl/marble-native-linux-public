@@ -248,7 +248,6 @@ struct rig {
     m11_boot_ledger boot; m11_custodian cust; m11_snd_backend snd;
 };
 static int map_cb(void *u, size_t bytes, unsigned *slot) { struct rig *r = u; return m11_custodian_map(&r->cust, bytes, ms(), slot); }
-static m11_shmem_region_t *region_cb(void *u, unsigned slot) { struct rig *r = u; return slot < M11_CUSTODIAN_REGIONS ? &r->cust.regions[slot] : NULL; }
 static unsigned nrec;
 static void record_cb(void *u, const char *line) { (void)u; (void)line; nrec++; }
 
@@ -276,7 +275,9 @@ static void start(struct rig *r, peer_cfg c) {
     m11_snd_paths sp = m11_snd_paths_default();
     assert(m11_snd_prepare(&r->snd, &asys, &sp, "TDM-LPAIF-RX-TERTIARY-VIRT-2", "TDM-LPAIF-TX-TERTIARY") == 0);
 }
+/* W5b: every DSP command of every scenario was the custodian's own traffic */
 static int stop(struct rig *r) {
+    assert(!(r->boot.reasons & M11_TAINT_FOREIGN_TRAFFIC));
     m11_snd_release(&r->snd);
     close(r->sv[0]);
     int st; assert(waitpid(r->pid, &st, 0) == r->pid && WIFEXITED(st));
@@ -345,8 +346,8 @@ static size_t build_plan(uint32_t duration_ms) {
 
 static m11_speaker_plan plan;
 static int run_session(struct rig *r, m11_speaker_report *rep, uint32_t window_ms) {
-    m11_speaker_io io = {.eng = &r->eng, .mgr = &r->mgr, .map_fn = map_cb, .region_fn = region_cb, .user = r,
-        .snd = &r->snd, .plan = &plan, .record_fn = record_cb, .now_fn = now_cb, .cmd_timeout_ms = 300,
+    m11_speaker_io io = {.cust = &r->cust, .map_fn = map_cb, .user = r,
+        .snd = &r->snd, .plan = &plan, .record_fn = record_cb, .now_fn = now_cb, .wait_timeout_ms = 300,
         .eos_timeout_ms = 300, .amp_window_ms = window_ms, .region_bytes = 65536, .write_buffers = 4, .buffer_ms = 40};
     return m11_speaker_session_run(&io, rep);
 }
@@ -394,8 +395,15 @@ int main(void) {
     /* calibrations to APM; single-parameter configs to their module (stock rule); Re SET and GET to 0x42D3 */
     assert(count(op(M11_APM_CMD_SET_CFG, 1)) == 2 && count(op(M11_APM_CMD_SET_CFG, 0x428F)) == 3 + 6);
     assert(count(op(M11_APM_CMD_SET_CFG, 0x42D3)) == 2 && count(op(M11_APM_CMD_GET_CFG, 0x42D3)) == 2);
-    for (int i = 0; i < M11_CUSTODIAN_REGIONS; i++)
+    for (int i = 0; i < M11_CUSTODIAN_REGIONS; i++) {
         if (r.cust.occupied[i]) assert(r.cust.regions[i].state == M11_SHMEM_STATE_DSP_MAP_ACKNOWLEDGED && r.cust.regions[i].map_tx_started);
+        assert(r.cust.region_graph_refs[i] == 0);
+    }
+    /* W5b: each out-of-band payload kept its own 4 KiB place in the command region (the first MAP), never reused */
+    const uint8_t *cmdr = r.cust.regions[0].vaddr;
+    assert(!memcmp(cmdr, plan.vi.open.data, plan.vi.open.len) && !memcmp(cmdr + 4096, plan.vi.cal.data, plan.vi.cal.len) && !memcmp(cmdr + 8192, plan.rx.open.data, plan.rx.open.len) && !memcmp(cmdr + 12288, plan.rx.cal.data, plan.rx.cal.len));
+    /* W5b: both graphs went through the custodian's ledger and were closed there; the boot stays CLEAN */
+    assert(r.cust.graphs[0].state == M11_GRAPH_FREE && r.cust.graphs[1].state == M11_GRAPH_FREE && r.boot.state == M11_ADSP_CLEAN);
     assert(stop(&r) == 0); /* the stand-in saw no UNMAP and no CLOSE_ALL */
     puts("PASS happy path: back ends before graphs, VI before RX, Re read back, gate, amplifier on, RX prepare, 13 buffers, EOS; amplifier off first, then stop, back-end close and close in order; regions held, no UNMAP");
 
@@ -458,6 +466,17 @@ int main(void) {
     strcpy(plan.control[1].value, "Music");
     assert(stop(&r) == 0);
     puts("PASS pre-checks: a control the kernel does not offer stops the session before any MAP");
+
+    /* 9. W5b: the VI GRAPH_OPEN reply never comes: the ledger keeps that graph UNKNOWN, the teardown never
+     * commands it again (no STOP, no CLOSE) and reports it; the back end is still closed */
+    start(&r, (peer_cfg){.drop_op = M11_APM_CMD_GRAPH_OPEN});
+    rc = run_session(&r, &rep, 5000);
+    assert(rc == -ETIMEDOUT && rep.fail_step == M11_SPK_VI_OPEN && rep.vi_opened && rep.teardown_rc == -EOWNERDEAD);
+    assert(r.cust.graphs[0].state == M11_GRAPH_UNKNOWN && (r.boot.reasons & M11_TAINT_GRAPH_UNKNOWN) && !rep.amp_touched);
+    assert(count(op(M11_APM_CMD_GRAPH_OPEN, 1)) == 1 && count(op(M11_APM_CMD_GRAPH_STOP, 1)) == 0 &&
+           count(op(M11_APM_CMD_GRAPH_CLOSE, 1)) == 0 && at("tx_drop") >= 0);
+    assert(stop(&r) == 0);
+    puts("PASS ledger: a GRAPH_OPEN without its reply stays UNKNOWN and is never commanded again; the back end is closed");
 
     puts("PASS speaker session (stand-ins: real custodian, manager, engine and journal; ALSA fixture)");
     return 0;

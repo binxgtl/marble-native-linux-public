@@ -26,8 +26,11 @@
  * 5: post-MAP hold (CP2 criterion 5, docs/m11-argon-cp2-c5-hold-design.md): after the first
  *    MAP intent of a boot, retire and close are refused (-EPERM), no UNMAP is started, no
  *    region is released, and the only end is RESET_RETAINING_ANCHORS. The shmem layer holds
- *    every region whose MAP may have reached write_fn (NACK included). */
-#define M11_CUSTODIAN_API_REVISION 5
+ *    every region whose MAP may have reached write_fn (NACK included).
+ * 6: owner session commands (P5 speaker, docs/m11-argon-speaker-run-design.md W5b): a GRAPH_OPEN
+ *    with the caller's payload, configurations, data commands and region writes go through the
+ *    custodian, so they count as its own traffic and the foreign-traffic latch keeps its meaning. */
+#define M11_CUSTODIAN_API_REVISION 6
 #define M11_CUSTODIAN_REGIONS 4u
 #define M11_CUSTODIAN_GRAPHS 2u
 typedef enum { M11_ADSP_CLEAN, M11_ADSP_TAINTED, M11_RECOVERY_REQUIRED } m11_adsp_state;
@@ -145,6 +148,40 @@ int m11_custodian_graph_open(m11_custodian *, unsigned region, uint32_t shm_offs
 int m11_custodian_graph_cmd(m11_custodian *, unsigned graph, uint32_t opcode, uint64_t now_ms);
 /* Orderly STOP (if started) then CLOSE of every ledger graph; stops at the first failure. */
 int m11_custodian_graph_teardown(m11_custodian *, uint64_t now_ms);
+/*
+ * Rev 6, owner session commands. Each needs a CLEAN boot, no foreign traffic and no call in
+ * flight, and records its own traffic (a later foreign-traffic check stays exact). Waits go to the
+ * engine directly: a wait transmits nothing.
+ *  region_write   CPU write into a held (DSP_MAP_ACKNOWLEDGED) region inside its bounds: the open
+ *                 bracket is ended (one is started first if none is open), and the region must
+ *                 then be clean for the DSP. Nothing is transmitted.
+ *  graph_open_blob
+ *                 GRAPH_OPEN whose out-of-band payload is the caller's (the ACDB subgraph and
+ *                 connection data), written at region:off first. The same ledger rules as
+ *                 graph_open: intent before TX, only a matched ACK opens, ambiguity is UNKNOWN.
+ *  cfg            SET_CFG or GET_CFG in band to dst (a module instance, or APM) for a module of a
+ *                 graph that is OPEN, PREPARED or STARTED: payload = command header naming no
+ *                 memory, then the parameters. A configuration never changes a graph's state.
+ *                 *handed (optional): the packet reached write_fn.
+ *  cfg_oob        SET_CFG to APM with the parameters out of band at region:off, same graph rule.
+ *  data_submit    WR_SH_MEM_EP_DATA_BUFFER_V2 (44 B) or RD_SH_MEM_EP_DATA_BUFFER_V2 (32 B) naming
+ *                 <offset, 0, handle, size> inside a held region, or WR_SH_MEM_EP_EOS (4 B), to an
+ *                 endpoint of a STARTED graph. Submit only; the caller waits on *token.
+ * The caller never reuses an out-of-band offset in a boot: a command whose reply never came may
+ * still be read by the DSP.
+ */
+int m11_custodian_region_write(m11_custodian *, unsigned region, uint32_t off, const void *src,
+                               uint32_t len, uint64_t now_ms);
+int m11_custodian_graph_open_blob(m11_custodian *, unsigned region, uint32_t off, const void *blob,
+                                  uint32_t len, const uint32_t *sub_graph_ids, uint32_t num_sub_graphs,
+                                  uint64_t now_ms, unsigned *graph);
+int m11_custodian_cfg(m11_custodian *, unsigned graph, uint32_t dst, uint32_t opcode,
+                      const void *payload, uint32_t len, uint64_t now_ms,
+                      void *rsp, size_t rsp_cap, size_t *rsp_len, bool *handed);
+int m11_custodian_cfg_oob(m11_custodian *, unsigned graph, unsigned region, uint32_t off,
+                          const void *blob, uint32_t len, uint64_t now_ms);
+int m11_custodian_data_submit(m11_custodian *, unsigned graph, uint32_t dst, uint32_t opcode,
+                              const void *payload, uint32_t len, uint64_t now_ms, uint32_t *token);
 void m11_custodian_worker_exit(m11_custodian *, uint64_t now_ms);
 void m11_custodian_owner_exit(m11_custodian *, uint64_t now_ms);
 void m11_custodian_global_cleanup(m11_custodian *, uint64_t now_ms);

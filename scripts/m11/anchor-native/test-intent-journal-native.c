@@ -264,16 +264,29 @@ int main(void) {
     assert(stop(&r) == 1);
     printf("PASS opcode set: GET_SPF_STATE journaled and sent; CLOSE_ALL and an unknown opcode refused\n");
 
-    /* P5 data commands: refused before any MAP intent (no record, no TX); journaled, then sent, after it */
+    /* P5 data commands: refused at the journal before any MAP intent (no record, no TX). After it they go
+     * through the custodian (rev 6: a STARTED graph, a held region), journaled before the packet. The
+     * refusal gets its own rig: the refused submit consumed an engine token outside the custodian, which
+     * the custodian rightly treats as foreign traffic. */
     start(&r);
     uint32_t wrb[11] = {0, 0, 0xA0000001u, 3840, 0, 0, 0, 0, 0, 0, 0};
     rc = m11_gpr_engine_submit_ex(&r.eng, 0, 0x40BDu, M11_DATA_CMD_WR_SH_MEM_EP_DATA_BUFFER_V2, wrb, sizeof wrb, &tok);
     assert(rc == -EPERM && r.glink.writes == 0 && jcount == 0 && r.ilink.refused == 1);
+    assert(stop(&r) == 0);
+    start(&r);
     assert(m11_custodian_map(&r.cust, 4096, ms(), &slot) == 0 && jcount == 1);
-    rc = m11_gpr_engine_submit_ex(&r.eng, 0, 0x40BDu, M11_DATA_CMD_WR_SH_MEM_EP_DATA_BUFFER_V2, wrb, sizeof wrb, &tok);
-    assert(rc == 0 && r.glink.writes == 2 && jcount == 2 && strstr(jr[1], "op=0400100a ") && strstr(jr[1], " bytes=3840\n"));
-    assert(stop(&r) == 2);
-    printf("PASS data commands: refused before the MAP intent; after it, journaled before the packet\n");
+    static const uint32_t one_sg[1] = {0xB0000002u};
+    uint8_t gob[64] = {0};
+    unsigned g = 99;
+    assert(m11_custodian_graph_open_blob(&r.cust, slot, 0, gob, sizeof gob, one_sg, 1, ms(), &g) == 0);
+    assert(m11_custodian_graph_cmd(&r.cust, g, M11_APM_CMD_GRAPH_PREPARE, ms()) == 0);
+    assert(m11_custodian_graph_cmd(&r.cust, g, M11_APM_CMD_GRAPH_START, ms()) == 0 && jcount == 4);
+    wrb[2] = r.cust.regions[slot].mem_map_handle;
+    rc = m11_custodian_data_submit(&r.cust, g, 0x40BDu, M11_DATA_CMD_WR_SH_MEM_EP_DATA_BUFFER_V2, wrb, sizeof wrb, ms(), &tok);
+    assert(rc == 0 && r.glink.writes == 5 && jcount == 5 && strstr(jr[4], "op=0400100a ") && strstr(jr[4], " bytes=3840\n"));
+    assert(!(r.boot.reasons & M11_TAINT_FOREIGN_TRAFFIC) && r.boot.state == M11_ADSP_CLEAN);
+    assert(stop(&r) == 5);
+    printf("PASS data commands: refused before the MAP intent; after it, through the custodian, journaled before the packet\n");
 
     m11_intent_link il; m11_gpr_transport_t out;
     assert(m11_intent_transport(&il, NULL, &jsink, &r.boot, &out) == -EINVAL);

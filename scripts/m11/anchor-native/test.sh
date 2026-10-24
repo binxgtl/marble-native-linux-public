@@ -1015,6 +1015,16 @@ w5_mutant no-gate speaker_session_native.c 'if ((rc = switches_read(s, "Disable"
 # the teardown leaves the RX back end open
 w5_mutant rx-be-left-open speaker_session_native.c 'rc = m11_snd_pcm_close(io->snd, M11_SND_RX);' '        rc = 0;' \
   'amp_off < rx_stop && rx_stop < at("rx_drop") && at("rx_drop") < last(op(M11_APM_CMD_GRAPH_STOP, 1))' "$w5_spk_plan"
+# W5b: a graph command sent around the custodian (the engine directly): the custodian's foreign-traffic latch
+# refuses the next session call
+w5_mutant bypass-custodian speaker_session_native.c 'int rc = m11_custodian_graph_cmd(s->io->cust, g, opcode, now(s));' \
+  '    uint32_t st_ = 0; int rc = m11_apm_transact_graph_mgmt(eng(s), opcode, s->io->cust->graphs[g].sgs, s->io->cust->graphs[g].num_sgs, 300, &st_); /* MUTANT */' \
+  'rc == 0 && rep.stage == M11_SPK_EOS && rep.amp_off_verified && !rep.teardown_rc' "$w5_spk_plan"
+# W5b: every out-of-band payload written at the same offset (a payload whose reply never came may still be read)
+w5_mutant oob-reused speaker_session_native.c 's->oob_next = (uint32_t)(((size_t)s->oob_next + len + OOB_ALIGN - 1u) / OOB_ALIGN * OOB_ALIGN);' \
+  '    (void)0; /* MUTANT */' \
+  '!memcmp(cmdr, plan.vi.open.data, plan.vi.open.len) && !memcmp(cmdr + 4096, plan.vi.cal.data, plan.vi.cal.len) && !memcmp(cmdr + 8192, plan.rx.open.data, plan.rx.open.len) && !memcmp(cmdr + 12288, plan.rx.cal.data, plan.rx.cal.len)' \
+  "$w5_spk_plan"
 p4e_mutant() { # name asroot pattern replacement assertion last-pass (same detection rule as gtn_mutant)
   local name="$1" asroot="$2" pat="$3" rep="$4" want="$5" last="$6" dir="$out/p4e-mutant-$1" rc=0 got file=p4_env_native.c
   if [[ "$asroot" == 1 && "$sudo_ok" != 1 ]]; then echo "SKIP P4 environment mutant $name: no sudo"; return; fi

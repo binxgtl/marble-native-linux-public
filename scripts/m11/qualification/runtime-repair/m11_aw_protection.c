@@ -286,10 +286,11 @@ int m11_aw_validate_safety_context(const m11_aw_safety_context_t *ctx) {
  * One request/response round trip that also reports whether the packet reached write_fn.
  * Only write_fn having been invoked means the DSP may have acted on it.
  */
-static int aw_cfg_round_trip(m11_gpr_engine_t *gpr, uint32_t dst_port, uint32_t opcode,
+static int aw_cfg_round_trip(void *user, uint32_t dst_port, uint32_t opcode,
                              const void *pkt, size_t pkt_len, uint32_t timeout_ms,
                              void *out_rsp, size_t rsp_cap, size_t *out_rsp_len,
                              bool *out_handed_to_write) {
+    m11_gpr_engine_t *gpr = user;
     uint32_t tok = 0u;
     uint32_t dsp_status = 0u;
     *out_handed_to_write = false;
@@ -312,11 +313,11 @@ static void aw_fail_channel(m11_aw_apply_report_t *rep, uint32_t ch, m11_aw_fail
     rep->primary_channel = (int)ch;
 }
 
-int m11_aw_apply_and_verify_re_dsp_ex(m11_gpr_engine_t *gpr,
-                                      const m11_aw_safety_context_t *safety_ctx,
-                                      const m11_aw_cal_pair_t *cal,
-                                      uint32_t timeout_ms,
-                                      m11_aw_apply_report_t *report) {
+int m11_aw_apply_and_verify_re_via(m11_aw_round_trip_fn round_trip, void *user,
+                                   const m11_aw_safety_context_t *safety_ctx,
+                                   const m11_aw_cal_pair_t *cal,
+                                   uint32_t timeout_ms,
+                                   m11_aw_apply_report_t *report) {
     m11_aw_apply_report_t local;
     m11_aw_apply_report_t *rep = report ? report : &local;
     memset(rep, 0, sizeof(*rep));
@@ -326,7 +327,7 @@ int m11_aw_apply_and_verify_re_dsp_ex(m11_gpr_engine_t *gpr,
     rep->amp_enabled = false;
     rep->rollback_attempted = false;
 
-    if (!gpr || !safety_ctx || !cal || timeout_ms == 0) {
+    if (!round_trip || !safety_ctx || !cal || timeout_ms == 0) {
         rep->primary_error = -EINVAL;
         return -EINVAL;
     }
@@ -359,7 +360,7 @@ int m11_aw_apply_and_verify_re_dsp_ex(m11_gpr_engine_t *gpr,
          * APM_CMD_GET_CFG to dst_port = sp_rx_module_iid (0x42D3), NOT port 1.
          */
         bool handed = false;
-        rc = aw_cfg_round_trip(gpr, safety_ctx->sp_rx_module_iid, M11_APM_CMD_SET_CFG,
+        rc = round_trip(user, safety_ctx->sp_rx_module_iid, M11_APM_CMD_SET_CFG,
                                &set_pkt, sizeof(set_pkt), timeout_ms, NULL, 0, NULL, &handed);
         if (handed) {
             c->stage = M11_AW_STAGE_SET_SENT;
@@ -378,7 +379,7 @@ int m11_aw_apply_and_verify_re_dsp_ex(m11_gpr_engine_t *gpr,
         m11_apm_rsp_aw_re_get_cfg_t get_rsp;
         memset(&get_rsp, 0, sizeof(get_rsp));
         size_t rsp_len = 0;
-        rc = aw_cfg_round_trip(gpr, safety_ctx->sp_rx_module_iid, M11_APM_CMD_GET_CFG,
+        rc = round_trip(user, safety_ctx->sp_rx_module_iid, M11_APM_CMD_GET_CFG,
                                &get_req, sizeof(get_req), timeout_ms,
                                &get_rsp, sizeof(get_rsp), &rsp_len, &handed);
         if (rc < 0) {
@@ -421,6 +422,15 @@ int m11_aw_apply_and_verify_re_dsp_ex(m11_gpr_engine_t *gpr,
         (rep->ch[0].stage == M11_AW_STAGE_READBACK_VERIFIED &&
          rep->ch[1].stage == M11_AW_STAGE_READBACK_VERIFIED);
     return 0;
+}
+
+int m11_aw_apply_and_verify_re_dsp_ex(m11_gpr_engine_t *gpr,
+                                      const m11_aw_safety_context_t *safety_ctx,
+                                      const m11_aw_cal_pair_t *cal,
+                                      uint32_t timeout_ms,
+                                      m11_aw_apply_report_t *report) {
+    return m11_aw_apply_and_verify_re_via(gpr ? aw_cfg_round_trip : NULL, gpr, safety_ctx, cal,
+                                          timeout_ms, report);
 }
 
 int m11_aw_apply_and_verify_re_dsp(m11_gpr_engine_t *gpr,
