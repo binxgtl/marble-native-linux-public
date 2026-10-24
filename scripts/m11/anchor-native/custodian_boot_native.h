@@ -11,7 +11,9 @@
  *      where none exists, then the anchor bind (identity, holders, the guard pair);
  *   4. ION: the same, and its CMA twin must have metadata but NO node;
  *   5. the system-heap node (G4: made, opened once, removed);
- *   6. the owner seal over both pairs, which unlinks both nodes; no audio node is left.
+ *   6. the caller's pre-seal hook, if any (P5: the private ALSA nodes and the control open, which need mknod
+ *      and must come after the spawner exists), then the owner seal over both pairs, which unlinks both
+ *      nodes; no audio node of this sequence is left. A failing hook is step 6: nothing sealed.
  * A failure never closes an anchor already bound (its release is the terminal's decision) and never
  * leaves a node behind: a node that was made is unlinked whether or not its bind happened.
  * `stage` is the last completed step; the caller ends a failed boot through the retaining path.
@@ -45,6 +47,8 @@ typedef struct {
     const char *const *const *spawner_commands;
     unsigned spawner_count;
     int spawner_require_drop;     /* production 1 */
+    int (*pre_seal_fn)(void *user); /* P5 (speaker); NULL in P4: 0 or a negative errno */
+    void *pre_seal_user;
 } m11_boot_config;
 
 m11_boot_config m11_boot_config_default(void);

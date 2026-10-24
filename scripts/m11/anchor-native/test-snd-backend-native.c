@@ -10,6 +10,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <sys/ioctl.h> /* _IO/_IOR/_IOW/_IOWR for the asound.h request numbers */
 #include <sound/asound.h>
 #include <stdio.h>
 #include <string.h>

@@ -16,6 +16,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <signal.h>
+#include <sys/ioctl.h> /* _IO/_IOR/_IOW/_IOWR for the asound.h request numbers */
 #include <sound/asound.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -248,12 +249,13 @@ struct rig {
     m11_boot_ledger boot; m11_custodian cust; m11_snd_backend snd;
 };
 static int map_cb(void *u, size_t bytes, unsigned *slot) { struct rig *r = u; return m11_custodian_map(&r->cust, bytes, ms(), slot); }
-static unsigned nrec;
+static unsigned nrec, nsettle;
 static void record_cb(void *u, const char *line) { (void)u; (void)line; nrec++; }
+static void settle_cb(void *u) { (void)u; nsettle++; }
 
 static void start(struct rig *r, peer_cfg c) {
     memset(r, 0, sizeof *r);
-    nev = 0; nrec = 0; ignore_enable = 0; foreign_enable_at_rx_hw = 0; a_dir = 0; a_next = 0;
+    nev = 0; nrec = 0; nsettle = 0; ignore_enable = 0; foreign_enable_at_rx_hw = 0; a_dir = 0; a_next = 0;
     memset(nodes, 0, sizeof nodes); memset(afd, 0, sizeof afd); memset(elem_value, 0, sizeof elem_value);
     elem_value[2] = elem_value[3] = 1; /* profiles start at Voice: the plan sets Music */
     if (fx_heap < 0) fx_heap = open("/dev/null", O_RDONLY | O_CLOEXEC);
@@ -347,7 +349,7 @@ static size_t build_plan(uint32_t duration_ms) {
 static m11_speaker_plan plan;
 static int run_session(struct rig *r, m11_speaker_report *rep, uint32_t window_ms) {
     m11_speaker_io io = {.cust = &r->cust, .map_fn = map_cb, .user = r,
-        .snd = &r->snd, .plan = &plan, .record_fn = record_cb, .now_fn = now_cb, .wait_timeout_ms = 300,
+        .snd = &r->snd, .plan = &plan, .record_fn = record_cb, .settle_fn = settle_cb, .now_fn = now_cb, .wait_timeout_ms = 300,
         .eos_timeout_ms = 300, .amp_window_ms = window_ms, .region_bytes = 65536, .write_buffers = 4, .buffer_ms = 40};
     return m11_speaker_session_run(&io, rep);
 }
@@ -381,6 +383,7 @@ int main(void) {
     assert(rc == 0 && rep.stage == M11_SPK_EOS && rep.amp_off_verified && !rep.teardown_rc);
     assert(rep.bytes_played == 96000 && rep.buffers_sent == 13 && rep.buffers_done == 13 && rep.rd_queued == 2);
     assert(rep.re.pair_re_readback_verified && rep.regions_mapped == 2);
+    assert(nsettle >= 50); /* the caller's settle after every custodian call and wait */
     int vi_open = at(op(M11_APM_CMD_GRAPH_OPEN, 1)), rx_open = last(op(M11_APM_CMD_GRAPH_OPEN, 1));
     assert(vi_open >= 0 && rx_open > vi_open && count(op(M11_APM_CMD_SHARED_MEM_MAP_REGIONS, 1)) == 2);
     assert(at("tx_hw") < vi_open && at("rx_hw") > vi_open && at("rx_hw") < rx_open);

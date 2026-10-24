@@ -81,6 +81,10 @@ typedef struct {
     const char *cmdline_path;        /* "/proc/cmdline" */
     const char *journal_path;        /* "/dev/kmsg" */
     int journal_require_kmsg;        /* production 1: the journal fd must be char 1:11 */
+    unsigned journal_rotate;         /* P5: records per open journal file (1..9; /dev/kmsg rate-limits each open
+                                      * file to a burst of 10 per 5 s and drops the rest silently): a fresh open of
+                                      * journal_path (O_APPEND, the same kmsg check) every that many records.
+                                      * 0 (P4): one open file for the boot */
     int require_pid1;                /* production 1 */
     unsigned pool_count;
     size_t pool_len;
@@ -117,8 +121,10 @@ enum { M11_ENTRY_NONE, M11_ENTRY_JOURNAL, M11_ENTRY_CMDLINE, M11_ENTRY_PD_UP, M1
 struct m11_entry {
     m11_entry_config cfg;
     int phase, fail_step, fail_rc;
-    int journal_fd;
+    int journal_fd;                  /* the first journal fd (with journal_rotate, closed at the first rotation:
+                                      * then only "a journal exists") */
     m11_intent_fd_sink jfd;
+    m11_intent_rotating_sink jrot;   /* journal_rotate != 0 */
     m11_intent_sink sink;
     char cmdline[4096];
     uint64_t boot_epoch;

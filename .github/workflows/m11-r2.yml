@@ -1,4 +1,4 @@
-name: M11 R2 offline (journal stamp fix, anchor-native suites, custodian and runtime-repair suites, graph plan, P4 binaries)
+name: M11 R2 offline (journal stamp fix, anchor-native suites, custodian and runtime-repair suites, graph plan, P4 and P5 binaries)
 # Offline only, on x64 and native ARM64: the integrated anchor suite (runner control flow, PDR
 # model, census, stand-in GET_SPF_STATE, the Run22 journal-stamp fix through the real journal.sh
 # with BusyBox and the unmodified evidence rule, mutants), the anchor qualification suite, the
@@ -171,3 +171,38 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit 1 }
           python scripts/m11/anchor-native/p4/test-post-run-listing.py
           if ($LASTEXITCODE -ne 0) { exit 1 }
+  # P5 W6 (docs/m11-argon-speaker-run-design.md): the speaker candidate's two on-device binaries, each built
+  # twice and compared, on the P4 build pattern. Not a candidate by themselves: the local staging takes them
+  # from these artifacts by digest. No device, ROM payload, ACDB or proprietary module.
+  p5-build-pid1:
+    needs: suites
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Static ARM64 speaker PID1, A/B identical, refuses outside PID1, no SysRq string
+        run: bash scripts/m11/anchor-native/p5/build.sh pid1 artifacts/m11/p5-build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: p5-pid1-${{ github.sha }}
+          path: |
+            artifacts/m11/p5-build/m11-p5
+            artifacts/m11/p5-build/pid1-elf.txt
+            artifacts/m11/p5-build/pid1-compiler.txt
+            artifacts/m11/p5-build/SHA256SUMS-pid1
+  p5-build-relay:
+    needs: suites
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Freestanding M11R26 relay with the pinned clang-r416183b, A/B identical
+        run: bash scripts/m11/anchor-native/p5/build.sh relay artifacts/m11/p5-build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: p5-relay-${{ github.sha }}
+          path: |
+            artifacts/m11/p5-build/m11-kmsg-relay
+            artifacts/m11/p5-build/relay-compiler.txt
+            artifacts/m11/p5-build/relay-toolchain-commit.txt
+            artifacts/m11/p5-build/SHA256SUMS-relay

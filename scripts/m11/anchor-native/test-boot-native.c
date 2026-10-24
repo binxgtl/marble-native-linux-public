@@ -145,6 +145,31 @@ static void c_heap_missing(void) {
     int step; int rc = m11_boot_run(&B, &C, &pdm, ms(), &step); boot_report(rc, step); _exit(0);
 }
 
+/* P5 pre-seal hook: called once, after the heap step and before the seal (mknod still allowed) */
+static int hook_rc, hook_calls;
+static int pre_seal(void *u) {
+    (void)u;
+    hook_calls++;
+    char p[460]; snprintf(p, sizeof p, "%s/hook_node", p_dev);
+    const int mk = mknod(p, S_IFCHR | 0600, makedev(1, 3)) == 0;
+    if (mk) (void)unlink(p);
+    char b[160];
+    snprintf(b, sizeof b, "HOOK calls=%d stage=%d mknod=%d heap_fd=%d sealed=%d\n", hook_calls, B.stage, mk, B.heap.fd >= 0,
+             B.endpoint.ops.close_pair != NULL && B.ion.ops.close_pair != NULL);
+    say(b);
+    return hook_rc;
+}
+static void c_pre_seal(void) {
+    tree("aud_pasthru_adsp", PROC_OK); pd_init(1);
+    C.pre_seal_fn = pre_seal; hook_rc = 0;
+    int step; int rc = m11_boot_run(&B, &C, &pdm, ms(), &step); boot_report(rc, step); _exit(0);
+}
+static void c_pre_seal_fail(void) {
+    tree("aud_pasthru_adsp", PROC_OK); pd_init(1);
+    C.pre_seal_fn = pre_seal; hook_rc = -EIO;
+    int step; int rc = m11_boot_run(&B, &C, &pdm, ms(), &step); boot_report(rc, step); _exit(0);
+}
+
 /* the full boot, handed to the composed runner */
 static int fx_heap = -1, fx_ion = -1;
 static int fx_ioctl(int fd, unsigned long req, void *arg) {
@@ -270,6 +295,14 @@ int main(int argc, char **argv) {
     st = run(c_heap_missing, rep, sizeof rep); printf("INFO st=%d %s", st, rep);
     assert(st == 0 && strstr(rep, "BOOT rc=-19 step=5 stage=4 ep=HELD ion=HELD ep_node=0 ion_node=0 cma_node=0 heap_fd=0 heap_dir=0 sealed=0"));
     printf("PASS boot refused without a system heap: both anchors stay held, both nodes removed, no heap node\n");
+
+    st = run(c_pre_seal, rep, sizeof rep); printf("INFO st=%d %s", st, rep);
+    assert(st == 0 && strstr(rep, "HOOK calls=1 stage=5 mknod=1 heap_fd=1 sealed=0") &&
+           strstr(rep, "BOOT rc=0 step=0 stage=6 ep=HELD ion=HELD ep_node=0 ion_node=0 cma_node=0 heap_fd=1 heap_dir=0 sealed=1"));
+    st = run(c_pre_seal_fail, rep, sizeof rep); printf("INFO st=%d %s", st, rep);
+    assert(st == 0 && strstr(rep, "HOOK calls=1 stage=5 mknod=1 heap_fd=1 sealed=0") &&
+           strstr(rep, "BOOT rc=-5 step=6 stage=5 ep=HELD ion=HELD ep_node=0 ion_node=0 cma_node=0 heap_fd=1 heap_dir=0 sealed=0"));
+    printf("PASS P5 pre-seal hook: called once after the heap step and before the seal (mknod still allowed); a failing hook is step 6 with nothing sealed, both nodes removed, anchors and heap fd held\n");
 
     st = run(c_full, rep, sizeof rep); printf("INFO st=%d %s", st, rep);
     assert(strstr(rep, "BOOT rc=0 step=0 stage=6 ep=HELD ion=HELD ep_node=0 ion_node=0 cma_node=0 heap_fd=1 heap_dir=0 sealed=1 spawner=1"));

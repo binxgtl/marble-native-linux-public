@@ -91,6 +91,19 @@ static void map_intent(void *user) {
     m11_pds_resources_busy(&e->pdmon.pds);
 }
 
+/* P5 journal rotation: a fresh open of the journal, held to the same kernel-log check as the first */
+static int journal_reopen(void *user) {
+    m11_entry *e = user;
+    int fd = open(e->cfg.journal_path, O_WRONLY | O_APPEND | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) return -errno;
+    struct stat st;
+    if (fstat(fd, &st) || (e->cfg.journal_require_kmsg && (!S_ISCHR(st.st_mode) || st.st_rdev != makedev(1, 11)))) {
+        (void)close(fd);
+        return -ENODEV;
+    }
+    return fd;
+}
+
 static unsigned anchors_held(const m11_entry *e) {
     return (unsigned)(e->boot.endpoint.state == M11_ANCHOR_HELD) + (unsigned)(e->boot.ion.state == M11_ANCHOR_HELD);
 }
@@ -321,7 +334,7 @@ static void seal_before_exit(m11_entry *e) {
 int m11_entry_run(m11_entry *e, const m11_entry_config *cfg) {
     if (!e || !cfg || !cfg->cmdline_path || !cfg->journal_path || !cfg->pd_ready_budget_ms ||
         cfg->pd_ready_budget_ms > 10000u || !cfg->hold_idle_ms || !cfg->terminal_ops.exit_fn ||
-        !cfg->terminal_ops.reboot_fn ||
+        !cfg->terminal_ops.reboot_fn || cfg->journal_rotate > 9u ||
         (cfg->teardown_count && (!cfg->teardown_jobs || !cfg->terminal_ops.hold_fn || !cfg->pd_retire_budget_ms ||
                                  cfg->pd_retire_budget_ms > M11_PDS_TXN_TIMEOUT_MS || !cfg->seal_count ||
                                  cfg->seal_count > cfg->teardown_count || cfg->seal_settle_ms > 1000u))) return -EINVAL;
@@ -352,7 +365,8 @@ int m11_entry_run(m11_entry *e, const m11_entry_config *cfg) {
         e->journal_fd = -1; /* not the kernel log: nothing is written to it */
         return entry_fail(e, "journal", 2, -ENODEV);
     }
-    int rc = m11_intent_sink_fd(&e->jfd, fd, &e->sink);
+    int rc = cfg->journal_rotate ? m11_intent_sink_rotating(&e->jrot, fd, cfg->journal_rotate, journal_reopen, e, &e->sink)
+                                 : m11_intent_sink_fd(&e->jfd, fd, &e->sink);
     if (rc) { e->journal_fd = -1; return entry_fail(e, "journal", 2, rc); }
     e->phase = M11_ENTRY_JOURNAL;
     phase_record(e, "phase=journal pid=%ld kmsg=%d", (long)getpid(), S_ISCHR(st.st_mode) && st.st_rdev == makedev(1, 11));

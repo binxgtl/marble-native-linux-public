@@ -1025,6 +1025,37 @@ w5_mutant oob-reused speaker_session_native.c 's->oob_next = (uint32_t)(((size_t
   '    (void)0; /* MUTANT */' \
   '!memcmp(cmdr, plan.vi.open.data, plan.vi.open.len) && !memcmp(cmdr + 4096, plan.vi.cal.data, plan.vi.cal.len) && !memcmp(cmdr + 8192, plan.rx.open.data, plan.rx.open.len) && !memcmp(cmdr + 12288, plan.rx.cal.data, plan.rx.cal.len)' \
   "$w5_spk_plan"
+# P5 (W6, docs/m11-argon-speaker-run-design.md): the speaker PID1 binary (speaker_entry_main: the P4 composition,
+# the plan check, the rotating journal, P2's pre-seal ALSA hook and the speaker session) links with production
+# defaults and refuses to act outside PID1; p5/build.sh compiles exactly these units; T10 for P5: no input it
+# compiles and neither linked binary names the SysRq trigger.
+p5_main=()
+for s in "${p3_main[@]}"; do [[ "$s" == "$here/custodian_entry_main.c" ]] || p5_main+=("$s"); done
+p5_main+=("$here/snd_backend_native.c" "$here/speaker_plan_native.c" "$here/speaker_session_native.c" "$here/speaker_entry_main.c")
+for cm_cc in gcc clang; do
+  "$cm_cc" "${p2_flags[@]}" "${p5_main[@]}" -o "$out/speaker-entry-$cm_cc"
+  rc=0; "$out/speaker-entry-$cm_cc" || rc=$?
+  if [[ "$rc" != 2 ]]; then echo "ERROR: speaker entry binary ($cm_cc) did not refuse outside PID1 (rc=$rc)" >&2; exit 1; fi
+  if [[ "$(t10_bin "$out/speaker-entry-$cm_cc")" != 0 ]]; then echo "ERROR: T10: the P5 PID1 ($cm_cc) carries a SysRq string" >&2; exit 1; fi
+done
+if gcc -std=c11 -DM11_ANCHOR_NATIVE -I "$own" -I "$repair" -I "$here" -c "$here/speaker_entry_main.c" -o "$out/p5-refused.o" 2>/dev/null; then
+  echo "ERROR: speaker_entry_main.c compiled outside M11_CUSTODIAN_NATIVE" >&2; exit 1
+fi
+p5_block="$(sed -n '/^ pid1)/,/^  for variant/p' "$here/p5/build.sh")"
+p5_units=()
+for tok in $(printf '%s\n' "$p5_block" | grep -oE '[A-Za-z0-9_]+' | sort -u); do
+  for d in "$repair" "$own" "$here"; do [[ -f "$d/$tok.c" ]] && p5_units+=("$d/$tok.c"); done
+done
+p5_a="$(for f in "${p5_units[@]}"; do basename "$f"; done | sort)"
+p5_b="$(for f in "${p5_main[@]}"; do basename "$f"; done | sort)"
+if [[ "$p5_a" != "$p5_b" ]]; then
+  echo "ERROR: the p5/build.sh PID1 units differ from the P5 PID1 linked here" >&2
+  diff <(printf '%s\n' "$p5_a") <(printf '%s\n' "$p5_b") >&2 || true; exit 1
+fi
+p5_hits="$(t10_scan "${p5_main[@]}" "$here"/snd_backend_native.h "$here"/speaker_plan_native.h "$here"/speaker_session_native.h \
+  "$here/p4/sha256.h" "$here/p5/kmsg-relay.c" "$here/p5/init" "$here/p5/usb")"
+if [[ -n "$p5_hits" ]]; then echo "ERROR: T10: SysRq named in P5 PID1 inputs: $p5_hits" >&2; exit 1; fi
+echo "PASS P5 speaker PID1 (gcc, clang) links with production defaults and returns 2 outside PID1; refused outside M11_CUSTODIAN_NATIVE; p5/build.sh compiles exactly its ${#p5_main[@]} units; T10: no SysRq in its inputs or binaries"
 p4e_mutant() { # name asroot pattern replacement assertion last-pass (same detection rule as gtn_mutant)
   local name="$1" asroot="$2" pat="$3" rep="$4" want="$5" last="$6" dir="$out/p4e-mutant-$1" rc=0 got file=p4_env_native.c
   if [[ "$asroot" == 1 && "$sudo_ok" != 1 ]]; then echo "SKIP P4 environment mutant $name: no sudo"; return; fi

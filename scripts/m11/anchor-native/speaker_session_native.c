@@ -39,7 +39,11 @@ static void rec(sess *s, const char *fmt, ...) {
 
 static uint64_t now(sess *s) { return s->io->now_fn(s->io->user); }
 static m11_gpr_engine_t *eng(sess *s) { return s->io->cust->mgr->gpr; }
-static void pdr_note(sess *s) { if (eng(s)->pdr_down) s->rep->pdr_seen = 1; }
+/* after every custodian call and wait: the caller's settle (a PD DOWN reaches the custodian), then the note */
+static void pdr_note(sess *s) {
+    if (s->io->settle_fn) s->io->settle_fn(s->io->user);
+    if (eng(s)->pdr_down) s->rep->pdr_seen = 1;
+}
 static m11_custodian_graph_state gstate(sess *s, unsigned g) {
     return g < M11_CUSTODIAN_GRAPHS ? s->io->cust->graphs[g].state : M11_GRAPH_FREE;
 }

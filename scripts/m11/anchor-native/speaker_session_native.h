@@ -44,6 +44,8 @@ typedef struct {
     m11_snd_backend *snd;                   /* prepared before the seal */
     const m11_speaker_plan *plan;
     void (*record_fn)(void *user, const char *line);   /* one evidence record per call */
+    void (*settle_fn)(void *user);          /* after every custodian call and wait (P5: the runner's PDR settle);
+                                             * NULL: none */
     uint64_t (*now_fn)(void *user);
     uint32_t wait_timeout_ms;               /* per data buffer (commands use the custodian's budget) */
     uint32_t eos_timeout_ms;

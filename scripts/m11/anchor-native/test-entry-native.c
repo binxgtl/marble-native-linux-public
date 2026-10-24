@@ -481,6 +481,14 @@ static void entry_case(const char *cmdline, enum pmode pm, int (*session)(void *
 }
 static void c_never_mapped(void) { entry_case(GOOD, P_UP, NULL); }
 static void c_map_hold(void) { entry_case(GOOD, P_UP, s_map_hold); }
+/* P5: the same boot with the journal rotating every 3 records: no record lost or reordered across the reopens */
+static int s_map_rotating(void *u, m11_entry *e) {
+    int rc = s_map_hold(u, e);
+    char b[96]; snprintf(b, sizeof b, "ROT writes=%u reopens=%u failures=%u\n", e->jrot.writes, e->jrot.reopens, e->jrot.reopen_failures);
+    say(b);
+    return rc;
+}
+static void c_map_rotating(void) { CFG.journal_rotate = 3; entry_case(GOOD, P_UP, s_map_rotating); }
 static void c_foreign_hold(void) { entry_case(GOOD, P_UP, s_foreign_hold); }
 static void c_down_on_map(void) { entry_case(GOOD, P_UP, s_down_on_map); }
 static void c_down_unmapped(void) { entry_case(GOOD, P_UP, s_down_unmapped); }
@@ -570,6 +578,8 @@ static void c_calls(void) {
     tree("console=ttyMSM0 iommu.strict=0\n"); start_peer(P_UP);
     m11_entry_config pid1 = CFG; pid1.require_pid1 = 1;
     m11_entry_config bad = CFG; bad.pd_ready_budget_ms = 10001;
+    m11_entry_config rot = CFG; rot.journal_rotate = 10;
+    char rb[48]; snprintf(rb, sizeof rb, "ROTCFG inval=%d\n", m11_entry_run(&E, &rot)); say(rb);
     int perm = m11_entry_run(&E, &pid1), inval = m11_entry_run(&E, &bad);
     exit_returns = 1; reboot_returns = 1;
     int first = m11_entry_run(&E, &CFG);
@@ -644,6 +654,7 @@ int main(int argc, char **argv) {
     char rep[8192]; int st;
     st = run(c_calls, rep, sizeof rep); printf("INFO st=%d %s", st, rep);
     assert(st == 0 && strstr(rep, "CALLS perm=-1 inval=-22 first=-14 second=-114 phase=1/1 fail_step=3/3"));
+    assert(strstr(rep, "ROTCFG inval=-22")); /* P5: more than 9 records per open journal file is refused */
     printf("PASS entry calls: not PID1 and a bad configuration touch nothing and do not count; the first real call does, a second is refused and changes nothing\n");
 
     st = run(c_journal_not_kmsg, rep, sizeof rep); printf("INFO st=%d %s", st, rep);
@@ -706,6 +717,11 @@ int main(int argc, char **argv) {
     assert(strstr(rep, "td=0/0 step=2") && strstr(rep, "jobs=seal ") && !strstr(rep, "PEER unregister")); /* a mapped boot: only the seal (D2) */
     assert(settle_of(rep) >= 100 && strstr(rep, "action=RESET_RETAINING_ANCHORS")); /* E-1 before the D2 seal */
     printf("PASS entry with a mapped region left (PD UP throughout): the MAP intent latched resources busy before the TX; close refused, no HOLD wait: the retaining end at once, holding every anchor and the mapped region (post-MAP hold)\n");
+
+    keep_as = "map-rotating"; st = run(c_map_rotating, rep, sizeof rep); keep_as = NULL; printf("INFO st=%d %s", st, rep);
+    assert(strstr(rep, "MAP rc=0 busy=1 intents=1") && strstr(rep, "ROT writes=6 reopens=1 failures=0") && st == 42);
+    assert(strstr(rep, "phases=journal,cmdline,pd_up,boot,runner,session,seal lines=9 ") && strstr(rep, "action=RESET_RETAINING_ANCHORS end=pid1_exit"));
+    printf("PASS P5 rotating journal (3 records per open file): the same mapped boot, every record in order across the reopens\n");
 
     keep_as = "foreign-hold"; st = run(c_foreign_hold, rep, sizeof rep); keep_as = NULL; printf("INFO st=%d %s", st, rep);
     assert(st == 42 && strstr(rep, "EXIT phase=7 ") && hold_of(rep) >= 2 && strstr(rep, "intents=0") && strstr(rep, "anchors_open=4/4"));

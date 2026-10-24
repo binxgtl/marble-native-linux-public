@@ -141,7 +141,12 @@ int m11_boot_run(m11_boot *b, const m11_boot_config *c, const m11_pd_monitor *pd
         FAIL(5, rc);
     }
     b->stage = 5;
-    /* 6. the owner seal over both pairs; it unlinks both nodes */
+    /* 6. the caller's pre-seal hook (P5), while mknod is still allowed; then the owner seal over both
+     * pairs, which unlinks both nodes */
+    if (c->pre_seal_fn && (rc = c->pre_seal_fn(c->pre_seal_user))) {
+        (void)unlink(c->ion.node); (void)unlink(c->endpoint.node);
+        FAIL(6, rc);
+    }
     m11_pid1_anchor *both[2] = {&b->endpoint, &b->ion};
     const char *const nodes[2] = {c->endpoint.node, c->ion.node};
     if ((rc = m11_anchor_owner_seal_pairs(both, nodes, 2))) {
