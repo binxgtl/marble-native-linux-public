@@ -952,7 +952,7 @@ w3_mutant no-direction-check 'if (!strstr(buf + used, want)) return -ENODEV;' ' 
   'prep(&b) == want[i] && !dir_live && live_nodes() == 0 && open_fds() == 0' \
   'PASS prepare is separate and once-open; close is DROP then close; release leaves no fd, node or directory'
 w3_mutant period-check-removed 'if (ps->min != period || ps->max != period || pc->min != periods || pc->max != periods ||' \
-  '    if (period == 0 ||' \
+  '    if ((void)ps, (void)pc, period == 0 ||' \
   'm11_snd_pcm_open(&b, M11_SND_RX, 96000, 3, SNDRV_PCM_FORMAT_S32_LE, 682, 2, 170, INT_MAX) == -EPROTO' \
   'PASS prepare refused: missing, wrong-direction, duplicated or prefix-only name, malformed or mixed majors, existing directory, a node that opens another device; nothing left behind'
 # P5 W5 (docs/m11-argon-speaker-run-design.md, sections 3 and 4): the speaker session under the REAL custodian,
