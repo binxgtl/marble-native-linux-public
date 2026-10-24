@@ -405,7 +405,7 @@ int main(void) {
     /* calibrations to APM; single-parameter configs to their module (stock rule); Re SET and GET to 0x42D3 */
     assert(count(op(M11_APM_CMD_SET_CFG, 1)) == 2 && count(op(M11_APM_CMD_SET_CFG, 0x428F)) == 3 + 6);
     assert(count(op(M11_APM_CMD_SET_CFG, 0x42D3)) == 2 && count(op(M11_APM_CMD_GET_CFG, 0x42D3)) == 2);
-    for (int i = 0; i < M11_CUSTODIAN_REGIONS; i++) {
+    for (unsigned i = 0; i < M11_CUSTODIAN_REGIONS; i++) {
         if (r.cust.occupied[i]) assert(r.cust.regions[i].state == M11_SHMEM_STATE_DSP_MAP_ACKNOWLEDGED && r.cust.regions[i].map_tx_started);
         assert(r.cust.region_graph_refs[i] == 0);
     }
