@@ -354,6 +354,10 @@ def speaker(spk, d):
         else:
             return 'spk-record-order', False
     end = [int(x) for x in rest[-2]['groups']]
+    cfg_failed = [r for r in s.get('cfg_responses', []) if r['rc'] != 0]
+    if cfg_failed and (len(cfg_failed) != 1 or fail is None or fail[1] not in ('vi_cfg', 'rx_cfg') or
+                       fail[2] != cfg_failed[0]['rc'] or s['cfg_responses'][-1] is not cfg_failed[0]):
+        return 'spk-cfg-failure-unaccounted', False
     rc, step, sent, done, nbytes, eos, amp_off, td_rc, pdr = end
     session_rc, census = int(rest[-1]['groups'][0]), int(rest[-1]['groups'][1])
     s.update(steps_ok=len(steps), fail=fail and dict(step=fail[0], name=fail[1], rc=fail[2]), teardown=[t[0] for t in teardown],

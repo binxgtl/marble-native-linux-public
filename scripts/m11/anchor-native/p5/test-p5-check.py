@@ -158,7 +158,8 @@ def test_checker():
           'clean end; retaining G8; seal last)')
     for fields in ('valid=1 status=00000000 rc=0', 'valid=1 status=ffffffff rc=-121',
                    'valid=0 status=00000000 rc=-110', 'valid=0 status=00000000 rc=-121'):
-        lines = spk_lines(fail=(7, -121))
+        rc = int(fields.rsplit('=', 1)[1])
+        lines = spk_lines(fail=(7, rc if rc else -121))
         lines.insert(1, S + 'cfg_rsp dst=00004545 param=08001008 ' + fields)
         v, r = verdict(boot(lines))
         assert v == 'speaker-failed:vi_cfg:amp-never-enabled', (v, fields)
@@ -169,6 +170,9 @@ def test_checker():
         lines.insert(1, S + 'cfg_rsp dst=00004545 param=08001008 ' + fields)
         assert verdict(boot(lines))[0] == 'spk-cfg-response-invalid', fields
     print('PASS CFG response provenance: matched zero/NACK, timeout and transport errno; contradictory evidence rejected')
+    lines = spk_lines()
+    lines.insert(1, S + 'cfg_rsp dst=00004545 param=08001008 valid=1 status=00000001 rc=-121')
+    assert verdict(boot(lines))[0] == 'spk-cfg-failure-unaccounted'
     cases = [
         ('Re read-back failed (amplifier never enabled)', boot(spk_lines(fail=(16, -74))), 'speaker-failed:rx_re:amp-never-enabled'),
         ('RX START refused', boot(spk_lines(fail=(18, -121))), 'speaker-failed:rx_start:amp-never-enabled'),
