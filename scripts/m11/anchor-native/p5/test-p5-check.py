@@ -207,6 +207,10 @@ def test_c_records(path):
 
 
 if __name__ == '__main__':
+    if sys.argv[1:2] == ['--write-fixture']:  # the expected-shape capture for the Windows receiver test
+        Path(sys.argv[2]).write_bytes(capture(kmsg(boot())))
+        print(f'wrote the synthetic P5 capture {sys.argv[2]}')
+        raise SystemExit(0)
     test_checker()
     if len(sys.argv) == 3 and sys.argv[1] == '--spk-records':
         test_c_records(sys.argv[2])

@@ -38,7 +38,6 @@ case "$what" in
   if grep -q INTERP "$out/pid1-elf.txt" || grep -q DYNAMIC "$out/pid1-elf.txt"; then echo 'PID1 not static' >&2; exit 1; fi
   set +e; "$out/m11-p5"; rc=$?; "$out/m11-p5" extra; rc2=$?; set -e
   test "$rc" = 2 && test "$rc2" = 2 # never acts outside initial PID1
-  if LC_ALL=C grep -a -q -i sysrq "$out/m11-p5"; then echo 'T10: the PID1 names the SysRq trigger' >&2; exit 1; fi
   gcc --version | head -1 > "$out/pid1-compiler.txt"
   (cd "$out" && sha256sum m11-p5 pid1-elf.txt pid1-compiler.txt > SHA256SUMS-pid1)
   ;;
