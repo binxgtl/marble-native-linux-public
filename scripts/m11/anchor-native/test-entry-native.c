@@ -488,7 +488,13 @@ static int s_map_rotating(void *u, m11_entry *e) {
     say(b);
     return rc;
 }
-static void c_map_rotating(void) { CFG.journal_rotate = 3; entry_case(GOOD, P_UP, s_map_rotating); }
+static void c_map_rotating(void) { /* entry_case's tree() resets CFG: the rotation is set after it */
+    tree(GOOD); start_peer(P_UP);
+    CFG.session_fn = s_map_rotating; CFG.journal_rotate = 3;
+    int rc = m11_entry_run(&E, &CFG);
+    char b[64]; snprintf(b, sizeof b, "RETURNED rc=%d\n", rc); say(b);
+    _exit(0);
+}
 static void c_foreign_hold(void) { entry_case(GOOD, P_UP, s_foreign_hold); }
 static void c_down_on_map(void) { entry_case(GOOD, P_UP, s_down_on_map); }
 static void c_down_unmapped(void) { entry_case(GOOD, P_UP, s_down_unmapped); }

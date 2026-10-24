@@ -1121,6 +1121,32 @@ p4c_mutant intents-ignored "         'intents': sum(1 for r in entry if r['kind'
 p4c_mutant b3-unchecked "            d['b3'] = 'match' if" "            d['b3'] = 'match'" "('b3 strict differs', 'b3-cmdline-differs'"
 p4c_mutant teardown-steps-unchecked "    if n['steps'] != TEARDOWN_STEPS:" '    if False:' "('teardown list not Run23', 'teardown-steps-differ'"
 p4c_mutant seal-unchecked "        if td is not None or seal is None:" '        if td is not None:' "('retaining end without the seal', 'retaining-end-unsealed'"
+# P5 W6 (docs/m11-argon-speaker-run-design.md): the speaker host check over synthetic captures and over the
+# M11SPK records the C session wrote in the W5 happy path, plus one-line mutants of the check. The P5 staging
+# rules run on the operator PC with the local staging (never exported); the binaries come from the P5 jobs.
+M11_SPK_RECORDS="$out/spk-records.txt" timeout 180 "$out/speaker-session-native-gcc" > "$out/spk-records-run.log" 2>&1
+python3 -I "$here/p5/test-p5-check.py" --spk-records "$out/spk-records.txt" | tee "$out/p5-check.log"
+grep -qF 'PASS P5 check over the C writers' "$out/p5-check.log"
+p5c_mutant() { # name pattern replacement expected-case: the suite must fail on that case's assertion
+  local name="$1" pat="$2" rep="$3" want="$4" dir="$out/p5c-mutant-$1" rc=0
+  mkdir -p "$dir"
+  awk -v pat="$pat" -v rep="$rep" 'index($0,pat){n++; print rep; next} {print} END{if(n!=1) exit 3}' \
+    "$here/p5/check-capture.py" > "$dir/check-capture.py"
+  M11_P5_CHECK_MUTANT="$dir/check-capture.py" python3 "$here/p5/test-p5-check.py" > "$dir/log" 2>&1 || rc=$?
+  if [[ "$rc" != 1 ]] || ! grep -q '^AssertionError' "$dir/log" || ! grep -qF -- "$want" "$dir/log"; then
+    echo "ERROR: P5 check mutant $name not detected for the expected reason (rc=$rc)" >&2
+    cat "$dir/log" >&2; exit 1
+  fi
+  echo "PASS P5 host-check test detects mutant $name: $want"
+}
+p5c_mutant caller-unchecked "        if caller != 'T1':" '        if False:' "'record-not-from-pid1'"
+p5c_mutant amp-off-unchecked "    if amp_touched and (names[0] != 'amp_off' or teardown[0][1] != '0' or not amp_off):" '    if False:' \
+  "('amplifier off not verified'"
+p5c_mutant amp-not-driven-unchecked "    if amp_enabled and not amp_touched:" '    if False:' "('amplifier enabled, never driven off'"
+p5c_mutant re-unchecked "    if (re_rec is None or re_rec[0] != READBACK_VERIFIED or re_rec[3] != READBACK_VERIFIED or re_rec[1] != re_rec[2] or" \
+  '    if False and (re_rec is None or re_rec[0] != READBACK_VERIFIED or re_rec[3] != READBACK_VERIFIED or re_rec[1] != re_rec[2] or' \
+  "('Re read back differs'"
+p5c_mutant unmap-unchecked "    if any(r['op'] in (OP_UNMAP, OP_CLOSE_ALL) for r in intents):" '    if False:' "('an UNMAP journaled'"
 p3_mutant() { # name asroot pattern replacement assertion last-pass (same detection rule as gtn_mutant)
   local name="$1" asroot="$2" pat="$3" rep="$4" want="$5" last="$6" dir="$out/cen-mutant-$1" rc=0 got file=custodian_entry_native.c
   if [[ "$asroot" == 1 && "$sudo_ok" != 1 ]]; then echo "SKIP P3 mutant $name: no sudo"; return; fi

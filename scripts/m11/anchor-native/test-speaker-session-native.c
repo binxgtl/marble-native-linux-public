@@ -250,7 +250,11 @@ struct rig {
 };
 static int map_cb(void *u, size_t bytes, unsigned *slot) { struct rig *r = u; return m11_custodian_map(&r->cust, bytes, ms(), slot); }
 static unsigned nrec, nsettle;
-static void record_cb(void *u, const char *line) { (void)u; (void)line; nrec++; }
+static FILE *rec_out; /* M11_SPK_RECORDS: the happy path's records as speaker_entry_main writes them (P5 check cross-check) */
+static void record_cb(void *u, const char *line) {
+    (void)u; nrec++;
+    if (rec_out) fprintf(rec_out, "<6>M11SPK v=1 boot=7 %s\n", line);
+}
 static void settle_cb(void *u) { (void)u; nsettle++; }
 
 static void start(struct rig *r, peer_cfg c) {
@@ -377,7 +381,10 @@ int main(void) {
 
     /* 1. the happy path: stock order, amplifier on only after the gate, off first, no UNMAP */
     start(&r, (peer_cfg){0});
+    const char *rec_path = getenv("M11_SPK_RECORDS");
+    if (rec_path) assert((rec_out = fopen(rec_path, "w")) != NULL);
     rc = run_session(&r, &rep, 5000);
+    if (rec_out) { assert(fclose(rec_out) == 0); rec_out = NULL; }
     printf("INFO happy rc=%d stage=%d sent=%u done=%u bytes=%u eos=%d events=%u records=%u\n",
            rc, rep.stage, rep.buffers_sent, rep.buffers_done, rep.bytes_played, rep.eos_rc, nev, nrec);
     assert(rc == 0 && rep.stage == M11_SPK_EOS && rep.amp_off_verified && !rep.teardown_rc);
