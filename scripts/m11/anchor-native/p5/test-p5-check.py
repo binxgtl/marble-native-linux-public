@@ -71,7 +71,7 @@ def kmsg(lines):
     return out
 
 
-def capture(bodies, run=b'M11R28', ev=None):
+def capture(bodies, run=b'M11R29', ev=None):
     ev = journal() if ev is None else ev
     pieces = [frame('S', 0, b'run=' + run + b' nonce=0123456789abcdef0123456789abcdef\n')]
     for b in bodies:
@@ -155,12 +155,22 @@ def boot(spk=None, maps=2, extra_intents=(), session=None, terminal=None, seal=T
     return lines
 
 
-def verdict(lines, run=b'M11R28'):
+def verdict(lines, run=b'M11R29'):
     _, r = C.check(capture(kmsg(lines), run=run), JN, JI, ('1', 'absent', 'absent'))
     return r['p5_verdict'], r
 
 
 def test_checker():
+    # Run29 independent review: an otherwise played transcript with failed/missing Re data
+    # must not qualify, even if the producer later reports a successful session.
+    good = re_ok(0, 26100) + re_ok(1, 28684)
+    for before, after in (('rsp=4/00000000/', 'rsp=4/00000001/'), ('len=28', 'len=0'),
+                          ('rsp=4/', 'rsp=3/'), ('rsp=4/', 'rsp=9/')):
+        malformed = [line.replace(before, after) for line in good]
+        assert verdict(boot(spk_lines(re_records=malformed)))[0] == 'spk-re-not-verified', (before, after)
+    # Both reported sizes permitted by the bounded native contract remain accepted.
+    assert verdict(boot(spk_lines(re_records=[x.replace('rsp=4/', 'rsp=8/') for x in good])))[0] == C.EXPECTED
+    print('PASS Re response length, parameter size and zero error independently required for played verdict')
     v, r = verdict(boot())
     assert v == C.EXPECTED and r['p5_expected'] and r['p5']['maps'] == 2 and r['p5']['b3'] == 'match', r
     sp = r['p5']['speaker']
@@ -185,7 +195,7 @@ def test_checker():
     lines = spk_lines()
     lines.insert(1, S + 'cfg_rsp dst=00004545 param=08001008 valid=1 status=00000001 rc=-121')
     assert verdict(boot(lines))[0] == 'spk-cfg-failure-unaccounted'
-    # Re: the read command refused (or Run28's GET_CFG of the write envelope) is accounted to rx_re
+    # Re: the read command refused (or Run29's GET_CFG of the write envelope) is accounted to rx_re
     refused = spk_lines(fail=(16, -121))
     at = next(i for i, ln in enumerate(refused) if 'step=16 rx_re' in ln)
     refused[at:at] = [re_rsp('01001006', '28/0/10013d1b'),
@@ -194,9 +204,9 @@ def test_checker():
     assert v == 'speaker-failed:rx_re:amp-never-enabled', v
     assert r['p5']['speaker']['re_responses'][1] == dict(op='01001006', size=24, type=1, msg='10013d1b', valid=1,
                                                          status=0x12, rc=-121, len=0, rsp_size=0, err=0, value=0)
-    run28 = spk_lines(fail=(16, -121))
-    run28[at:at] = [re_rsp('01001006', '28/0/10013d1b'), re_rsp('01001007', '28/0/10013d1b', rc=-121, status=0x12)]
-    assert verdict(boot(run28))[0] == 'speaker-failed:rx_re:amp-never-enabled'
+    run29 = spk_lines(fail=(16, -121))
+    run29[at:at] = [re_rsp('01001006', '28/0/10013d1b'), re_rsp('01001007', '28/0/10013d1b', rc=-121, status=0x12)]
+    assert verdict(boot(run29))[0] == 'speaker-failed:rx_re:amp-never-enabled'
     unaccounted = spk_lines(re_records=re_ok(0, 26100)[:2] + [re_rsp('01001007', '8/0/00000000', rc=-121, status=1)] +
                             re_ok(1, 28684))
     assert verdict(boot(unaccounted))[0] == 'spk-re-failure-unaccounted'

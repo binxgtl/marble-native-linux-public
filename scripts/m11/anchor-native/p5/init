@@ -1,5 +1,5 @@
 #!/bin/busybox sh
-# M11 P5 (Run28 speaker candidate) bootstrap: the P4 init (Run23's, docs/m11-argon-p4-assembly.md) with
+# M11 P5 (Run29 speaker candidate) bootstrap: the P4 init (Run23's, docs/m11-argon-p4-assembly.md) with
 # the speaker PID1 as its exec target (docs/m11-argon-speaker-run-design.md). Run 12 ADSP registration
 # bootstrap; stdio/hold from Run 3.
 set -eu
@@ -10,7 +10,7 @@ BB=/bin/busybox
 hold() {
     set +e
     trap - 0
-    ( printf 'M11R28: HOLD: %s\n' "$*" >&2 ) || :
+    ( printf 'M11R29: HOLD: %s\n' "$*" >&2 ) || :
     while :; do $BB sleep 60 || :; done
 }
 trap 'hold "unexpected PID1 shell exit"' 0

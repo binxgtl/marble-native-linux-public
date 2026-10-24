@@ -99,7 +99,7 @@ typedef struct __attribute__((packed)) {
 /*
  * The 48-byte envelope above is the Awinic DSP message of type DATA (0): a write. A GET_CFG of it
  * (m11_aw_pack_get_cfg_pkt, m11_apm_rsp_aw_re_get_cfg_t) is not a stock read; Run28 sent one and
- * the read-back failed rc=-121 (a DSP status). Those helpers stay only for the packet fixtures.
+ * the read-back failed rc=-121 (raw status provenance was not captured). Those helpers stay only for packet fixtures.
  *
  * Stock read of an Awinic DSP message (libawcal.so aw_audioreach_read_msg_from_dsp 0x1087a4 and
  * aw_audioreach_set_dsp_info 0x1080a4, PROVEN):
