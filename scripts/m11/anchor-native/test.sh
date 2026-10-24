@@ -920,6 +920,17 @@ done
 gcc "${cm_flags[@]}" -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer \
   "${w3_srcs[@]}" -o "$out/snd-backend-native-sanitize"
 timeout 120 "$out/snd-backend-native-sanitize" | tee "$out/snd-backend-native-sanitize.log"
+# Actual Linux VFS semantics under the production mount flags. Isolated mount
+# namespace, /dev/null stand-ins only: no ALSA, firmware or phone. Mandatory in CI.
+if [[ "$sudo_ok" == 1 ]]; then
+  for cm_cc in gcc clang sanitize; do
+    timeout 120 sudo -n "$out/snd-backend-native-$cm_cc" --mount-contract | tee "$out/snd-mount-$cm_cc.log"
+    grep -qF 'PASS real VFS: production /dev/m11-snd control/PCM opens succeed' "$out/snd-mount-$cm_cc.log"
+  done
+else
+  if [[ -n "${CI:-}" ]]; then echo "ERROR: ALSA mount contract needs sudo in CI" >&2; exit 1; fi
+  echo 'SKIP real VFS mount contract: no sudo (not CI-qualified)'
+fi
 if gcc -std=c11 -DM11_ANCHOR_NATIVE -I "$own" -I "$repair" -I "$here" -c "$here/snd_backend_native.c" -o "$out/sbe-refused.o" 2>/dev/null; then
   echo "ERROR: snd_backend_native compiled outside M11_CUSTODIAN_NATIVE" >&2; exit 1
 fi

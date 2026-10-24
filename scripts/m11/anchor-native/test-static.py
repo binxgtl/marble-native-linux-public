@@ -2,6 +2,7 @@
 """Static structure checks of the integrated sources (text-level evidence, not a proof of
 behaviour; the control-flow and stand-in tests exercise the code itself)."""
 import re
+import shlex
 import sys
 from pathlib import Path
 
@@ -75,6 +76,29 @@ for name in ('scripts/m11/next/control', 'scripts/m11/next/usb', 'scripts/m11/ru
     check(not any('snd' in l for l in nodes) and '/dev/snd' not in text,
           f'{name}: no /dev/snd node (mknod lines: {len(nodes)})')
 check('/dev/snd' not in runner, 'runner: no /dev/snd')
+# P5 production composition: a correct node syscall mock is insufficient when
+# the bootstrap mounts its parent nodev. Pair the actual default with the
+# explicit bootstrap mount options; test.sh also exercises the real Linux VFS.
+def snd_mount_contract(init, backend):
+    mounts = {}
+    for line in init.splitlines():
+        words = shlex.split(line, comments=True)
+        if len(words) >= 9 and words[:3] == ['$BB', 'mount', '-t'] and words[3:5] == ['tmpfs', '-o']:
+            mounts[words[7]] = set(words[5].split(','))
+    return ('"/dev/m11-snd"' in backend and '"/run/m11/snd"' not in backend and
+            mounts.get('/dev') == {'mode=0755', 'nosuid', 'size=16m'} and
+            mounts.get('/run') == {'mode=0755', 'nosuid', 'nodev'})
+
+p5_init = (native / 'p5/init').read_text()
+snd_backend = code(native / 'snd_backend_native.c')
+check(snd_mount_contract(p5_init, snd_backend),
+      'P5 private ALSA nodes use device-capable /dev tmpfs; /run retains nodev')
+check(not snd_mount_contract(p5_init, snd_backend.replace('"/dev/m11-snd"', '"/run/m11/snd"')),
+      'P5 mount-contract regression rejects frozen Run26 nodev/private-node pairing')
+check(not snd_mount_contract(p5_init.replace('mode=0755,nosuid,size=16m', 'mode=0755,nosuid,nodev,size=16m'), snd_backend),
+      'P5 mount-contract regression rejects nodev added to /dev')
+check(not snd_mount_contract(p5_init.replace('mode=0755,nosuid,nodev tmpfs /run', 'mode=0755,nosuid tmpfs /run'), snd_backend),
+      'P5 mount-contract regression rejects weakening /run protection')
 if fails:
     sys.exit(1)
 print('PASS integrated sources: static structure checks')

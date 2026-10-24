@@ -45,7 +45,9 @@ static ssize_t l_read_text(const char *p, char *buf, size_t cap) {
 static const m11_snd_sys libc_sys = {l_open, l_fstat, l_close, l_ioctl, l_mknod, l_unlink, l_mkdir, l_rmdir, l_read_text};
 
 m11_snd_paths m11_snd_paths_default(void) {
-    m11_snd_paths p = {"/proc/asound/pcm", "/sys/class/sound", "/run/m11/snd", 0};
+    /* /run stays nodev. Use the existing device-capable /dev tmpfs, still in a
+     * fresh PID1-private 0700 directory and never the shared /dev/snd namespace. */
+    m11_snd_paths p = {"/proc/asound/pcm", "/sys/class/sound", "/dev/m11-snd", 0};
     return p;
 }
 

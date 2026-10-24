@@ -44,7 +44,7 @@ typedef struct {
 typedef struct {
     const char *proc_pcm;   /* "/proc/asound/pcm" */
     const char *sys_sound;  /* "/sys/class/sound" */
-    const char *dir;        /* "/run/m11/snd": made here, 0700 */
+    const char *dir;        /* "/dev/m11-snd": made here, 0700, on device-capable /dev tmpfs */
     unsigned card;          /* 0 */
 } m11_snd_paths;
 

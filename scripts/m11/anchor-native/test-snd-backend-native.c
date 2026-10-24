@@ -10,12 +10,17 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <sched.h>
+#include <stdlib.h>
+#include <sys/mount.h>
 #include <sys/ioctl.h> /* _IO/_IOR/_IOW/_IOWR for the asound.h request numbers */
 #include <sound/asound.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
+#include <sys/statvfs.h>
+#include <unistd.h>
 
 #define MAXN 16
 static struct { char path[160]; dev_t rdev; int live; } nodes[MAXN];
@@ -59,7 +64,7 @@ static int fx_mkdir(const char *p, mode_t m) {
 }
 static int fx_rmdir(const char *p) { (void)p; if (!dir_live) return -ENOENT; dir_live = 0; return 0; }
 static int fx_mknod(const char *p, mode_t m, dev_t d) {
-    assert(m == (S_IFCHR | 0600) && dir_live && !strncmp(p, "/run/m11/snd/", 13));
+    assert(m == (S_IFCHR | 0600) && dir_live && !strncmp(p, "/dev/m11-snd/", 13));
     for (int i = 0; i < MAXN; i++) if (!nodes[i].live) {
         snprintf(nodes[i].path, sizeof nodes[i].path, "%s", p); nodes[i].rdev = d; nodes[i].live = 1; return 0;
     }
@@ -180,8 +185,75 @@ static int full_mask(const struct snd_pcm_hw_params *h, int n) {
     return m->bits[0] == ~0u && m->bits[1] == ~0u && !m->bits[2];
 }
 
-int main(void) {
+/* Root-only, isolated Linux mount regression. No ALSA device or ioctl is used:
+ * every character node is /dev/null (1:3), only metadata is fixture supplied.
+ * Real VFS opens must reject the frozen Run26 path on nodev /run, then accept
+ * the production default on /dev. A namespace/mount failure is a test failure,
+ * never a silent skip in CI. Mounts disappear on process exit. */
+static int mt_open(const char *p, int f) { int n = open(p, f); return n < 0 ? -errno : n; }
+static int mt_stat(int fd, struct stat *st) { return fstat(fd, st) ? -errno : 0; }
+static int mt_close(int fd) { return close(fd) ? -errno : 0; }
+static int mt_ioctl(int fd, unsigned long req, void *arg) {
+    (void)fd; (void)req; (void)arg;
+    return -ENOTTY; /* no ioctl reaches a device; backend must preserve this error */
+}
+static int mt_node(const char *p, mode_t m, dev_t d) { return mknod(p, m, d) ? -errno : 0; }
+static int mt_unlink(const char *p) { return unlink(p) ? -errno : 0; }
+static int mt_mkdir(const char *p, mode_t m) { return mkdir(p, m) ? -errno : 0; }
+static int mt_rmdir(const char *p) { return rmdir(p) ? -errno : 0; }
+
+static int mount_contract(void) {
+    assert(geteuid() == 0);
+    assert(unshare(CLONE_NEWNS) == 0);
+    assert(mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL) == 0);
+    assert(mount("tmpfs", "/dev", "tmpfs", MS_NOSUID, "mode=0755,size=1m") == 0);
+    assert(mount("tmpfs", "/run", "tmpfs", MS_NOSUID | MS_NODEV, "mode=0755,size=1m") == 0);
+    assert(mkdir("/run/m11", 0700) == 0);
+    struct statvfs fs;
+    assert(statvfs("/run", &fs) == 0 && (fs.f_flag & ST_NODEV));
+    assert(statvfs("/dev", &fs) == 0 && !(fs.f_flag & ST_NODEV));
+    reset();
+    dev_rx = dev_tx = dev_ctl = "1:3\n";
+    const m11_snd_sys real_vfs = {mt_open, mt_stat, mt_close, mt_ioctl, mt_node, mt_unlink,
+                                 mt_mkdir, mt_rmdir, fx_read_text_s};
+    m11_snd_backend b;
+    m11_snd_paths p = m11_snd_paths_default();
+    p.dir = "/run/m11/snd"; /* immutable Run26 behavior, not the repaired default */
+    assert(m11_snd_prepare(&b, &real_vfs, &p, "TDM-LPAIF-RX-TERTIARY-VIRT-2", "TDM-LPAIF-TX-TERTIARY") == -EACCES);
+    assert(b.ctl_fd == -1 && !b.dir_made);
+    struct stat st;
+    assert(lstat(p.dir, &st) == -1 && errno == ENOENT);
+    puts("PASS real VFS: frozen Run26 nodev /run returns EACCES at control open; no node, directory or fd left");
+
+    p = m11_snd_paths_default();
+    assert(!strcmp(p.dir, "/dev/m11-snd"));
+    assert(m11_snd_prepare(&b, &real_vfs, &p, "TDM-LPAIF-RX-TERTIARY-VIRT-2", "TDM-LPAIF-TX-TERTIARY") == 0);
+    assert(b.ctl_fd >= 0 && b.dir_made);
+    assert(stat(p.dir, &st) == 0 && (st.st_mode & 0777) == 0700 && st.st_uid == 0);
+    char ctl[160];
+    assert(snprintf(ctl, sizeof ctl, "%s/control", p.dir) > 0);
+    assert(lstat(ctl, &st) == -1 && errno == ENOENT); /* unlinked after open */
+    for (int i = 0; i < 2; i++) {
+        assert(lstat(b.pcm[i].node, &st) == 0 && S_ISCHR(st.st_mode) &&
+               (st.st_mode & 0777) == 0600 && st.st_uid == 0 && st.st_rdev == makedev(1, 3));
+        /* Real PCM-node open succeeds; the deliberately refused ioctl comes next.
+         * No ALSA call is sent; failure closes its fd and removes its node. */
+        assert(m11_snd_pcm_open(&b, i, 96000, i ? 2 : 3, SNDRV_PCM_FORMAT_S32_LE,
+                               i ? 1024 : 682, 2, 170, INT_MAX) == -ENOTTY);
+        assert(b.pcm[i].fd == -1 && !b.pcm[i].node_made);
+    }
+    m11_snd_release(&b);
+    assert(b.ctl_fd == -1 && !b.dir_made);
+    assert(lstat(p.dir, &st) == -1 && errno == ENOENT);
+    assert(statvfs("/run", &fs) == 0 && (fs.f_flag & ST_NODEV));
+    puts("PASS real VFS: production /dev/m11-snd control/PCM opens succeed; 0700/0600 root-only; cleanup complete; /run stays nodev; no ALSA ioctl");
+    return 0;
+}
+
+int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
+    if (argc == 2 && !strcmp(argv[1], "--mount-contract")) return mount_contract();
+    assert(argc == 1);
     m11_snd_backend b;
 
     /* prepare: resolve by name, make the private nodes, control open and its entry removed */
