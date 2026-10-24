@@ -1210,7 +1210,7 @@ p3_mutant map-intent-not-busy 1 'm11_pds_resources_busy(&e->pdmon.pds);' '    (v
 # wait is driven by the never-mapped foreign-traffic case (HOLD_RECONCILE until the deadline).
 p3_mutant hold-not-waited 1 'if (rc != -EBUSY) return rc;' '        return rc;' \
   'st == 42 && strstr(rep, "EXIT phase=7 ") && hold_of(rep) >= 2 && strstr(rep, "intents=0") && strstr(rep, "anchors_open=4/4")' \
-  'PASS entry with a mapped region left (PD UP throughout): the MAP intent latched resources busy before the TX; close refused, no HOLD wait: the retaining end at once, holding every anchor and the mapped region (post-MAP hold)'
+  'PASS P5 rotating journal (3 records per open file): the same mapped boot, every record in order across the reopens'
 # Run25 readiness R1/D2: the pre-bind failure end tears down sealed (CYAN) before the reboot; every
 # retaining exit seals first.
 p3_mutant fail-teardown-skipped 0 'if (e->cfg.teardown_count && fail_teardown(e)) { /* R1' '        if (0 && fail_teardown(e)) {' \

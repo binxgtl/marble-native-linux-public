@@ -476,6 +476,7 @@ static void entry_case(const char *cmdline, enum pmode pm, int (*session)(void *
     tree(cmdline); start_peer(pm);
     CFG.session_fn = session;
     int rc = m11_entry_run(&E, &CFG);
+    report("UNEXPECTED_RETURN"); /* preserve phase/ownership when an entry returns instead of its terminal */
     char b[64]; snprintf(b, sizeof b, "RETURNED rc=%d\n", rc); say(b);
     _exit(0);
 }
