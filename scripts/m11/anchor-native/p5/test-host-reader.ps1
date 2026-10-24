@@ -1,4 +1,4 @@
-# P5 (Run27): p4/test-host-reader.ps1 (the Run23 receiver test) over a synthetic P5 capture, with the M11R27 observer identity.
+# P5 (Run28): p4/test-host-reader.ps1 (the Run23 receiver test) over a synthetic P5 capture, with the M11R28 observer identity.
 param([Parameter(Mandatory=$true)][string]$Fixture)
 $ErrorActionPreference='Stop'
 Add-Type -Path @("$PSScriptRoot/receiver.cs","$PSScriptRoot/test-receiver.cs") -ReferencedAssemblies @((Get-ChildItem "$PSHOME/ref/*.dll").FullName + [IO.Ports.SerialPort].Assembly.Location)
@@ -41,9 +41,9 @@ foreach($f in @('host-reader.ps1','host-observer.ps1','launch.ps1')){
  Assert ($e.Count -eq 0) "$f syntax"
 }
 $observer=[IO.File]::ReadAllText("$PSScriptRoot/host-observer.ps1")
-Assert ($observer.Contains('USB\VID_1D6B&PID_0104\M11R27') -and -not $observer.Contains('M11R26') -and -not $observer.Contains('M11R2' + '5') -and -not $observer.Contains('M11R23') -and -not $observer.Contains('M11R20')) 'observer parent identity must be M11R27 only'
+Assert ($observer.Contains('USB\VID_1D6B&PID_0104\M11R28') -and -not $observer.Contains('M11R27') -and -not $observer.Contains('M11R26') -and -not $observer.Contains('M11R2' + '5') -and -not $observer.Contains('M11R23') -and -not $observer.Contains('M11R20')) 'observer parent identity must be M11R28 only'
 Assert ($observer.Contains('--journal-nonce $JournalNonce') -and $observer.Contains('--journal-identity $JournalIdentity') -and $observer.Contains('--stock-summary $StockSummary')) 'observer must pass the journal identity and the B3 stock summary to the P5 check'
 $receiverSource=[IO.File]::ReadAllText("$PSScriptRoot/receiver.cs")
 Assert (-not ($receiverSource -match 'port\.Write|BaseStream|WriteLine|M11R20')) 'receiver must be receive-only (no ACK/serial write)'
-Write-Output 'PASS observer M11R27 identity + journal and B3 arguments, receive-only receiver'
+Write-Output 'PASS observer M11R28 identity + journal and B3 arguments, receive-only receiver'
 Write-Output 'PASS Windows receiver binary integrity, clean terminal, buffering, explicit errors; no COM opened'

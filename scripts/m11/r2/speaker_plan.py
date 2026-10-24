@@ -42,6 +42,8 @@ PID_TDM_INTF_CFG = 0x0800101B
 PID_SPR_DELAY_PATH_END = 0x080010C4
 MEDIA_FMT_ID_PCM = 0x09001000
 DATA_FORMAT_FIXED_POINT = 1
+PCM_INTERLEAVED = 1
+PCM_DEINTERLEAVED_UNPACKED = 3
 
 # Module tags (stock kvh2xml.xml) and tag keys
 TAG_SH_EP = 0xC0000001
@@ -259,10 +261,17 @@ def pcm_media_format(miid, rate, fmt, ch):
     return param(miid, PID_MEDIA_FORMAT, u32(DATA_FORMAT_FIXED_POINT, MEDIA_FMT_ID_PCM, len(body)) + body)
 
 
-def pcm_output_format(miid, fmt, ch):
-    """PARAM_ID_PCM_OUTPUT_FORMAT_CFG (AGM configure_output_media_format; interleaved left 0 as AGM does)."""
+def pcm_output_format(miid, fmt, ch, *, interleaving):
+    """Stock AGM output format: RX=3, TX=1 at param offset 0x26.
+
+    Exact libagm configure_output_media_format.cfi 0x11b0c0-0x11b0d8:
+    session direction 1 selects 3, otherwise 1; zero is not a stock mode.
+    This is module output layout, separate from the WR EP's host PCM layout.
+    """
+    if interleaving not in (PCM_INTERLEAVED, PCM_DEINTERLEAVED_UNPACKED):
+        raise ValueError('unsupported PCM output interleaving')
     bw = bits_of(fmt)
-    body = struct.pack('<8h', bw, 1, bw, bw - 1, 1, 0, 0, ch) + channel_map(ch)
+    body = struct.pack('<8h', bw, 1, bw, bw - 1, 1, interleaving, 0, ch) + channel_map(ch)
     return param(miid, PID_PCM_OUTPUT_FORMAT_CFG, u32(DATA_FORMAT_FIXED_POINT, MEDIA_FMT_ID_PCM, len(body)) + body)
 
 
@@ -331,8 +340,8 @@ def rx_configs(stream, group, slot_mask):
         mux_params = acdb.tag_data(mux_sg, TAG_SLOT_MASK, {KEY_SLOT_MASK: slot_mask})
         configs = [
             # AGM graph_prepare: stream_module_list order, then the HW EP (configure_hw_ep: MF, then TDM)
-            pcm_output_format(dec, fmt, ch),
-            pcm_output_format(cnv, fmt, ch),
+            pcm_output_format(dec, fmt, ch, interleaving=PCM_DEINTERLEAVED_UNPACKED),
+            pcm_output_format(cnv, fmt, ch, interleaving=PCM_DEINTERLEAVED_UNPACKED),
             pcm_media_format(wr, rate, fmt, ch),
             spr_delay_path_end(spr, hw),
             hw_ep_mf(hw, grate, gfmt, gch),
@@ -360,8 +369,8 @@ def vi_configs(stream, device):
         # only with metadata flags or in mode 4. The encoder frame size is not sent: AGM sends it only when the
         # buffer size is not a whole number of milliseconds, and the native read buffers are.
         configs = [
-            pcm_output_format(enc, fmt, ch),
-            pcm_output_format(cnv, fmt, ch),
+            pcm_output_format(enc, fmt, ch, interleaving=PCM_INTERLEAVED),
+            pcm_output_format(cnv, fmt, ch, interleaving=PCM_INTERLEAVED),
             hw_ep_mf(hw, drate, dfmt, dch),
             tdm_cfg(hw, tdm[0][2]),
         ]

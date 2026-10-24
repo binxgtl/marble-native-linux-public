@@ -71,7 +71,7 @@ def kmsg(lines):
     return out
 
 
-def capture(bodies, run=b'M11R27', ev=None):
+def capture(bodies, run=b'M11R28', ev=None):
     ev = journal() if ev is None else ev
     pieces = [frame('S', 0, b'run=' + run + b' nonce=0123456789abcdef0123456789abcdef\n')]
     for b in bodies:
@@ -143,7 +143,7 @@ def boot(spk=None, maps=2, extra_intents=(), session=None, terminal=None, seal=T
     return lines
 
 
-def verdict(lines, run=b'M11R27'):
+def verdict(lines, run=b'M11R28'):
     _, r = C.check(capture(kmsg(lines), run=run), JN, JI, ('1', 'absent', 'absent'))
     return r['p5_verdict'], r
 
@@ -156,6 +156,19 @@ def test_checker():
     assert r['audible_observation'] == 'operator (not machine-checked)'
     print('PASS P5 check: the played shape (env 1,2,4-8; entry; 2 MAPs; 23 speaker steps; Re verified; amplifier off first; '
           'clean end; retaining G8; seal last)')
+    for fields in ('valid=1 status=00000000 rc=0', 'valid=1 status=ffffffff rc=-121',
+                   'valid=0 status=00000000 rc=-110', 'valid=0 status=00000000 rc=-121'):
+        lines = spk_lines(fail=(7, -121))
+        lines.insert(1, S + 'cfg_rsp dst=00004545 param=08001008 ' + fields)
+        v, r = verdict(boot(lines))
+        assert v == 'speaker-failed:vi_cfg:amp-never-enabled', (v, fields)
+        assert r['p5']['speaker']['cfg_responses'][0]['valid'] == int(fields[6])
+    for fields in ('valid=0 status=00000001 rc=-121', 'valid=1 status=00000001 rc=0',
+                   'valid=1 status=00000000 rc=-121', 'valid=0 status=00000000 rc=0'):
+        lines = spk_lines(fail=(7, -121))
+        lines.insert(1, S + 'cfg_rsp dst=00004545 param=08001008 ' + fields)
+        assert verdict(boot(lines))[0] == 'spk-cfg-response-invalid', fields
+    print('PASS CFG response provenance: matched zero/NACK, timeout and transport errno; contradictory evidence rejected')
     cases = [
         ('Re read-back failed (amplifier never enabled)', boot(spk_lines(fail=(16, -74))), 'speaker-failed:rx_re:amp-never-enabled'),
         ('RX START refused', boot(spk_lines(fail=(18, -121))), 'speaker-failed:rx_start:amp-never-enabled'),

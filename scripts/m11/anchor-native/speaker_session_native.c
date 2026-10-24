@@ -85,8 +85,12 @@ static int inband(sess *s, unsigned g, const m11_plan_blob *b) {
     m11_apm_cmd_header_t h = {0u, 0u, 0u, b->len};
     memcpy(pkt, &h, sizeof h);
     memcpy(pkt + sizeof h, b->data, b->len);
-    int rc = m11_custodian_cfg(s->io->cust, g, dst, M11_APM_CMD_SET_CFG, pkt, (uint32_t)(sizeof h + b->len), now(s),
-                               NULL, 0, NULL, NULL);
+    uint32_t status = 0;
+    bool valid = false;
+    int rc = m11_custodian_cfg_observed(s->io->cust, g, dst, M11_APM_CMD_SET_CFG, pkt,
+                               (uint32_t)(sizeof h + b->len), now(s), NULL, 0, NULL, NULL, &status, &valid);
+    rec(s, "phase=spk cfg_rsp dst=%08x param=%08x valid=%u status=%08x rc=%d",
+        dst, first[1], valid ? 1u : 0u, status, rc);
     pdr_note(s);
     return rc;
 }

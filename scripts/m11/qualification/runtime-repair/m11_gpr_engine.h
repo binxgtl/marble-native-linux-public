@@ -297,6 +297,13 @@ int m11_gpr_engine_transact_ex(m11_gpr_engine_t *eng, uint8_t client_data,
                                const void *payload, size_t payload_len, uint32_t timeout_ms,
                                uint32_t *out_dsp_status,
                                void *out_rsp_payload, size_t rsp_cap, size_t *out_rsp_len);
+/* Observation only: status_valid means a matched completed response was consumed.
+ * False for admission/TX/timeout/PD errors, even when their errno is EREMOTEIO.
+ * A true zero status does not establish DSP quiescence or physical USB delivery. */
+int m11_gpr_engine_transact_observed(m11_gpr_engine_t *, uint32_t dst_port, uint32_t opcode,
+                                     const void *, size_t, uint32_t timeout_ms,
+                                     uint32_t *dsp_status, bool *status_valid,
+                                     void *rsp, size_t cap, size_t *rsp_len);
 int m11_gpr_engine_transact(m11_gpr_engine_t *eng, uint32_t dst_port, uint32_t opcode,
                             const void *payload, size_t payload_len, uint32_t timeout_ms,
                             uint32_t *out_dsp_status,

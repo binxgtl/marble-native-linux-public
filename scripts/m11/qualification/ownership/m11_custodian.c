@@ -459,8 +459,11 @@ int m11_custodian_graph_open_blob(m11_custodian *c, unsigned r, uint32_t off, co
     if (gr->state != M11_GRAPH_FREE) *out = g;
     return rc;
 }
-int m11_custodian_cfg(m11_custodian *c, unsigned g, uint32_t dst, uint32_t op, const void *pl,
-                      uint32_t len, uint64_t now, void *rsp, size_t cap, size_t *rsp_len, bool *handed) {
+int m11_custodian_cfg_observed(m11_custodian *c, unsigned g, uint32_t dst, uint32_t op, const void *pl,
+                      uint32_t len, uint64_t now, void *rsp, size_t cap, size_t *rsp_len, bool *handed,
+                      uint32_t *dsp_status, bool *status_valid) {
+    if (status_valid) *status_valid=false;
+    if (dsp_status) *dsp_status=0;
     if (handed) *handed=false;
     if (!c || !pl || !dst || (op != M11_APM_CMD_SET_CFG && op != M11_APM_CMD_GET_CFG)) return -EINVAL;
     int rc=session_admit(c, now);
@@ -475,10 +478,16 @@ int m11_custodian_cfg(m11_custodian *c, unsigned g, uint32_t dst, uint32_t op, c
     if (!budget) return -EOWNERDEAD;
     uint32_t status=0;
     c->call_inflight=true; c->mgr->gpr->last_tx_status=M11_GPR_TX_NOT_ATTEMPTED;
-    rc=m11_gpr_engine_transact(c->mgr->gpr, dst, op, pl, len, budget, &status, rsp, cap, rsp_len);
+    rc=m11_gpr_engine_transact_observed(c->mgr->gpr, dst, op, pl, len, budget, &status,
+                                        status_valid, rsp, cap, rsp_len);
+    if (dsp_status) *dsp_status=status;
     if (handed) *handed = c->mgr->gpr->last_tx_status != M11_GPR_TX_NOT_ATTEMPTED;
     c->call_inflight=false; observe_own(c);
     return rc;
+}
+int m11_custodian_cfg(m11_custodian *c, unsigned g, uint32_t dst, uint32_t op, const void *pl,
+                      uint32_t len, uint64_t now, void *rsp, size_t cap, size_t *rsp_len, bool *handed) {
+    return m11_custodian_cfg_observed(c,g,dst,op,pl,len,now,rsp,cap,rsp_len,handed,NULL,NULL);
 }
 int m11_custodian_cfg_oob(m11_custodian *c, unsigned g, unsigned r, uint32_t off, const void *blob,
                           uint32_t len, uint64_t now) {

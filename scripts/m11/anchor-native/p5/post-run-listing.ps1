@@ -1,4 +1,4 @@
-# Read-only post-run listing for Run27 (p4/post-run-listing.ps1, the Run25 listing; docs/m11-argon-run27-plan.md).
+# Read-only post-run listing for Run28 (p4/post-run-listing.ps1, the Run25 listing; docs/m11-argon-run28-plan.md).
 # Run it only after the one-shot candidate returned to Android, next to the reset oracle. Device
 # commands, exactly: `adb devices`, `adb -s <serial> shell ls -la /sys/fs/pstore` and
 # `adb -s <serial> shell ls -la /data/vendor/diag`. Nothing is read beyond these listings, and

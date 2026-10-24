@@ -296,7 +296,7 @@ class Plan(unittest.TestCase):
         self.assertEqual(cfgs[2], w(WR, sp.PID_MEDIA_FORMAT, 30, 0, 1, sp.MEDIA_FMT_ID_PCM, 18)
                          + struct.pack('<IHBBHHHH', 48000, 16, 1, 0, 16, 15, 1, 2) + b'\x01\x02' + b'\0' * 2)
         self.assertEqual(cfgs[0], w(DEC, sp.PID_PCM_OUTPUT_FORMAT_CFG, 30, 0, 1, sp.MEDIA_FMT_ID_PCM, 18)
-                         + struct.pack('<8h', 16, 1, 16, 15, 1, 0, 0, 2) + b'\x01\x02' + b'\0' * 2)
+                           + struct.pack('<8h', 16, 1, 16, 15, 1, 3, 0, 2) + b'\x01\x02' + b'\0' * 2)
         self.assertEqual(cfgs[3], w(SPR, sp.PID_SPR_DELAY_PATH_END, 4, 0, HW, 0))
         self.assertEqual(cfgs[4], w(HW, sp.PID_HW_EP_MF_CFG, 12, 0) + struct.pack('<IHHI', 96000, 32, 3, 1) + b'\0' * 4)
         tdm = struct.unpack_from('<IIHHIHHHHHH', cfgs[5], 16)
@@ -307,6 +307,37 @@ class Plan(unittest.TestCase):
                          [(ENC, sp.PID_PCM_OUTPUT_FORMAT_CFG), (VCNV, sp.PID_PCM_OUTPUT_FORMAT_CFG),
                           (HWT, sp.PID_HW_EP_MF_CFG), (HWT, sp.PID_TDM_INTF_CFG)])
         self.assertEqual(struct.unpack_from('<I', vcfgs[3], 16 + 12)[0], 3)  # TX keeps the ACDB slot mask
+
+    def test_output_interleaving_exact_stock_witness(self):
+        # Independent stock witness: libagm 0x11b0c0..0x11b0d8 loads
+        # session_cfg.dir; dir==1 selects 3, otherwise 1; STRH at param+0x26.
+        # AGM's API dir is RX=1/TX=2 (not our plan's graph IDs).
+        sec = sections(self.build()[0])
+        vi = graph(sec[0][1])[4]
+        rx = graph(sec[1][1])[4]
+        for cfg in vi[:2]:
+            self.assertEqual(struct.unpack_from('<H', cfg, 0x26)[0], 1)
+        for cfg in rx[:2]:
+            self.assertEqual(struct.unpack_from('<H', cfg, 0x26)[0], 3)
+        expected = (w(ENC, sp.PID_PCM_OUTPUT_FORMAT_CFG, 30, 0, 1, sp.MEDIA_FMT_ID_PCM, 18)
+                    + struct.pack('<8h', 16, 1, 16, 15, 1, 1, 0, 2) + b'\x01\x02' + b'\0' * 2)
+        self.assertEqual(vi[0], expected)
+        # The generic Run27 failing parameter shape is identical except this
+        # uint16. It must fail the independent stock field check, not be
+        # accepted by changing a golden fixture to bless a zero mode.
+        old = bytearray(expected)
+        struct.pack_into('<H', old, 0x26, 0)
+        self.assertNotIn(struct.unpack_from('<H', old, 0x26)[0], (1, 3))
+        self.assertEqual(old[:0x26] + old[0x28:], expected[:0x26] + expected[0x28:])
+        self.assertEqual(len(old), 48)
+        self.assertEqual(hashlib.sha256(old).hexdigest(),
+                         '8d819cafc6db4b71b8007599c95643bfafddafd4e8c9c0dff13a5267ef9411ad')
+
+    def test_output_interleaving_refuses_unreviewed_modes(self):
+        for invalid in (0, 2, 4, -1):
+            with self.subTest(interleaving=invalid):
+                with self.assertRaisesRegex(ValueError, 'interleaving'):
+                    sp.pcm_output_format(ENC, sp.SNDRV_PCM_FORMAT_S16_LE, 2, interleaving=invalid)
 
     def test_ids_backend_controls_re_signal(self):
         secs = dict((t, b) for t, b in sections(self.build()[0]) if t != sp.SEC_GRAPH)

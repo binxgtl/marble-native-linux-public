@@ -556,9 +556,10 @@ static int consume_slot_result(m11_gpr_slot_t *slot, uint32_t *out_dsp_status,
     return 0;
 }
 
-int m11_gpr_engine_wait_token(m11_gpr_engine_t *eng, uint32_t token, uint32_t timeout_ms,
+static int wait_token_observed(m11_gpr_engine_t *eng, uint32_t token, uint32_t timeout_ms,
                               uint32_t *out_dsp_status,
-                              void *out_rsp_payload, size_t rsp_cap, size_t *out_rsp_len) {
+                              void *out_rsp_payload, size_t rsp_cap, size_t *out_rsp_len, bool *status_valid) {
+    if (status_valid) *status_valid = false;
     if (!eng || token == 0) return -EINVAL;
     if (eng->pdr_down) return -ENETRESET;
 
@@ -571,7 +572,28 @@ int m11_gpr_engine_wait_token(m11_gpr_engine_t *eng, uint32_t token, uint32_t ti
         slot_wait_failed(eng, slot);
         return wrc;
     }
+    if (status_valid) *status_valid = true; /* matched completed response, not TX/queue acceptance */
     return consume_slot_result(slot, out_dsp_status, NULL, out_rsp_payload, rsp_cap, out_rsp_len);
+}
+
+int m11_gpr_engine_wait_token(m11_gpr_engine_t *eng, uint32_t token, uint32_t timeout_ms,
+                              uint32_t *out_dsp_status,
+                              void *out_rsp_payload, size_t rsp_cap, size_t *out_rsp_len) {
+    return wait_token_observed(eng, token, timeout_ms, out_dsp_status,
+                               out_rsp_payload, rsp_cap, out_rsp_len, NULL);
+}
+
+int m11_gpr_engine_transact_observed(m11_gpr_engine_t *eng, uint32_t dst_port, uint32_t opcode,
+                                     const void *payload, size_t payload_len, uint32_t timeout_ms,
+                                     uint32_t *dsp_status, bool *status_valid,
+                                     void *rsp, size_t cap, size_t *rsp_len) {
+    if (status_valid) *status_valid = false;
+    if (dsp_status) *dsp_status = 0;
+    uint32_t token = 0;
+    int rc = m11_gpr_engine_submit_ex(eng, M11_GPR_CLIENT_DATA_DEFAULT, dst_port, opcode,
+                                      payload, payload_len, &token);
+    if (rc < 0) return rc;
+    return wait_token_observed(eng, token, timeout_ms, dsp_status, rsp, cap, rsp_len, status_valid);
 }
 
 bool m11_gpr_engine_orphan_tracked(const m11_gpr_engine_t *eng, uint32_t token) {

@@ -1,6 +1,6 @@
-# Sourced only by the P5 (Run27 speaker candidate) control jobs. The caller owns ADSP and modem lifecycle.
+# Sourced only by the P5 (Run28 speaker candidate) control jobs. The caller owns ADSP and modem lifecycle.
 # Exact M8/M9 connector-driven configfs ACM sequence. Never force a USB role.
-G=/config/usb_gadget/m11r27
+G=/config/usb_gadget/m11r28
 UDC=/sys/class/udc/a600000.dwc3
 usb_start() {
  log 'USB waiting for connector-created UDC (ADSP already running)'
@@ -21,7 +21,7 @@ usb_start() {
  $BB mkdir "$G/strings/0x409" "$G/configs/c.1" "$G/configs/c.1/strings/0x409" "$G/functions/acm.usb0" || return 1
  printf '%s' marble-native-linux > "$G/strings/0x409/manufacturer" || return 1
  printf '%s' 'M11 Run 26 kernel log' > "$G/strings/0x409/product" || return 1
- printf '%s' M11R27 > "$G/strings/0x409/serialnumber" || return 1
+ printf '%s' M11R28 > "$G/strings/0x409/serialnumber" || return 1
  printf '%s' kernel-log > "$G/configs/c.1/strings/0x409/configuration" || return 1
  $BB ln -s "$G/functions/acm.usb0" "$G/configs/c.1/acm.usb0" || return 1
  printf '%s' a600000.dwc3 > "$G/UDC" || return 1

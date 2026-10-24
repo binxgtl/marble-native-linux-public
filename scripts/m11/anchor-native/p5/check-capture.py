@@ -1,7 +1,7 @@
-"""P5 (Run27 speaker candidate) strict host-side evidence check (docs/m11-argon-speaker-run-design.md, W6).
+"""P5 (Run28 speaker candidate) strict host-side evidence check (docs/m11-argon-speaker-run-design.md, W6).
 
 Two layers, both fail closed, no healing or resynchronization:
-  1. transport: p4/check-capture.py's, byte for byte, with START run=M11R27 (M11I3 stream, E stream a complete
+  1. transport: p4/check-capture.py's, byte for byte, with START run=M11R28 (M11I3 stream, E stream a complete
      instrumentation journal bound to the on-device nonce/identity);
   2. records: every M11P4 (env phase) / M11P5 (PID1 hold) / M11ENTRY / M11INTENT / M11SPK / M11TERMINAL kernel
      record parsed by its exact grammar, written by PID1 (caller=T1, facility user, the writer's level), then
@@ -29,7 +29,7 @@ from pathlib import Path
 import re
 
 MAX_CAPTURE = 64 * 1024 * 1024
-RUN = b'M11R27'
+RUN = b'M11R28'
 HEADER = re.compile(rb'M11I3 ([SKEWF]) (0|[1-9][0-9]{0,8}) ([1-9][0-9]{0,4})\n\Z')
 START = re.compile(rb'run=' + RUN + rb' nonce=([0-9a-f]{32})\n\Z')
 FINAL = re.compile(rb'frames=(0|[1-9][0-9]*) bytes=(0|[1-9][0-9]*) events=(0|[1-9][0-9]*) kernel_drops=(0|[1-9][0-9]*) '
@@ -47,7 +47,7 @@ def _load_inspect_journal():
 inspect_journal = _load_inspect_journal()
 
 
-# ---------------------------------------------------------------- 1. transport (Run23 rule, M11R27)
+# ---------------------------------------------------------------- 1. transport (Run23 rule, M11R28)
 def decode(data, journal_nonce=None, journal_identity=None):
     """Returns (streams, kernel record bodies, report). Same rule as the Run23 check."""
     journal_error = journal_records = None
@@ -197,6 +197,7 @@ SPK_RULES = {
     'plan': re.compile(r'plan sha=([0-9a-f]{16}) bytes=' + NAT + r' pcm=' + NAT + r' level=' + NAT),
     'step': re.compile(r'step=' + NAT + r' ([a-z_]+) rc=' + INT),
     'cfg': re.compile(r'cfg=(vi|rx) index=' + NAT + r' rc=' + INT),
+    'cfg_rsp': re.compile(r'cfg_rsp dst=([0-9a-f]{8}) param=([0-9a-f]{8}) valid=([01]) status=([0-9a-f]{8}) rc=' + INT),
     're': re.compile(r're ch0=' + NAT + '/' + NAT + '/' + NAT + r' ch1=' + NAT + '/' + NAT + '/' + NAT),
     'teardown': re.compile(r'teardown=(amp_off|rx_stop|rx_be_close|vi_stop|vi_be_close|rx_close|vi_close) '
                            r'(?:rc=' + INT + r'(?: ms=' + NAT + r')?|graph=unknown)'),
@@ -331,6 +332,15 @@ def speaker(spk, d):
                 steps.append(n)
             else:
                 fail = (n, name, rc)
+        elif w == 'cfg_rsp':
+            if phase != 'steps' or fail is not None:
+                return 'spk-record-order', False
+            dst, param, valid, status, rc = r['groups']
+            valid, status, rc = int(valid), int(status, 16), int(rc)
+            if ((not valid and status != 0) or (valid and status != 0 and rc != -121) or
+                    (valid and status == 0 and rc != 0) or (not valid and rc == 0)):
+                return 'spk-cfg-response-invalid', False
+            s.setdefault('cfg_responses', []).append(dict(dst=dst, param=param, valid=valid, status=status, rc=rc))
         elif w == 'cfg':
             if phase != 'steps':
                 return 'spk-record-order', False

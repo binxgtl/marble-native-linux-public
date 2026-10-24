@@ -178,6 +178,11 @@ int m11_custodian_graph_open_blob(m11_custodian *, unsigned region, uint32_t off
 int m11_custodian_cfg(m11_custodian *, unsigned graph, uint32_t dst, uint32_t opcode,
                       const void *payload, uint32_t len, uint64_t now_ms,
                       void *rsp, size_t rsp_cap, size_t *rsp_len, bool *handed);
+/* Same admission/lifetime path; optional matched-response evidence, never a retry. */
+int m11_custodian_cfg_observed(m11_custodian *, unsigned graph, uint32_t dst, uint32_t opcode,
+                      const void *payload, uint32_t len, uint64_t now_ms,
+                      void *rsp, size_t rsp_cap, size_t *rsp_len, bool *handed,
+                      uint32_t *dsp_status, bool *status_valid);
 int m11_custodian_cfg_oob(m11_custodian *, unsigned graph, unsigned region, uint32_t off,
                           const void *blob, uint32_t len, uint64_t now_ms);
 int m11_custodian_data_submit(m11_custodian *, unsigned graph, uint32_t dst, uint32_t opcode,

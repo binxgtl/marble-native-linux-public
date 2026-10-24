@@ -1,4 +1,4 @@
-# The sole P5 (Run27 speaker) launcher: p4/launch.ps1 (the audited Run23 launcher) with the Run27
+# The sole P5 (Run28 speaker) launcher: p4/launch.ps1 (the audited Run23 launcher) with the Run28
 # identities, the 600 s observer window, the B3 stock summary handed to the P5 check, and the platform
 # tools given by the operator (their location is not encoded here). No execution without explicit fresh
 # one-shot approval (the operator's GO).
@@ -7,7 +7,7 @@ param([Parameter(Mandatory=$true)][string]$Manifest,[Parameter(Mandatory=$true)]
 $ErrorActionPreference='Stop'
 $root=(Resolve-Path "$PSScriptRoot/../../../..").Path
 $m=Get-Content -LiteralPath $Manifest -Raw | ConvertFrom-Json
-if($m.schema -ne 'm11-run27-candidate-v1' -or $m.hardware -ne 'NOT BOOTED'){throw 'Invalid/unapproved identity'}
+if($m.schema -ne 'm11-run28-candidate-v1' -or $m.hardware -ne 'NOT BOOTED'){throw 'Invalid/unapproved identity'}
 if($m.local_staging.journal_nonce -notmatch '^[0-9a-f]{32}$' -or $m.local_staging.runtime_identity -notmatch '^[0-9a-f]{64}$'){throw 'Journal nonce/identity absent from the manifest'}
 if($m.local_staging.stock_summary_sha256 -notmatch '^[0-9a-f]{64}$' -or -not $m.local_staging.stock_summary_path){throw 'B3 stock summary absent from the manifest'}
 foreach($p in $m.host_source_sha256.PSObject.Properties){
@@ -17,17 +17,17 @@ foreach($p in $m.host_source_sha256.PSObject.Properties){
 $observer=Join-Path $PSScriptRoot 'host-observer.ps1'
 $summary=$m.local_staging.stock_summary_path
 $observerArgs=@('-NoProfile','-File',$observer,'-OutDir',$OutDir,'-Seconds','600','-JournalNonce',$m.local_staging.journal_nonce,'-JournalIdentity',$m.local_staging.runtime_identity,'-StockSummary',$summary)
-$plan=[ordered]@{observer=$observer;observer_arguments=$observerArgs;protocol='M11I3';usb_serial='M11R27';boot=$m.local_staging.boot_path;boot_sha256=$m.local_staging.boot_sha256;stock_summary=$summary}
+$plan=[ordered]@{observer=$observer;observer_arguments=$observerArgs;protocol='M11I3';usb_serial='M11R28';boot=$m.local_staging.boot_path;boot_sha256=$m.local_staging.boot_sha256;stock_summary=$summary}
 if($PlanOnly){$plan | ConvertTo-Json -Depth 6;exit 0}
 if(-not $ConfirmOneShot){throw 'Explicit one-shot hardware approval required; no device command sent'}
-$canonical=Join-Path $root 'artifacts/m11/hwtest-run27-one-shot'
+$canonical=Join-Path $root 'artifacts/m11/hwtest-run28-one-shot'
 if([IO.Path]::GetFullPath($OutDir) -ne [IO.Path]::GetFullPath($canonical)){throw 'Only canonical one-shot evidence directory is allowed'}
 if(Test-Path -LiteralPath $OutDir){throw 'Run already has evidence; never retry'}
 $boot=$plan.boot
 if((Get-FileHash -LiteralPath $boot -Algorithm SHA256).Hash.ToLower() -ne $plan.boot_sha256){throw 'Boot SHA mismatch'}
 if((Get-Item -LiteralPath $boot).Length -ne $m.local_staging.boot_size){throw 'Boot size mismatch'}
 if((Get-FileHash -LiteralPath $summary -Algorithm SHA256).Hash.ToLower() -ne $m.local_staging.stock_summary_sha256){throw 'B3 stock summary SHA mismatch'}
-$freeze=(& git -C $root log -1 --format=%H -- manifests/m11-run27-candidate.json).Trim()
+$freeze=(& git -C $root log -1 --format=%H -- manifests/m11-run28-candidate.json).Trim()
 if((& git -C $root rev-parse HEAD) -ne $freeze -or (& git -C $root status --short)){throw 'Freeze HEAD/clean tree mismatch'}
 if(-not $PlatformTools){throw 'PlatformTools (the operator-given adb/fastboot directory) is required'}
 $adb=Join-Path $PlatformTools 'adb.exe';$fastboot=Join-Path $PlatformTools 'fastboot.exe'
