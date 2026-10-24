@@ -51,7 +51,7 @@ static void reply(int ep, const m11_gpr_hdr_t *h, uint32_t opcode, const void *p
                                h->src_port, h->dst_port, h->token, opcode, pl, n) < 0 ||
         send(ep, tx, txl, 0) != (ssize_t)txl) _exit(104);
 }
-static void peer(int ep, int mon, enum mode m) {
+static void peer(int ep, int mon, enum mode m, int wait_gate) {
     alarm(10);
     int got = 0;
     if (m == DOWN_IDLE || m == HANGUP_IDLE) {
@@ -67,7 +67,13 @@ static void peer(int ep, int mon, enum mode m) {
         m11_gpr_hdr_t h; const uint8_t *pl; size_t pll;
         if (m11_gpr_validate_packet(rx, (size_t)n, &h, &pl, &pll) < 0) _exit(100);
         if (h.opcode == M11_APM_CMD_SHARED_MEM_MAP_REGIONS) {
-            if (m == DOWN_ON_MAP) { if (write(mon, "D", 1) != 1) _exit(105); continue; }
+            if (m == DOWN_ON_MAP) {
+                char armed;
+                if (read(wait_gate, &armed, 1) != 1 || armed != 'W') _exit(106);
+                close(wait_gate);
+                if (write(mon, "D", 1) != 1) _exit(105);
+                continue;
+            }
             m11_apm_rsp_shared_mem_map_t r = {.mem_map_handle = 0xA0000001u};
             if (m == DOWN_THEN_ACK) {
                 if (write(mon, "D", 1) != 1) _exit(105);
@@ -91,13 +97,30 @@ static void peer(int ep, int mon, enum mode m) {
 }
 
 /* ---- PD monitor stand-in: any 'D' or EOF is not UP ---- */
+struct monitor_fixture {
+    int fd, wait_gate;
+    const m11_gpr_native_link *link;
+};
 static int pump(void *user, uint64_t now) {
     (void)now;
-    int fd = *(int *)user;
+    struct monitor_fixture *f = user;
     for (;;) {
         char b[16];
-        ssize_t n = read(fd, b, sizeof b);
-        if (n < 0) return errno == EAGAIN ? 1 : 0;
+        ssize_t n = read(f->fd, b, sizeof b);
+        if (n < 0) {
+            if (errno != EAGAIN) return 0;
+            /* DOWN_ON_MAP must arrive after poll_read's initial PD pump, not
+             * before it. Otherwise even a mutant polling only the endpoint
+             * can observe the early DOWN and pass this wait-specific case.
+             * After TX the first empty pump releases the peer, then returns
+             * UP without re-reading; the real poll must wake on the monitor. */
+            if (f->wait_gate >= 0 && f->link->writes) {
+                assert(write(f->wait_gate, "W", 1) == 1);
+                close(f->wait_gate);
+                f->wait_gate = -1;
+            }
+            return 1;
+        }
         if (n == 0) return 0;
         if (memchr(b, 'D', (size_t)n)) return 0;
     }
@@ -109,6 +132,7 @@ static uint64_t ms(void) {
 }
 struct rig {
     int sv[2], mp[2]; pid_t pid;
+    struct monitor_fixture monitor;
     m11_pid1_anchor ep, ion; m11_pd_monitor mon; m11_gpr_native_link glink; m11_gpr_transport_t t;
     m11_gpr_engine_t eng; m11_shmem_native_link slink; m11_shmem_backend_t b; m11_shmem_mgr_t mgr;
     m11_boot_ledger boot; m11_custodian cust; m11_pdr_loop loop;
@@ -121,13 +145,21 @@ static void start(struct rig *r, enum mode m) {
     assert(fx_heap >= 0 && fx_ion >= 0);
     assert(socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, r->sv) == 0);
     assert(pipe2(r->mp, O_CLOEXEC) == 0);
+    int gate[2] = {-1, -1};
+    if (m == DOWN_ON_MAP) assert(pipe2(gate, O_CLOEXEC) == 0);
     r->pid = fork(); assert(r->pid >= 0);
-    if (r->pid == 0) { close(r->sv[0]); close(r->mp[0]); peer(r->sv[1], r->mp[1], m); }
+    if (r->pid == 0) {
+        close(r->sv[0]); close(r->mp[0]);
+        if (gate[1] >= 0) close(gate[1]);
+        peer(r->sv[1], r->mp[1], m, gate[0]);
+    }
+    if (gate[0] >= 0) close(gate[0]);
     close(r->sv[1]); close(r->mp[1]);
     assert(fcntl(r->mp[0], F_SETFL, O_NONBLOCK) == 0);
     r->ep.state = M11_ANCHOR_HELD; r->ep.anchor_fd = r->sv[0]; r->ep.owner_pid = getpid();
     r->ion.state = M11_ANCHOR_HELD; r->ion.anchor_fd = fx_ion; r->ion.owner_pid = getpid();
-    r->mon = (m11_pd_monitor){.fd = r->mp[0], .pump_fn = pump, .user = &r->mp[0]};
+    r->monitor = (struct monitor_fixture){.fd = r->mp[0], .wait_gate = gate[1], .link = &r->glink};
+    r->mon = (m11_pd_monitor){.fd = r->mp[0], .pump_fn = pump, .user = &r->monitor};
     assert(m11_gpr_native_transport_pd(&r->glink, &r->ep, &r->mon, &r->t) == 0);
     assert(m11_gpr_engine_init(&r->eng, &r->t, 0x0100u) == 0 && m11_gpr_engine_open(&r->eng) == 0);
     assert(m11_shmem_native_backend(&r->slink, &r->ion, fx_heap, &fx_sys, &r->b) == 0);
@@ -138,6 +170,7 @@ static void start(struct rig *r, enum mode m) {
     assert(m11_pdr_loop_init(&r->loop, &r->cust, &r->glink) == 0);
 }
 static int stop(struct rig *r) { /* the peer's packet count */
+    if (r->monitor.wait_gate >= 0) close(r->monitor.wait_gate);
     close(r->sv[0]); close(r->mp[0]);
     int st; assert(waitpid(r->pid, &st, 0) == r->pid && WIFEXITED(st));
     return WEXITSTATUS(st);
