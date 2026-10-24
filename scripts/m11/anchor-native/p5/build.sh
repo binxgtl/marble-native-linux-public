@@ -48,7 +48,7 @@ case "$what" in
    "$cc" --target=aarch64-linux-gnu -static -nostdlib -nostdinc -ffreestanding \
     -fno-stack-protector -fno-builtin -fno-PIC -fno-asynchronous-unwind-tables \
     -fuse-ld=lld -Wl,-e,_start,--build-id=none -O2 -Wall -Wextra -Werror \
-    -o "$out/m11-kmsg-relay-$side" "$here/kmsg-relay.c"
+    -I"$native/p4" -o "$out/m11-kmsg-relay-$side" "$here/kmsg-relay.c"
   done
   cmp "$out/m11-kmsg-relay-a" "$out/m11-kmsg-relay-b"
   cp "$out/m11-kmsg-relay-a" "$out/m11-kmsg-relay"
