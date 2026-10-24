@@ -154,9 +154,14 @@ int main(void) {
     assert(m11_custodian_map(&r.cust, 4096, ms(), &slot) == 0);
     assert(r.cust.regions[slot].state == M11_SHMEM_STATE_DSP_MAP_ACKNOWLEDGED);
     assert(m11_pdr_loop_settle(&r.loop, ms()) == M11_TERMINAL_RESET_RETAINING_ANCHORS && !r.loop.down_reported);
+    const uint32_t pumps_before_idle = r.glink.pd_pumps;
     assert(m11_pdr_loop_idle(&r.loop, 50, ms()) == 0 && !r.loop.down_reported);
     assert(m11_custodian_retire(&r.cust, slot, ms()) == -EPERM);
-    assert(m11_pdr_loop_settle(&r.loop, ms()) == M11_TERMINAL_RESET_RETAINING_ANCHORS && !r.glink.pd_down && r.glink.pd_pumps >= 4);
+    /* Assert what idle itself does, not the cumulative MAP count: poll may observe the peer's UP
+     * separately or drain it in the initial pump. The tx-after-down mutant skips one earlier pump
+     * and must be killed on the no-TX-after-DOWN assertion below, independent of that scheduling. */
+    assert(m11_pdr_loop_settle(&r.loop, ms()) == M11_TERMINAL_RESET_RETAINING_ANCHORS && !r.glink.pd_down &&
+           r.glink.pd_pumps > pumps_before_idle);
     assert(fx_imported[r.cust.regions[slot].dma_buf_fd] && r.cust.regions[slot].vaddr);
     assert(stop(&r) == 1);
     printf("PASS UP throughout: PD traffic during the MAP changes nothing; idle wait pumps the monitor; retire refused, backing held\n");
