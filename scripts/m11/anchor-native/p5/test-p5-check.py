@@ -160,7 +160,7 @@ def verdict(lines, run=b'M11R29'):
     return r['p5_verdict'], r
 
 
-def test_checker():
+def test_re_response_fields():
     # Run29 independent review: an otherwise played transcript with failed/missing Re data
     # must not qualify, even if the producer later reports a successful session.
     good = re_ok(0, 26100) + re_ok(1, 28684)
@@ -171,6 +171,9 @@ def test_checker():
     # Both reported sizes permitted by the bounded native contract remain accepted.
     assert verdict(boot(spk_lines(re_records=[x.replace('rsp=4/', 'rsp=8/') for x in good])))[0] == C.EXPECTED
     print('PASS Re response length, parameter size and zero error independently required for played verdict')
+
+
+def test_checker():
     v, r = verdict(boot())
     assert v == C.EXPECTED and r['p5_expected'] and r['p5']['maps'] == 2 and r['p5']['b3'] == 'match', r
     sp = r['p5']['speaker']
@@ -271,6 +274,7 @@ if __name__ == '__main__':
         print(f'wrote the synthetic P5 capture {sys.argv[2]}')
         raise SystemExit(0)
     test_checker()
+    test_re_response_fields()
     if len(sys.argv) == 3 and sys.argv[1] == '--spk-records':
         test_c_records(sys.argv[2])
     elif len(sys.argv) != 1:
