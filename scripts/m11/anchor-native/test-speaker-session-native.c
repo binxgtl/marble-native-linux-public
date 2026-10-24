@@ -294,7 +294,8 @@ static int stop(struct rig *r) {
 static uint8_t plan_buf[200000];
 static size_t pl_at;
 static void put32(uint32_t v) { memcpy(plan_buf + pl_at, &v, 4); pl_at += 4; }
-static void putb(const void *p, size_t n) { memcpy(plan_buf + pl_at, p, n); pl_at += n; while (pl_at % 8) plan_buf[pl_at++] = 0; }
+/* the generator's pad8(payload): the blob's own length is padded, wherever the blob starts */
+static void putb(const void *p, size_t n) { memcpy(plan_buf + pl_at, p, n); pl_at += n; for (; n % 8; n++) plan_buf[pl_at++] = 0; }
 static size_t sec_begin(uint32_t type) { put32(type); size_t at = pl_at; put32(0); return at; }
 static void sec_end(size_t at) { uint32_t n = (uint32_t)(pl_at - at - 4); memcpy(plan_buf + at, &n, 4); while (pl_at % 8) plan_buf[pl_at++] = 0; }
 static void param(uint8_t *out, size_t *len, uint32_t miid, uint32_t pid, uint32_t v) {
