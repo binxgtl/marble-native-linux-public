@@ -41,6 +41,9 @@ typedef struct {
     bool     gpr_fd_open;
     uint32_t spf_state; /* 1 = ready, 0 = not ready */
     uint32_t stored_q12_re[2];
+    /* the stock Awinic read: a read command (type 1) selects the channel the next GET_CFG answers */
+    bool     aw_read_pending;
+    uint32_t aw_read_ch;
     bool     vi_tx_opened;
     bool     vi_tx_prepared;
     bool     vi_tx_started;
@@ -147,6 +150,7 @@ typedef struct {
     uint32_t ack_lost_set_cfg_ch_mask;       /* ADSP APPLIES SET_CFG but no ACK is sent */
     uint32_t corrupt_get_cfg_ch_mask;        /* GET_CFG reports a wrong q12 for those channels */
     uint32_t drop_get_cfg_rsp_ch_mask;       /* GET_CFG gets no response for those channels */
+    uint32_t nack_read_cmd_ch_mask;          /* ADSP refuses the read command for those channels */
 
     /* Mutation hooks on outgoing TX packets before strict kernel/DSP validation */
     bool     mutate_swap_gpr_domain_and_port;

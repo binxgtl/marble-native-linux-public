@@ -133,12 +133,23 @@ static int graph_bring_up(sess *s, const m11_plan_graph *g, unsigned *gi, int ba
     return 0;
 }
 
-/* the AW Re SET/GET round trip, through the custodian (its budget, not timeout_ms) */
+/* the AW Re SET/GET round trip, through the custodian (its budget, not timeout_ms). One record per call: the
+ * request's parameter size, message type and ID, the DSP status and whether it is one, and for a GET_CFG the
+ * returned parameter size, error code and first data word (Run28 could not tell these apart). */
 static int aw_round_trip(void *user, uint32_t dst, uint32_t opcode, const void *pkt, size_t len, uint32_t timeout_ms,
                          void *rsp, size_t cap, size_t *rsp_len, bool *handed) {
     sess *s = user;
     (void)timeout_ms;
-    int rc = m11_custodian_cfg(s->io->cust, s->g_rx, dst, opcode, pkt, (uint32_t)len, now(s), rsp, cap, rsp_len, handed);
+    uint32_t status = 0, req[10] = {0}, got[7] = {0};
+    bool valid = false;
+    size_t n = 0;
+    memcpy(req, pkt, len < sizeof req ? len : sizeof req);
+    int rc = m11_custodian_cfg_observed(s->io->cust, s->g_rx, dst, opcode, pkt, (uint32_t)len, now(s), rsp, cap,
+                                        rsp ? &n : NULL, handed, &status, &valid);
+    if (rsp_len) *rsp_len = n;
+    if (rsp && n) memcpy(got, rsp, n < sizeof got ? n : sizeof got);
+    rec(s, "phase=spk re_rsp op=%08x req=%u/%u/%08x valid=%u status=%08x rc=%d len=%u rsp=%u/%08x/%u", opcode,
+        req[6], req[8], req[9], valid ? 1u : 0u, status, rc, (unsigned)n, got[3], got[4], got[5]);
     pdr_note(s);
     return rc;
 }

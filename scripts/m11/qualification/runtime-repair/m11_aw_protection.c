@@ -254,6 +254,89 @@ int m11_aw_validate_get_cfg_rsp_pkt(const uint8_t *pkt, size_t pkt_len,
     return 0;
 }
 
+int m11_aw_build_read_cmd(uint32_t channel, m11_apm_aw_read_cmd_pkt_t *out) {
+    if (!out || channel > 1u) return -EINVAL;
+    memset(out, 0, sizeof(*out));
+    out->cmd_hdr.payload_size = (uint32_t)sizeof(out->env);
+    out->env.module_instance_id = M11_AW_SP_RX_MODULE_IID;
+    out->env.param_id = M11_PARAM_ID_SP_TH_VI_R0_T0;
+    out->env.param_size = 24u;
+    out->env.msg_type = M11_AW_MSG_TYPE_CMD;
+    out->env.msg_id = M11_AW_CH0_PARAM_SELECTOR + channel;
+    out->env.version = M11_AW_MSG_VERSION;
+    return 0;
+}
+
+int m11_aw_build_read_req(m11_apm_aw_read_pkt_t *out) {
+    if (!out) return -EINVAL;
+    memset(out, 0, sizeof(*out));
+    out->cmd_hdr.payload_size = (uint32_t)sizeof(out->env);
+    out->env.module_instance_id = M11_AW_SP_RX_MODULE_IID;
+    out->env.param_id = M11_PARAM_ID_SP_TH_VI_R0_T0;
+    out->env.param_size = M11_AW_READ_PARAM_SIZE;
+    return 0;
+}
+
+int m11_aw_classify_cfg_pkt(const uint8_t *pkt, size_t pkt_len, m11_aw_msg_kind_t *out_kind,
+                            uint32_t *out_channel, uint32_t *out_q12_re) {
+    if (!pkt || !out_kind) return -EINVAL;
+    m11_gpr_hdr_t hdr;
+    const uint8_t *pl = NULL;
+    size_t pl_len = 0u;
+    int rc = m11_gpr_validate_packet(pkt, pkt_len, &hdr, &pl, &pl_len);
+    if (rc < 0) return rc;
+    if (hdr.dst_domain_id != M11_GPR_DOMAIN_ADSP || hdr.src_domain_id != M11_GPR_DOMAIN_APPS ||
+        hdr.client_data != M11_GPR_CLIENT_DATA_DEFAULT || hdr.token == 0u ||
+        !m11_gpr_is_valid_src_port(hdr.src_port) || hdr.dst_port != M11_AW_SP_RX_MODULE_IID ||
+        (hdr.opcode != M11_APM_CMD_SET_CFG && hdr.opcode != M11_APM_CMD_GET_CFG))
+        return -EPROTO;
+    if (hdr.opcode == M11_APM_CMD_SET_CFG && pl_len == sizeof(m11_apm_aw_re_cfg_pkt_t)) {
+        uint32_t ch = 0u, q12 = 0u;
+        if ((rc = m11_aw_validate_cfg_req_pkt(pkt, pkt_len, M11_APM_CMD_SET_CFG, &ch, &q12)) < 0) return rc;
+        *out_kind = M11_AW_MSG_WRITE;
+        if (out_channel) *out_channel = ch;
+        if (out_q12_re) *out_q12_re = q12;
+        return 0;
+    }
+    if (hdr.opcode == M11_APM_CMD_SET_CFG && pl_len == sizeof(m11_apm_aw_read_cmd_pkt_t)) {
+        m11_apm_aw_read_cmd_pkt_t want, got;
+        memcpy(&got, pl, sizeof(got));
+        uint32_t ch = got.env.msg_id - M11_AW_CH0_PARAM_SELECTOR;
+        if (m11_aw_build_read_cmd(ch, &want) < 0 || memcmp(&want, &got, sizeof(got))) return -EPROTO;
+        *out_kind = M11_AW_MSG_READ_CMD;
+        if (out_channel) *out_channel = ch;
+        return 0;
+    }
+    if (hdr.opcode == M11_APM_CMD_GET_CFG && pl_len == sizeof(m11_apm_aw_read_pkt_t)) {
+        m11_apm_aw_read_pkt_t want;
+        (void)m11_aw_build_read_req(&want);
+        if (memcmp(&want, pl, sizeof(want))) return -EPROTO;
+        *out_kind = M11_AW_MSG_READ;
+        return 0;
+    }
+    return -EBADMSG;
+}
+
+int m11_aw_pack_read_rsp_pkt(uint8_t *out_buf, size_t out_cap, size_t *out_len,
+                             uint32_t dst_port, uint32_t token, uint32_t status,
+                             uint32_t error_code, uint32_t param_size, uint32_t q12_re) {
+    if (!out_buf || !out_len || dst_port == 0u || token == 0u) return -EINVAL;
+    m11_apm_rsp_aw_read_t rsp;
+    memset(&rsp, 0, sizeof(rsp));
+    rsp.status = status;
+    rsp.env.module_instance_id = M11_AW_SP_RX_MODULE_IID;
+    rsp.env.param_id = M11_PARAM_ID_SP_TH_VI_R0_T0;
+    rsp.env.param_size = param_size;
+    rsp.env.error_code = error_code;
+    rsp.env.data[0] = q12_re;
+    return m11_gpr_pack_packet_ex(out_buf, out_cap, out_len,
+                                  M11_GPR_DOMAIN_APPS, M11_GPR_DOMAIN_ADSP,
+                                  M11_GPR_CLIENT_DATA_DEFAULT,
+                                  dst_port, M11_AW_SP_RX_MODULE_IID,
+                                  token, M11_APM_CMD_RSP_GET_CFG,
+                                  &rsp, sizeof(rsp));
+}
+
 int m11_aw_validate_safety_context(const m11_aw_safety_context_t *ctx) {
     if (!ctx) return -EINVAL;
 
@@ -373,10 +456,19 @@ int m11_aw_apply_and_verify_re_via(m11_aw_round_trip_fn round_trip, void *user,
         }
         c->stage = M11_AW_STAGE_SET_ACKED;
 
-        m11_apm_aw_re_cfg_pkt_t get_req = set_pkt;
-        get_req.env.q12_re = 0u;
+        /* The stock read (m11_aw_read_cmd_envelope_40_t): the read command, then the GET_CFG */
+        m11_apm_aw_read_cmd_pkt_t read_cmd;
+        (void)m11_aw_build_read_cmd(ch, &read_cmd);
+        rc = round_trip(user, safety_ctx->sp_rx_module_iid, M11_APM_CMD_SET_CFG,
+                        &read_cmd, sizeof(read_cmd), timeout_ms, NULL, 0, NULL, &handed);
+        if (rc < 0) {
+            aw_fail_channel(rep, ch, M11_AW_OP_READ_CMD, rc);
+            return rc;
+        }
 
-        m11_apm_rsp_aw_re_get_cfg_t get_rsp;
+        m11_apm_aw_read_pkt_t get_req;
+        (void)m11_aw_build_read_req(&get_req);
+        m11_apm_rsp_aw_read_t get_rsp;
         memset(&get_rsp, 0, sizeof(get_rsp));
         size_t rsp_len = 0;
         rc = round_trip(user, safety_ctx->sp_rx_module_iid, M11_APM_CMD_GET_CFG,
@@ -386,6 +478,8 @@ int m11_aw_apply_and_verify_re_via(m11_aw_round_trip_fn round_trip, void *user,
             aw_fail_channel(rep, ch, M11_AW_OP_GET_CFG, rc);
             return rc;
         }
+        c->rsp_len = rsp_len;
+        c->rsp = get_rsp;
         if (rsp_len != sizeof(get_rsp)) {
             aw_fail_channel(rep, ch, M11_AW_OP_VERIFY, -EBADMSG);
             return -EBADMSG;
@@ -395,23 +489,17 @@ int m11_aw_apply_and_verify_re_via(m11_aw_round_trip_fn round_trip, void *user,
             aw_fail_channel(rep, ch, M11_AW_OP_VERIFY, -EREMOTEIO);
             return -EREMOTEIO;
         }
+        /* stock copies the first 4 data bytes; the module may report 4 or the 8 asked for */
         if (get_rsp.env.module_instance_id != M11_AW_SP_RX_MODULE_IID ||
             get_rsp.env.param_id != M11_PARAM_ID_SP_TH_VI_R0_T0 ||
-            get_rsp.env.param_size != 28u ||
-            get_rsp.env.inner_reserved0 != 0u ||
-            get_rsp.env.channel_selector != (M11_AW_CH0_PARAM_SELECTOR + ch) ||
-            get_rsp.env.inner_op != 1u ||
-            get_rsp.env.inner_zero0 != 0u ||
-            get_rsp.env.inner_zero1 != 0u ||
-            get_rsp.env.inner_zero2 != 0u ||
-            get_rsp.env.pad_align8 != 0u) {
+            get_rsp.env.param_size < 4u || get_rsp.env.param_size > M11_AW_READ_PARAM_SIZE) {
             aw_fail_channel(rep, ch, M11_AW_OP_VERIFY, -EBADMSG);
             return -EBADMSG;
         }
         /* Structurally valid response: the reported value is what the DSP holds. */
         c->readback_valid = true;
-        c->readback_q12 = get_rsp.env.q12_re;
-        if (get_rsp.env.q12_re != cal->q12_re[ch]) {
+        c->readback_q12 = get_rsp.env.data[0];
+        if (get_rsp.env.data[0] != cal->q12_re[ch]) {
             aw_fail_channel(rep, ch, M11_AW_OP_VERIFY, -EBADMSG);
             return -EBADMSG;
         }

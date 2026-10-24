@@ -522,7 +522,26 @@ static int mock_gpr_write(void *user, int fd, const uint8_t *buf, size_t len) {
         case M11_APM_CMD_SET_CFG: {
             if (m->drop_set_cfg_rsp) break;
             uint32_t ch = 0u, q12_re = 0u;
+#ifdef M11_AW_MSG_TYPE_CMD
+            m11_aw_msg_kind_t kind = 0;
+            int vrc = m11_aw_classify_cfg_pkt(work, work_len, &kind, &ch, &q12_re);
+            if (vrc == 0 && kind == M11_AW_MSG_READ_CMD) {
+                if (((m->nack_read_cmd_ch_mask >> ch) & 1u) != 0u || !m->vi_tx_opened || !m->vi_tx_prepared) {
+                    m->rejected_cfg_count++;
+                    m->last_reject_reason = -EPROTO;
+                    (void)enqueue_ibasic_rsp(m, hdr.dst_port, hdr.src_port, hdr.token, hdr.opcode, 1u);
+                    break;
+                }
+                m->aw_read_pending = true;
+                m->aw_read_ch = ch;
+                (void)enqueue_ibasic_rsp(m, M11_AW_SP_RX_MODULE_IID, hdr.src_port, hdr.token, hdr.opcode, 0u);
+                break;
+            }
+            if (vrc == 0 && kind != M11_AW_MSG_WRITE) vrc = -EPROTO;
+#else
+            /* a tree without the stock read (the baseline witnesses): the historical write-only model */
             int vrc = m11_aw_validate_cfg_req_pkt(work, work_len, M11_APM_CMD_SET_CFG, &ch, &q12_re);
+#endif
             bool ch_nack = (vrc == 0 && ch < 2u && ((m->nack_set_cfg_ch_mask >> ch) & 1u) != 0u);
             if (vrc < 0 || m->nack_set_cfg || ch_nack || !m->vi_tx_opened || !m->vi_tx_prepared) {
                 m->rejected_cfg_count++;
@@ -536,6 +555,43 @@ static int mock_gpr_write(void *user, int fd, const uint8_t *buf, size_t len) {
             break;
         }
 
+#ifdef M11_AW_MSG_TYPE_CMD
+        case M11_APM_CMD_GET_CFG: {
+            /* only the stock read is answered: a read command first, then this GET_CFG (a GET_CFG of the
+             * 48-byte write, as Run28 sent, is refused) */
+            m11_aw_msg_kind_t kind = 0;
+            int vrc = m11_aw_classify_cfg_pkt(work, work_len, &kind, NULL, NULL);
+            if (vrc == 0 && (kind != M11_AW_MSG_READ || !m->aw_read_pending)) vrc = -EPROTO;
+            if (vrc < 0 || !m->vi_tx_opened || !m->vi_tx_prepared) {
+                m->rejected_cfg_count++;
+                m->last_reject_reason = (vrc < 0) ? vrc : -EPROTO;
+                (void)enqueue_ibasic_rsp(m, hdr.dst_port, hdr.src_port, hdr.token, hdr.opcode, 1u);
+                break;
+            }
+            const uint32_t ch = m->aw_read_ch;
+            m->aw_read_pending = false;
+
+            if (((m->drop_get_cfg_rsp_ch_mask >> ch) & 1u) != 0u) break;
+
+            m11_apm_rsp_aw_read_t rsp;
+            memset(&rsp, 0, sizeof(rsp));
+            rsp.env.module_instance_id = M11_AW_SP_RX_MODULE_IID;
+            rsp.env.param_id = M11_PARAM_ID_SP_TH_VI_R0_T0;
+            rsp.env.param_size = 4u;
+            rsp.env.data[0] = m->stored_q12_re[ch];
+            if (m->corrupt_get_cfg_q12 || ((m->corrupt_get_cfg_ch_mask >> ch) & 1u) != 0u) {
+                rsp.env.data[0] ^= 0x1234u;
+            }
+
+            size_t rsp_len = sizeof(rsp);
+            if (m->truncate_get_cfg_rsp) {
+                rsp_len = 20u; /* Truncated payload (< 28 bytes) */
+            }
+            (void)enqueue_rsp_pkt(m, M11_AW_SP_RX_MODULE_IID, hdr.src_port, hdr.token,
+                                  M11_APM_CMD_RSP_GET_CFG, &rsp, rsp_len);
+            break;
+        }
+#else
         case M11_APM_CMD_GET_CFG: {
             uint32_t ch = 0u, unused_q12 = 0u;
             int vrc = m11_aw_validate_cfg_req_pkt(work, work_len, M11_APM_CMD_GET_CFG, &ch, &unused_q12);
@@ -565,6 +621,7 @@ static int mock_gpr_write(void *user, int fd, const uint8_t *buf, size_t len) {
                                   M11_APM_CMD_RSP_GET_CFG, &rsp, rsp_len);
             break;
         }
+#endif
 
         default:
             (void)enqueue_ibasic_rsp(m, hdr.dst_port, hdr.src_port, hdr.token, hdr.opcode, 1u);

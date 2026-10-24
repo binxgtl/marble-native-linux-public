@@ -1157,6 +1157,11 @@ p5c_mutant amp-not-driven-unchecked "    if amp_enabled and not amp_touched:" ' 
 p5c_mutant re-unchecked "    if (re_rec is None or re_rec[0] != READBACK_VERIFIED or re_rec[3] != READBACK_VERIFIED or re_rec[1] != re_rec[2] or" \
   '    if False and (re_rec is None or re_rec[0] != READBACK_VERIFIED or re_rec[3] != READBACK_VERIFIED or re_rec[1] != re_rec[2] or' \
   "('Re read back differs'"
+p5c_mutant re-read-shape-unchecked "    if (shape != [('01001006', 28, 0), ('01001006', 24, 1), ('01001007', 8, 0)] * 2 or" \
+  "    if False and (shape != [('01001006', 28, 0), ('01001006', 24, 1), ('01001007', 8, 0)] * 2 or" "boot(no_cmd)"
+p5c_mutant re-failure-unaccounted "    if re_failed and (len(re_failed) != 1 or re_rsp[-1] is not re_failed[0] or fail is None or fail[1] != 'rx_re' or" \
+  "    if False and re_failed and (len(re_failed) != 1 or re_rsp[-1] is not re_failed[0] or fail is None or fail[1] != 'rx_re' or" \
+  "boot(unaccounted)"
 p5c_mutant unmap-unchecked "    if any(r['op'] in (OP_UNMAP, OP_CLOSE_ALL) for r in intents):" '    if False:' "('an UNMAP journaled'"
 p3_mutant() { # name asroot pattern replacement assertion last-pass (same detection rule as gtn_mutant)
   local name="$1" asroot="$2" pat="$3" rep="$4" want="$5" last="$6" dir="$out/cen-mutant-$1" rc=0 got file=custodian_entry_native.c

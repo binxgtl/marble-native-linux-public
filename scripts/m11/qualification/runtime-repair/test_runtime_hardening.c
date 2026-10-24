@@ -1135,7 +1135,9 @@ static void p3_all_ok(void) {
     CHECK(rep.pair_re_readback_verified && rep.primary_error == 0 && rep.primary_channel == -1);
     CHECK(rep.ch[0].readback_valid && rep.ch[0].readback_q12 == M11_MARBLE_CH0_FACTORY_Q12);
     CHECK(rep.ch[1].readback_valid && rep.ch[1].readback_q12 == M11_MARBLE_CH1_FACTORY_Q12);
-    CHECK(FX.mock.tx_pkt_count == 4u);
+    /* per channel: the write, the read command, the read (libawcal aw_audioreach_read_msg_from_dsp) */
+    CHECK(FX.mock.tx_pkt_count == 6u);
+    CHECK(rep.ch[1].rsp_len == sizeof(m11_apm_rsp_aw_read_t) && rep.ch[1].rsp.env.param_size == 4u);
     p3_invariants(&rep);
     CHECK(m11_aw_apply_and_verify_re_dsp(&FX.gpr, &ctx, &cal, 30u) == 0, "compat wrapper");
     fx_close();
@@ -1161,8 +1163,8 @@ static void p3_ch0_ok_ch1_nack(void) {
     CHECK(rep.dsp_state_may_have_changed);
     CHECK(FX.mock.stored_q12_re[0] == M11_MARBLE_CH0_FACTORY_Q12 && FX.mock.stored_q12_re[1] == 0u,
           "ch0 applied, ch1 not: the partial state the caller must be told about");
-    /* ch0 SET + ch0 GET + the refused ch1 SET; nothing after the failure (no rollback). */
-    CHECK(FX.mock.tx_pkt_count == 3u, "no rollback / extra write after the failure, tx=%u", FX.mock.tx_pkt_count);
+    /* ch0 SET + read command + GET + the refused ch1 SET; nothing after the failure (no rollback). */
+    CHECK(FX.mock.tx_pkt_count == 4u, "no rollback / extra write after the failure, tx=%u", FX.mock.tx_pkt_count);
     p3_invariants(&rep);
     fx_close();
 
@@ -1205,7 +1207,7 @@ static void p3_ch1_set_ack_lost_state_may_have_changed(void) {
     CHECK(rep.ch[1].error == -ETIMEDOUT && rep.ch[1].dsp_state_may_have_changed);
     CHECK(FX.mock.stored_q12_re[1] == M11_MARBLE_CH1_FACTORY_Q12, "the ADSP did apply ch1");
     CHECK(!rep.pair_re_readback_verified && rep.dsp_state_may_have_changed);
-    CHECK(FX.mock.tx_pkt_count == 3u);
+    CHECK(FX.mock.tx_pkt_count == 4u);
     p3_invariants(&rep);
     fx_close();
 }
@@ -1244,6 +1246,58 @@ static void p3_ch1_get_cfg_unanswered(void) {
     fx_close();
 }
 
+/* The read command is refused: no GET_CFG follows and the failure names the read command. */
+static void p3_ch0_read_cmd_refused(void) {
+    p3_setup();
+    FX.mock.nack_read_cmd_ch_mask = 1u;
+    m11_aw_safety_context_t ctx = p3_ctx();
+    m11_aw_cal_pair_t cal = p3_cal();
+    m11_aw_apply_report_t rep;
+    int rc = m11_aw_apply_and_verify_re_dsp_ex(&FX.gpr, &ctx, &cal, 30u, &rep);
+    CHECK(rc == -EREMOTEIO, "rc=%d", rc);
+    CHECK(rep.ch[0].stage == M11_AW_STAGE_FAILED && rep.ch[0].failed_after == M11_AW_STAGE_SET_ACKED);
+    CHECK(rep.ch[0].failed_op == M11_AW_OP_READ_CMD && !rep.ch[0].readback_valid && rep.ch[0].rsp_len == 0u);
+    CHECK(rep.ch[1].stage == M11_AW_STAGE_NOT_SENT && FX.mock.tx_pkt_count == 2u);
+    p3_invariants(&rep);
+    fx_close();
+}
+
+/* Run28: a GET_CFG of the 48-byte write envelope is not a stock read; the stand-in refuses it like the ADSP did. */
+static void p3_run28_write_envelope_get_is_refused(void) {
+    p3_setup();
+    m11_apm_aw_re_cfg_pkt_t legacy;
+    memset(&legacy, 0, sizeof(legacy));
+    legacy.cmd_hdr.payload_size = sizeof(legacy.env);
+    CHECK(m11_aw_build_re_envelope_48(0u, M11_MARBLE_CH0_FACTORY_MOHM, &legacy.env) == 0);
+    legacy.env.q12_re = 0u;
+    uint32_t dsp = 0;
+    size_t len = 0;
+    m11_apm_rsp_aw_read_t rsp;
+    int rc = m11_gpr_engine_transact(&FX.gpr, M11_AW_SP_RX_MODULE_IID, M11_APM_CMD_GET_CFG, &legacy, sizeof(legacy),
+                                     30u, &dsp, &rsp, sizeof(rsp), &len);
+    CHECK(rc == -EREMOTEIO && dsp != 0u, "rc=%d dsp=%u", rc, dsp);
+    /* and a read without its read command */
+    m11_apm_aw_read_pkt_t rd;
+    CHECK(m11_aw_build_read_req(&rd) == 0);
+    rc = m11_gpr_engine_transact(&FX.gpr, M11_AW_SP_RX_MODULE_IID, M11_APM_CMD_GET_CFG, &rd, sizeof(rd),
+                                 30u, &dsp, &rsp, sizeof(rsp), &len);
+    CHECK(rc == -EREMOTEIO, "rc=%d", rc);
+    fx_close();
+}
+
+/* The two read requests byte for byte against libawcal (aw_audioreach_read_msg_from_dsp, set_dsp_info). */
+static void p3_read_requests_match_stock(void) {
+    m11_apm_aw_read_cmd_pkt_t cmd;
+    m11_apm_aw_read_pkt_t rd;
+    CHECK(m11_aw_build_read_cmd(1u, &cmd) == 0 && m11_aw_build_read_req(&rd) == 0);
+    CHECK(m11_aw_build_read_cmd(2u, &cmd) == -EINVAL);
+    CHECK(m11_aw_build_read_cmd(1u, &cmd) == 0);
+    static const uint32_t want_cmd[14] = { 0, 0, 0, 40,
+        0x42D3u, 0x10013D2Au, 24, 0, 1, 0x10013D1Cu, 1, 0, 0, 0 };
+    static const uint32_t want_rd[10] = { 0, 0, 0, 24, 0x42D3u, 0x10013D2Au, 8, 0, 0, 0 };
+    CHECK(!memcmp(&cmd, want_cmd, sizeof(want_cmd)) && !memcmp(&rd, want_rd, sizeof(want_rd)));
+}
+
 static void p3_build_failure_on_ch1_after_ch0_done(void) {
     p3_setup();
     m11_aw_safety_context_t ctx = p3_ctx();
@@ -1256,7 +1310,7 @@ static void p3_build_failure_on_ch1_after_ch0_done(void) {
     CHECK(rep.ch[1].stage == M11_AW_STAGE_FAILED && rep.ch[1].failed_op == M11_AW_OP_BUILD);
     CHECK(rep.ch[1].failed_after == M11_AW_STAGE_NOT_SENT && !rep.ch[1].dsp_state_may_have_changed);
     CHECK(!rep.pair_re_readback_verified);
-    CHECK(FX.mock.tx_pkt_count == 2u);
+    CHECK(FX.mock.tx_pkt_count == 3u);
     p3_invariants(&rep);
     fx_close();
 }
@@ -2117,6 +2171,9 @@ int main(void) {
     RUN(p3_ch1_set_ack_lost_state_may_have_changed);
     RUN(p3_ch1_readback_mismatch_reports_the_value_the_dsp_holds);
     RUN(p3_ch1_get_cfg_unanswered);
+    RUN(p3_ch0_read_cmd_refused);
+    RUN(p3_run28_write_envelope_get_is_refused);
+    RUN(p3_read_requests_match_stock);
     RUN(p3_build_failure_on_ch1_after_ch0_done);
     RUN(p3_preconditions_send_nothing);
     RUN(p3_caller_asserted_context_is_not_evidence);

@@ -175,6 +175,7 @@ static void peer(int ep, peer_cfg c) {
     alarm(20);
     unsigned seen_fail = 0, maps = 0, unmaps = 0;
     uint32_t q12[2] = {0, 0};
+    int read_ch = -1; /* the channel the last stock read command selected */
     for (;;) {
         uint8_t rx[M11_GPR_MAX_PKT_BYTES];
         ssize_t n = recv(ep, rx, sizeof rx, 0);
@@ -193,18 +194,20 @@ static void peer(int ep, peer_cfg c) {
             m11_apm_rsp_shared_mem_map_t r = {.mem_map_handle = 0xA0000001u + maps++};
             reply(ep, &h, M11_APM_CMDRSP_SHARED_MEM_MAP_REGIONS, &r, sizeof r);
         } else if (h.opcode == M11_APM_CMD_GET_CFG) {
-            uint32_t ch = 0, want = 0;
-            if (m11_aw_validate_cfg_req_pkt(rx, (size_t)n, M11_APM_CMD_GET_CFG, &ch, &want) < 0 || ch > 1) _exit(105);
+            /* the stock read only (libawcal aw_audioreach_read_msg_from_dsp): a read command came first */
+            m11_aw_msg_kind_t kind = 0;
+            if (m11_aw_classify_cfg_pkt(rx, (size_t)n, &kind, NULL, NULL) < 0 || kind != M11_AW_MSG_READ || read_ch < 0)
+                _exit(105);
             uint8_t out[160]; size_t ol = 0;
-            /* the packer takes milliohms: the ceiling maps back to exactly the q12 that was set */
-            int32_t mohm = (int32_t)(((uint64_t)q12[ch] * 1000u + 4095u) / 4096u);
-            if (c.bad_re) mohm += 500;
-            if (m11_aw_pack_get_cfg_rsp_pkt(out, sizeof out, &ol, h.src_port, h.token, 0u, ch, mohm) < 0) _exit(106);
+            uint32_t v = q12[read_ch] + (c.bad_re ? 2048u : 0u);
+            read_ch = -1;
+            if (m11_aw_pack_read_rsp_pkt(out, sizeof out, &ol, h.src_port, h.token, 0u, 0u, 4u, v) < 0) _exit(106);
             (void)send(ep, out, ol, 0);
         } else if (h.opcode == M11_APM_CMD_SET_CFG && h.dst_port == 0x42D3u) {
+            m11_aw_msg_kind_t kind = 0;
             uint32_t ch = 0, v = 0;
-            if (m11_aw_validate_cfg_req_pkt(rx, (size_t)n, M11_APM_CMD_SET_CFG, &ch, &v) < 0 || ch > 1) _exit(107);
-            q12[ch] = v;
+            if (m11_aw_classify_cfg_pkt(rx, (size_t)n, &kind, &ch, &v) < 0 || kind == M11_AW_MSG_READ || ch > 1) _exit(107);
+            if (kind == M11_AW_MSG_WRITE) q12[ch] = v; else read_ch = (int)ch;
             m11_gpr_ibasic_rsp_t r = {.cmd_opcode = h.opcode, .status = 0};
             reply(ep, &h, M11_GPR_IBASIC_RSP_RESULT, &r, sizeof r);
         } else if (h.opcode == M11_DATA_CMD_WR_SH_MEM_EP_DATA_BUFFER_V2) {
@@ -255,12 +258,18 @@ static int map_cb(void *u, size_t bytes, unsigned *slot) { struct rig *r = u; re
 static unsigned nrec, nsettle;
 static char cfg_records[16][160];
 static unsigned ncfg_records;
+static char re_records[8][192];
+static unsigned nre_records;
 static FILE *rec_out; /* M11_SPK_RECORDS: the happy path's records as speaker_entry_main writes them (P5 check cross-check) */
 static void record_cb(void *u, const char *line) {
     (void)u; nrec++;
     if (strstr(line, "phase=spk cfg_rsp ") == line) {
         assert(ncfg_records < 16);
         snprintf(cfg_records[ncfg_records++], sizeof cfg_records[0], "%s", line);
+    }
+    if (strstr(line, "phase=spk re_rsp ") == line) {
+        assert(nre_records < 8);
+        snprintf(re_records[nre_records++], sizeof re_records[0], "%s", line);
     }
     if (rec_out) fprintf(rec_out, "<6>M11SPK v=1 boot=7 %s\n", line);
 }
@@ -273,7 +282,7 @@ static int read_remote_errno(void *u, int fd, uint8_t *b, size_t cap, uint32_t m
 static void start(struct rig *r, peer_cfg c) {
     memset(r, 0, sizeof *r);
     nev = 0; nrec = 0; nsettle = 0; ignore_enable = 0; foreign_enable_at_rx_hw = 0; a_dir = 0; a_next = 0;
-    ncfg_records = 0;
+    ncfg_records = 0; nre_records = 0;
     memset(nodes, 0, sizeof nodes); memset(afd, 0, sizeof afd); memset(elem_value, 0, sizeof elem_value);
     elem_value[2] = elem_value[3] = 1; /* profiles start at Voice: the plan sets Music */
     if (fx_heap < 0) fx_heap = open("/dev/null", O_RDONLY | O_CLOEXEC);
@@ -406,6 +415,12 @@ int main(void) {
     assert(rep.bytes_played == 96000 && rep.buffers_sent == 13 && rep.buffers_done == 13 && rep.rd_queued == 2);
     assert(rep.re.pair_re_readback_verified && rep.regions_mapped == 2);
     assert(ncfg_records == 9);
+    /* Re per channel: the write, the stock read command, the read; the read returns the value written */
+    assert(nre_records == 6);
+    assert(strstr(re_records[0], "op=01001006 req=28/0/10013d1b valid=1 status=00000000 rc=0 len=0"));
+    assert(strstr(re_records[1], "op=01001006 req=24/1/10013d1b valid=1 status=00000000 rc=0 len=0"));
+    assert(strstr(re_records[2], "op=01001007 req=8/0/00000000 valid=1 status=00000000 rc=0 len=28 rsp=4/00000000/26099"));
+    assert(strstr(re_records[4], "req=24/1/10013d1c") && strstr(re_records[5], "rsp=4/00000000/28684"));
     for (unsigned i = 0; i < ncfg_records; ++i)
         assert(strstr(cfg_records[i], "valid=1 status=00000000 rc=0"));
     assert(nsettle >= 50); /* the caller's settle after every custodian call and wait */
@@ -422,7 +437,8 @@ int main(void) {
     assert(count(op(M11_APM_CMD_GRAPH_CLOSE, 1)) == 2 && count(op(M11_APM_CMD_GRAPH_START, 1)) == 2);
     /* calibrations to APM; single-parameter configs to their module (stock rule); Re SET and GET to 0x42D3 */
     assert(count(op(M11_APM_CMD_SET_CFG, 1)) == 2 && count(op(M11_APM_CMD_SET_CFG, 0x428F)) == 3 + 6);
-    assert(count(op(M11_APM_CMD_SET_CFG, 0x42D3)) == 2 && count(op(M11_APM_CMD_GET_CFG, 0x42D3)) == 2);
+    /* per channel the write and the read command (SET_CFG), then the read (GET_CFG) */
+    assert(count(op(M11_APM_CMD_SET_CFG, 0x42D3)) == 4 && count(op(M11_APM_CMD_GET_CFG, 0x42D3)) == 2);
     for (unsigned i = 0; i < M11_CUSTODIAN_REGIONS; i++) {
         if (r.cust.occupied[i]) assert(r.cust.regions[i].state == M11_SHMEM_STATE_DSP_MAP_ACKNOWLEDGED && r.cust.regions[i].map_tx_started);
         assert(r.cust.region_graph_refs[i] == 0);
@@ -517,6 +533,14 @@ int main(void) {
     rc = run_session(&r, &rep, 5000);
     assert(rc == -ETIMEDOUT && rep.fail_step == M11_SPK_VI_CFG && !rep.amp_touched);
     assert(ncfg_records == 1 && strstr(cfg_records[0], "valid=0 status=00000000 rc=-110"));
+    assert(stop(&r) == 0);
+    /* the Re read command refused (SET_CFG 13: VI cal, 3 VI, RX cal, 6 RX, the ch0 write, then the read command):
+     * rx_re fails with the DSP status on record, no GET_CFG follows, no amplifier write */
+    start(&r, (peer_cfg){.fail_op=M11_APM_CMD_SET_CFG, .fail_nth=13, .fail_status=0x12});
+    rc = run_session(&r, &rep, 5000);
+    assert(rc == -EREMOTEIO && rep.fail_step == M11_SPK_RX_RE && !rep.amp_touched && at("sw0=Enable") < 0);
+    assert(nre_records == 2 && strstr(re_records[1], "op=01001006 req=24/1/10013d1b valid=1 status=00000012 rc=-121 len=0"));
+    assert(count(op(M11_APM_CMD_GET_CFG, 0x42D3)) == 0);
     assert(stop(&r) == 0);
     puts("PASS Run28 CFG evidence: matched zero/full-width NACK status and missing-response timeout distinguished; no amp on error");
     start(&r, (peer_cfg){0});

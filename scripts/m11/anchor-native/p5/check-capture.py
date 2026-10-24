@@ -198,6 +198,8 @@ SPK_RULES = {
     'step': re.compile(r'step=' + NAT + r' ([a-z_]+) rc=' + INT),
     'cfg': re.compile(r'cfg=(vi|rx) index=' + NAT + r' rc=' + INT),
     'cfg_rsp': re.compile(r'cfg_rsp dst=([0-9a-f]{8}) param=([0-9a-f]{8}) valid=([01]) status=([0-9a-f]{8}) rc=' + INT),
+    're_rsp': re.compile(r're_rsp op=(01001006|01001007) req=' + NAT + '/' + NAT + r'/([0-9a-f]{8}) valid=([01]) '
+                         r'status=([0-9a-f]{8}) rc=' + INT + r' len=' + NAT + r' rsp=' + NAT + r'/([0-9a-f]{8})/' + NAT),
     're': re.compile(r're ch0=' + NAT + '/' + NAT + '/' + NAT + r' ch1=' + NAT + '/' + NAT + '/' + NAT),
     'teardown': re.compile(r'teardown=(amp_off|rx_stop|rx_be_close|vi_stop|vi_be_close|rx_close|vi_close) '
                            r'(?:rc=' + INT + r'(?: ms=' + NAT + r')?|graph=unknown)'),
@@ -341,6 +343,17 @@ def speaker(spk, d):
                     (valid and status == 0 and rc != 0) or (not valid and rc == 0)):
                 return 'spk-cfg-response-invalid', False
             s.setdefault('cfg_responses', []).append(dict(dst=dst, param=param, valid=valid, status=status, rc=rc))
+        elif w == 're_rsp':
+            if phase != 'steps' or fail is not None or re_rec is not None:
+                return 'spk-record-order', False
+            op, size, mtype, msg, valid, status, rc, n, rsize, err, val = r['groups']
+            valid, status, rc = int(valid), int(status, 16), int(rc)
+            if ((not valid and status != 0) or (valid and status != 0 and rc != -121) or
+                    (valid and status == 0 and rc != 0) or (not valid and rc == 0)):
+                return 'spk-re-response-invalid', False
+            s.setdefault('re_responses', []).append(dict(op=op, size=int(size), type=int(mtype), msg=msg, valid=valid,
+                                                         status=status, rc=rc, len=int(n), rsp_size=int(rsize),
+                                                         err=int(err, 16), value=int(val)))
         elif w == 'cfg':
             if phase != 'steps':
                 return 'spk-record-order', False
@@ -358,6 +371,11 @@ def speaker(spk, d):
     if cfg_failed and (len(cfg_failed) != 1 or fail is None or fail[1] not in ('vi_cfg', 'rx_cfg') or
                        fail[2] != cfg_failed[0]['rc'] or s['cfg_responses'][-1] is not cfg_failed[0]):
         return 'spk-cfg-failure-unaccounted', False
+    re_rsp = s.get('re_responses', [])
+    re_failed = [r for r in re_rsp if r['rc'] != 0]
+    if re_failed and (len(re_failed) != 1 or re_rsp[-1] is not re_failed[0] or fail is None or fail[1] != 'rx_re' or
+                      fail[2] != re_failed[0]['rc']):
+        return 'spk-re-failure-unaccounted', False
     rc, step, sent, done, nbytes, eos, amp_off, td_rc, pdr = end
     session_rc, census = int(rest[-1]['groups'][0]), int(rest[-1]['groups'][1])
     s.update(steps_ok=len(steps), fail=fail and dict(step=fail[0], name=fail[1], rc=fail[2]), teardown=[t[0] for t in teardown],
@@ -383,6 +401,13 @@ def speaker(spk, d):
         return 'spk-steps-incomplete', False
     if (re_rec is None or re_rec[0] != READBACK_VERIFIED or re_rec[3] != READBACK_VERIFIED or re_rec[1] != re_rec[2] or
             re_rec[4] != re_rec[5]):
+        return 'spk-re-not-verified', False
+    # per channel the stock write, read command and read (libawcal aw_audioreach_read_msg_from_dsp), each answered
+    shape = [(r['op'], r['size'], r['type']) for r in re_rsp]
+    if (shape != [('01001006', 28, 0), ('01001006', 24, 1), ('01001007', 8, 0)] * 2 or
+            [r['msg'] for r in re_rsp] != ['10013d1b', '10013d1b', '00000000', '10013d1c', '10013d1c', '00000000'] or
+            any(r['rc'] or r['status'] or not r['valid'] for r in re_rsp) or
+            [r['value'] for r in re_rsp[2::3]] != [re_rec[2], re_rec[5]]):
         return 'spk-re-not-verified', False
     if (names != list(TEARDOWN_ORDER) or any(t[1] != '0' or t[2] for t in teardown) or rc or step or td_rc or pdr or eos or
             not amp_off or sent != done or nbytes != s['plan']['pcm']):

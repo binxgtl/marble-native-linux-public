@@ -100,7 +100,18 @@ def intent(seq, op, tail):
     return f'<6>M11INTENT v=1 boot=4242 seq={seq} op={op} tok={seq:08x} cd=0 dst=00000001 {tail}'
 
 
-def spk_lines(fail=None, re_read=None, amp_off_rc=0, teardown=None, end_bytes=PCM):
+def re_rsp(op, req, rc=0, status=0, valid=1, n=0, rsp='0/00000000/0'):
+    return S + f're_rsp op={op} req={req} valid={valid} status={status:08x} rc={rc} len={n} rsp={rsp}'
+
+
+def re_ok(ch, value):
+    """The stock write, read command and read of one channel (libawcal aw_audioreach_read_msg_from_dsp)."""
+    msg = f'{0x10013D1B + ch:08x}'
+    return [re_rsp('01001006', f'28/0/{msg}'), re_rsp('01001006', f'24/1/{msg}'),
+            re_rsp('01001007', '8/0/00000000', n=28, rsp=f'4/00000000/{value}')]
+
+
+def spk_lines(fail=None, re_read=None, amp_off_rc=0, teardown=None, end_bytes=PCM, re_records=None):
     """The session's records: steps 1..23 (or up to a failing step), Re after rx_cfg, teardown, end, session."""
     out = [S + f'plan sha=ec7b1fc40b91d01f bytes=984360 pcm={PCM} level=8']
     q = (26100, 28684)
@@ -109,6 +120,7 @@ def spk_lines(fail=None, re_read=None, amp_off_rc=0, teardown=None, end_bytes=PC
         name = C.SPK_STEPS[n - 1]
         if name == 'rx_re':
             r = re_read or q
+            out += re_ok(0, r[0]) + re_ok(1, r[1]) if re_records is None else re_records
             out.append(S + f're ch0=3/{q[0]}/{r[0]} ch1=3/{q[1]}/{r[1]}')
         out.append(S + f'step={n} {name} rc=0')
     if fail:
@@ -173,6 +185,25 @@ def test_checker():
     lines = spk_lines()
     lines.insert(1, S + 'cfg_rsp dst=00004545 param=08001008 valid=1 status=00000001 rc=-121')
     assert verdict(boot(lines))[0] == 'spk-cfg-failure-unaccounted'
+    # Re: the read command refused (or Run28's GET_CFG of the write envelope) is accounted to rx_re
+    refused = spk_lines(fail=(16, -121))
+    at = next(i for i, ln in enumerate(refused) if 'step=16 rx_re' in ln)
+    refused[at:at] = [re_rsp('01001006', '28/0/10013d1b'),
+                      re_rsp('01001006', '24/1/10013d1b', rc=-121, status=0x12)]
+    v, r = verdict(boot(refused))
+    assert v == 'speaker-failed:rx_re:amp-never-enabled', v
+    assert r['p5']['speaker']['re_responses'][1] == dict(op='01001006', size=24, type=1, msg='10013d1b', valid=1,
+                                                         status=0x12, rc=-121, len=0, rsp_size=0, err=0, value=0)
+    run28 = spk_lines(fail=(16, -121))
+    run28[at:at] = [re_rsp('01001006', '28/0/10013d1b'), re_rsp('01001007', '28/0/10013d1b', rc=-121, status=0x12)]
+    assert verdict(boot(run28))[0] == 'speaker-failed:rx_re:amp-never-enabled'
+    unaccounted = spk_lines(re_records=re_ok(0, 26100)[:2] + [re_rsp('01001007', '8/0/00000000', rc=-121, status=1)] +
+                            re_ok(1, 28684))
+    assert verdict(boot(unaccounted))[0] == 'spk-re-failure-unaccounted'
+    no_cmd = spk_lines(re_records=[x for i, x in enumerate(re_ok(0, 26100) + re_ok(1, 28684)) if i % 3 != 1])
+    assert verdict(boot(no_cmd))[0] == 'spk-re-not-verified'
+    print('PASS Re response provenance: a refused read command and Run28 GET_CFG fail at rx_re; an unaccounted '
+          'failure and a read without its command are rejected')
     cases = [
         ('Re read-back failed (amplifier never enabled)', boot(spk_lines(fail=(16, -74))), 'speaker-failed:rx_re:amp-never-enabled'),
         ('RX START refused', boot(spk_lines(fail=(18, -121))), 'speaker-failed:rx_start:amp-never-enabled'),

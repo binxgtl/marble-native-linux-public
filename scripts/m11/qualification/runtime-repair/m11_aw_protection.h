@@ -96,10 +96,68 @@ typedef struct __attribute__((packed)) {
     m11_aw_re_envelope_48_t env;
 } m11_apm_rsp_aw_re_get_cfg_t;
 
+/*
+ * The 48-byte envelope above is the Awinic DSP message of type DATA (0): a write. A GET_CFG of it
+ * (m11_aw_pack_get_cfg_pkt, m11_apm_rsp_aw_re_get_cfg_t) is not a stock read; Run28 sent one and
+ * the read-back failed rc=-121 (a DSP status). Those helpers stay only for the packet fixtures.
+ *
+ * Stock read of an Awinic DSP message (libawcal.so aw_audioreach_read_msg_from_dsp 0x1087a4 and
+ * aw_audioreach_set_dsp_info 0x1080a4, PROVEN):
+ *   1. SET_CFG {iid, 0x10013D2A, 24, 0, {type 1 (command), msg_id, version 1, 0, 0, 0}}
+ *   2. GET_CFG {iid, 0x10013D2A, 8, 0, 8 zero bytes}: the read size 4, (4 + 0x17) & ~7, less the
+ *      16-byte parameter header;
+ *   the value is the first 4 data bytes of the returned parameter.
+ * The Re message IDs are the write's: aw882xx_dlkm.ko aw882xx_dsp_read_cali_re and write_cali_re
+ * index one table (0x10a9b8: 0x10013D1B, 0x10013D1C) and read 4 bytes (PROVEN). That this ADSP
+ * answers a read of them is INFERRED (the stock kernel transport is compiled out; PAL only writes).
+ */
+#define M11_AW_MSG_TYPE_DATA             0u
+#define M11_AW_MSG_TYPE_CMD              1u
+#define M11_AW_MSG_VERSION               1u
+#define M11_AW_READ_PARAM_SIZE           8u
+
+typedef struct __attribute__((packed)) {
+    uint32_t module_instance_id; /* 0x000042D3 */
+    uint32_t param_id;           /* 0x10013D2A */
+    uint32_t param_size;         /* 24 */
+    uint32_t error_code;         /* 0 */
+    uint32_t msg_type;           /* 1: command */
+    uint32_t msg_id;             /* 0x10013D1B + ch */
+    uint32_t version;            /* 1 */
+    uint32_t reserved[3];        /* 0 */
+} m11_aw_read_cmd_envelope_40_t;
+
+typedef struct __attribute__((packed)) {
+    m11_apm_cmd_header_t          cmd_hdr;
+    m11_aw_read_cmd_envelope_40_t env;
+} m11_apm_aw_read_cmd_pkt_t;
+
+typedef struct __attribute__((packed)) {
+    uint32_t module_instance_id; /* 0x000042D3 */
+    uint32_t param_id;           /* 0x10013D2A */
+    uint32_t param_size;         /* request 8; response 4..8 */
+    uint32_t error_code;         /* 0 */
+    uint32_t data[2];            /* request 0; response data[0] = q12 Re */
+} m11_aw_read_envelope_24_t;
+
+typedef struct __attribute__((packed)) {
+    m11_apm_cmd_header_t      cmd_hdr;
+    m11_aw_read_envelope_24_t env;
+} m11_apm_aw_read_pkt_t;
+
+/* APM_CMD_RSP_GET_CFG to the read: status, then the parameter in the request's 24 bytes */
+typedef struct __attribute__((packed)) {
+    uint32_t                  status;
+    m11_aw_read_envelope_24_t env;
+} m11_apm_rsp_aw_read_t;
+
 #if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
 _Static_assert(sizeof(m11_aw_re_envelope_48_t) == 48u, "m11_aw_re_envelope_48_t must be 48 bytes");
 _Static_assert(sizeof(m11_apm_aw_re_cfg_pkt_t) == 64u, "m11_apm_aw_re_cfg_pkt_t must be 64 bytes");
 _Static_assert(sizeof(m11_apm_rsp_aw_re_get_cfg_t) == 52u, "m11_apm_rsp_aw_re_get_cfg_t must be 52 bytes");
+_Static_assert(sizeof(m11_apm_aw_read_cmd_pkt_t) == 56u, "m11_apm_aw_read_cmd_pkt_t must be 56 bytes");
+_Static_assert(sizeof(m11_apm_aw_read_pkt_t) == 40u, "m11_apm_aw_read_pkt_t must be 40 bytes");
+_Static_assert(sizeof(m11_apm_rsp_aw_read_t) == 28u, "m11_apm_rsp_aw_read_t must be 28 bytes");
 #endif
 
 typedef struct {
@@ -146,6 +204,28 @@ int m11_aw_validate_get_cfg_rsp_pkt(const uint8_t *pkt, size_t pkt_len,
 
 int m11_aw_validate_safety_context(const m11_aw_safety_context_t *ctx);
 
+/* The stock read's two requests for channel 0/1 (see m11_aw_read_cmd_envelope_40_t). */
+int m11_aw_build_read_cmd(uint32_t channel, m11_apm_aw_read_cmd_pkt_t *out);
+int m11_aw_build_read_req(m11_apm_aw_read_pkt_t *out);
+
+/*
+ * For stand-in ADSPs: classifies an in-band SET_CFG/GET_CFG GPR packet to 0x42D3 carrying
+ * 0x10013D2A as a write (48-byte DATA message: *out_channel, *out_q12_re), a read command
+ * (40-byte, type 1: *out_channel) or a read (24-byte GET_CFG). Anything else is refused.
+ */
+typedef enum {
+    M11_AW_MSG_WRITE = 1,
+    M11_AW_MSG_READ_CMD,
+    M11_AW_MSG_READ,
+} m11_aw_msg_kind_t;
+int m11_aw_classify_cfg_pkt(const uint8_t *pkt, size_t pkt_len, m11_aw_msg_kind_t *out_kind,
+                            uint32_t *out_channel, uint32_t *out_q12_re);
+
+/* An APM_CMD_RSP_GET_CFG to the read from src_port 0x42D3 (stand-in ADSPs and fixtures). */
+int m11_aw_pack_read_rsp_pkt(uint8_t *out_buf, size_t out_cap, size_t *out_len,
+                             uint32_t dst_port, uint32_t token, uint32_t status,
+                             uint32_t error_code, uint32_t param_size, uint32_t q12_re);
+
 /*
  * Per-channel outcome of the RE (voice-coil resistance) SET_CFG + GET_CFG readback (P3).
  *
@@ -167,6 +247,7 @@ typedef enum {
     M11_AW_OP_SET_CFG,
     M11_AW_OP_GET_CFG,               /* GET_CFG transaction itself failed (timeout, NACK, ...) */
     M11_AW_OP_VERIFY,                /* GET_CFG answered but the response did not verify */
+    M11_AW_OP_READ_CMD,              /* the read command SET_CFG failed */
 } m11_aw_failed_op_t;
 
 typedef struct {
@@ -183,6 +264,9 @@ typedef struct {
     /* The value the DSP reported, set only for a structurally valid GET_CFG response. */
     bool                   readback_valid;
     uint32_t               readback_q12;
+    /* The read's GET_CFG response as received (rsp_len 0 when none came back with data). */
+    size_t                 rsp_len;
+    m11_apm_rsp_aw_read_t  rsp;
 } m11_aw_channel_report_t;
 
 typedef struct {
@@ -216,7 +300,8 @@ int m11_aw_apply_and_verify_re_dsp_ex(m11_gpr_engine_t *gpr,
                                       m11_aw_apply_report_t *report);
 
 /*
- * One SET_CFG / GET_CFG round trip for the apply below: 0, -EREMOTEIO for a DSP status, or the
+ * One SET_CFG / GET_CFG round trip for the apply below (per channel: the write, the read command,
+ * the read): 0, -EREMOTEIO for a DSP status, or the
  * transport error, as m11_gpr_engine_transact returns; *out_handed_to_write says whether the
  * packet reached write_fn (only then may the DSP have acted on it).
  */
