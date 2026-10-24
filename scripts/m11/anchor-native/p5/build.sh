@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# P5 (Run26 speaker candidate) on-device binaries (docs/m11-argon-speaker-run-design.md, W6), built only in
+# P5 (Run27 speaker candidate) on-device binaries (docs/m11-argon-speaker-run-design.md, W6), built only in
 # CI (no local compiler installation), on the P4 build pattern (p4/build.sh):
 #   build.sh pid1 <out>    the speaker PID1 (speaker_entry_main: the plan check, the P4 environment phase,
 #                          then the P3 entry with the rotating journal, P2's pre-seal ALSA hook and the
 #                          speaker session) static ARM64 with native gcc on ubuntu-24.04-arm; built twice
 #                          and compared byte for byte; static (no INTERP, no DYNAMIC); must refuse to act
 #                          outside PID1 (rc 2).
-#   build.sh relay <out>   the M11R26 relay, freestanding ARM64 with the pinned clang-r416183b (x64 host);
+#   build.sh relay <out>   the M11R27 relay, freestanding ARM64 with the pinned clang-r416183b (x64 host);
 #                          built twice and compared.
 set -euo pipefail
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../../.." && pwd)

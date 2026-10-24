@@ -196,7 +196,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - name: Freestanding M11R26 relay with the pinned clang-r416183b, A/B identical
+      - name: Freestanding M11R27 relay with the pinned clang-r416183b, A/B identical
         run: bash scripts/m11/anchor-native/p5/build.sh relay artifacts/m11/p5-build
       - uses: actions/upload-artifact@v4
         with:
@@ -216,7 +216,7 @@ jobs:
         with:
           name: p5-relay-${{ github.sha }}
           path: artifacts/m11/p5-build
-      - name: Exact M11R26 relay ELF over a private PTY, decoded by the P5 host check
+      - name: Exact M11R27 relay ELF over a private PTY, decoded by the P5 host check
         run: |
           cd artifacts/m11/p5-build && sha256sum -c SHA256SUMS-relay && cd -
           chmod 0755 artifacts/m11/p5-build/m11-kmsg-relay
@@ -225,7 +225,7 @@ jobs:
         with:
           name: p5-relay-elf-${{ github.sha }}
           path: artifacts/m11/p5-elf
-  # The P5 host side on Windows (the receiver over a synthetic P5 capture, the M11R26 observer identity, the
+  # The P5 host side on Windows (the receiver over a synthetic P5 capture, the M11R27 observer identity, the
   # launcher's PlanOnly branch, the post-run listing). No phone tool, no COM port opened.
   p5-windows-host:
     needs: suites

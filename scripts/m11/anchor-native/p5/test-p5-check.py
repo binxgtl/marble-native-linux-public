@@ -71,7 +71,7 @@ def kmsg(lines):
     return out
 
 
-def capture(bodies, run=b'M11R26', ev=None):
+def capture(bodies, run=b'M11R27', ev=None):
     ev = journal() if ev is None else ev
     pieces = [frame('S', 0, b'run=' + run + b' nonce=0123456789abcdef0123456789abcdef\n')]
     for b in bodies:
@@ -143,7 +143,7 @@ def boot(spk=None, maps=2, extra_intents=(), session=None, terminal=None, seal=T
     return lines
 
 
-def verdict(lines, run=b'M11R26'):
+def verdict(lines, run=b'M11R27'):
     _, r = C.check(capture(kmsg(lines), run=run), JN, JI, ('1', 'absent', 'absent'))
     return r['p5_verdict'], r
 
@@ -186,7 +186,8 @@ def test_checker():
     _, r = C.check(capture(bodies), JN, JI, None)
     assert r['p5_verdict'] == 'record-not-from-pid1', r['p5_verdict']
     assert verdict(boot(), run=b'M11R25')[0] == 'transport-invalid'
-    print(f'PASS P5 check: {len(cases) + 2} other shapes classified by category (failed steps with the amplifier state, '
+    assert verdict(boot(), run=b'M11R26')[0] == 'transport-invalid'
+    print(f'PASS P5 check: {len(cases) + 3} other shapes classified by category (failed steps with the amplifier state, '
           'UNSAFE amplifier, Re, PCM, UNMAP, MAP count, seal, plan, environment, grammar, order, caller, run id)')
 
 

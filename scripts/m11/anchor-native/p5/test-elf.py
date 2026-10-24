@@ -1,4 +1,4 @@
-"""P5: execute the CI-built M11R26 relay ELF in an isolated synthetic root with its own PTY
+"""P5: execute the CI-built M11R27 relay ELF in an isolated synthetic root with its own PTY
 (p4/test-elf.py, the Run23 ELF test, decoded by the P5 host check).
 
 Root required for chroot/temporary bind of the test's private PTY. No phone,
@@ -47,10 +47,10 @@ with tempfile.TemporaryDirectory(prefix='m11-relay-pty-') as d:
         assert proc.poll()==0,(proc.poll(),bytes(data),proc.stderr.read() if proc.poll() is not None else 'timeout')
         while select.select([master],[],[],0)[0]:data.extend(os.read(master,65536))
         streams,kbodies,r=checker.decode(bytes(data),JN,JI);assert r['event_stream_complete'] and bytes(streams['E'])==event,r
-        assert r['run']=='M11R26' and kbodies==[b'6,42,123,-;synthetic PTY only\n'],(r,kbodies)
+        assert r['run']=='M11R27' and kbodies==[b'6,42,123,-;synthetic PTY only\n'],(r,kbodies)
         assert requested and (root/'run/m11-instrumentation/logger.done').read_bytes()==b'1\n'
         a.out.parent.mkdir(parents=True,exist_ok=True);a.out.write_bytes(data)
-        print('PASS P5 M11R26 relay: actual pinned ARM64 ELF getrandom/termios/tty/stop/seal/done -> independent SHA256 + runner journal inspection; private PTY only')
+        print('PASS P5 M11R27 relay: actual pinned ARM64 ELF getrandom/termios/tty/stop/seal/done -> independent SHA256 + runner journal inspection; private PTY only')
     finally:
         if proc is not None and proc.poll() is None:proc.kill();proc.wait()
         os.close(master);os.close(slave)

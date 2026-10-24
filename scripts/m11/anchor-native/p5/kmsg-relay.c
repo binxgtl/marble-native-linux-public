@@ -1,5 +1,5 @@
-/* M11 P5 (Run26 speaker candidate) v2 sender-sealed relay: the P4 relay (Run23's, docs/m11-argon-p4-assembly.md)
- * with its START run id M11R26; isolated from frozen Run12/19/23 and the consumed P4 run.
+/* M11 P5 (Run27 speaker candidate) v2 sender-sealed relay: the P4 relay (Run23's, docs/m11-argon-p4-assembly.md)
+ * with its START run id M11R27; isolated from frozen Run12/19/23 and the consumed P4 run.
  * Public ARM64 RAM-only kmsg -> USB ACM relay. No partition I/O, no input.
  * One bounded queue retains early records until connector-driven USB exists.
  * Reads/writes are nonblocking; congestion drops NEW kernel records, never blocks
@@ -110,7 +110,7 @@ static int start_frame(void)
   if(rc<=0 || (ulong)rc>sizeof(nonce)-at)return 0;
   at+=(ulong)rc;
  }
- char b[64];ulong n=literal(b,0,"run=M11R26 nonce=");const char hex[]="0123456789abcdef";
+ char b[64];ulong n=literal(b,0,"run=M11R27 nonce=");const char hex[]="0123456789abcdef";
  for(unsigned i=0;i<16;i++){nonzero|=nonce[i];b[n++]=hex[nonce[i]>>4];b[n++]=hex[nonce[i]&15];}
  if(!nonzero)return 0;
  b[n++]='\n';
