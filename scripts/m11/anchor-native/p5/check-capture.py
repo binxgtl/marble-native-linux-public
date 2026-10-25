@@ -7,10 +7,11 @@ Two layers, both fail closed, no healing or resynchronization:
      record parsed by its exact grammar, written by PID1 (caller=T1, facility user, the writer's level), then
      classified. The expected outcome is "speaker-played-retaining":
        env steps 1,2,4,5,6,7,8 rc=0 in order, then one entry boot with journal kmsg=1, cmdline allowed=1,
-       pd_up rc=0, boot rc=0, runner; the speaker records: the plan, steps 1..23 each rc=0 in order (plan,
-       amp_off, map, VI back end and graph, RX back end and graph, Re, gate, amp_on, RX prepare, play, EOS), Re
+       pd_up rc=0, boot rc=0, runner; the speaker records: the plan, steps 1..22 each rc=0 in order (plan,
+       amp_off, map, VI back end and graph, RX back end and graph, Re, gate, amp_on, RX prepare, play: every
+       buffer done with status 0; no EOS, as stock PCM playback), Re
        read back equal on both channels, the teardown amp_off rc=0 FIRST, then rx_stop, rx_be_close, vi_stop,
-       vi_be_close, rx_close, vi_close all rc=0, the end record clean (every buffer done, all PCM bytes, EOS 0,
+       vi_be_close, rx_close, vi_close all rc=0, the end record clean (every buffer done, all PCM bytes,
        amp_off=1, no PDR) and the session record rc=0 census=0; the entry session present=1 rc=0 intents=2;
        exactly two MAP intents and no UNMAP or CLOSE_ALL; one M11TERMINAL RESET_RETAINING_ANCHORS
        end=pid1_exit note=mapped_boot holding both anchors, every anchor fd and the pool, map_attempted=1,
@@ -200,21 +201,17 @@ SPK_RULES = {
     'cfg_rsp': re.compile(r'cfg_rsp dst=([0-9a-f]{8}) param=([0-9a-f]{8}) valid=([01]) status=([0-9a-f]{8}) rc=' + INT),
     're_rsp': re.compile(r're_rsp op=(01001006|01001007) req=' + NAT + '/' + NAT + r'/([0-9a-f]{8}) valid=([01]) '
                          r'status=([0-9a-f]{8}) rc=' + INT + r' len=' + NAT + r' rsp=' + NAT + r'/([0-9a-f]{8})/' + NAT),
-    'eos_rsp': re.compile(r'eos_rsp tok=([0-9a-f]{8}) submit=' + INT + r' tx=' + NAT + r' wait=' + INT +
-                          r' dsp=([0-9a-f]{8}) ib=' + NAT + r'/([0-9a-f]{8}) ren=' + NAT + '/' + NAT +
-                          r'/([0-9a-f]{1,8})/([0-9a-f]{1,8})/' + NAT + r' ev=' + NAT + r'/([0-9a-f]{1,8})/' + NAT +
-                          r' drop=' + NAT + '/' + NAT),
     're': re.compile(r're ch0=' + NAT + '/' + NAT + '/' + NAT + r' ch1=' + NAT + '/' + NAT + '/' + NAT),
     'teardown': re.compile(r'teardown=(amp_off|rx_stop|rx_be_close|vi_stop|vi_be_close|rx_close|vi_close) '
                            r'(?:rc=' + INT + r'(?: ms=' + NAT + r')?|graph=unknown)'),
     'end': re.compile(r'end rc=' + INT + r' step=' + INT + r' sent=' + NAT + r' done=' + NAT + r' bytes=' + NAT +
-                      r' eos=' + INT + r' amp_off=([01]) teardown=' + INT + r' pdr=([01])'),
+                      r' amp_off=([01]) teardown=' + INT + r' pdr=([01])'),
     'session': re.compile(r'session rc=' + INT + r' census=' + INT + r' ctl_writes=' + NAT + r' readbacks=' + NAT),
 }
 # M11_SPK_* (speaker_session_native.h) and the name each step records
 SPK_STEPS = ('plan', 'amp_off', 'map', 'vi_be_open', 'vi_open', 'vi_cal', 'vi_cfg', 'vi_prepare', 'vi_start', 'vi_reads',
              'vi_be_prepare', 'rx_be_open', 'rx_open', 'rx_cal', 'rx_cfg', 'rx_re', 'rx_prepare', 'rx_start', 'gate',
-             'amp_on', 'rx_be_prepare', 'play', 'eos')
+             'amp_on', 'rx_be_prepare', 'play')
 GATE, AMP_ON = SPK_STEPS.index('gate') + 1, SPK_STEPS.index('amp_on') + 1
 TEARDOWN_ORDER = ('amp_off', 'rx_stop', 'rx_be_close', 'vi_stop', 'vi_be_close', 'rx_close', 'vi_close')
 READBACK_VERIFIED = 3  # M11_AW_STAGE_READBACK_VERIFIED
@@ -313,7 +310,7 @@ def stock_tokens(text):
 
 
 def speaker(spk, d):
-    """The session's own records: (verdict, played) where played means every step 1..23 rc=0 and a clean end."""
+    """The session's own records: (verdict, played) where played means every step 1..22 rc=0 and a clean end."""
     s = d['speaker'] = {}
     if not spk or spk[0]['what'] != 'plan':
         return 'spk-plan-record-missing', False
@@ -358,15 +355,6 @@ def speaker(spk, d):
             s.setdefault('re_responses', []).append(dict(op=op, size=int(size), type=int(mtype), msg=msg, valid=valid,
                                                          status=status, rc=rc, len=int(n), rsp_size=int(rsize),
                                                          err=int(err, 16), value=int(val)))
-        elif w == 'eos_rsp':
-            if phase != 'steps' or fail is not None or 'eos' in s or steps[-1:] != [SPK_STEPS.index('play') + 1]:
-                return 'spk-record-order', False
-            g = r['groups']
-            s['eos'] = dict(tok=g[0], submit=int(g[1]), tx=int(g[2]), wait=int(g[3]), dsp=int(g[4], 16),
-                            ibasic=int(g[5]), ibasic_status=int(g[6], 16), rendered=int(g[7]), rendered_len=int(g[8]),
-                            rendered_port=int(g[9], 16), module=int(g[10], 16), render_status=int(g[11]),
-                            events=int(g[12]), event_module=int(g[13], 16), event_status=int(g[14]),
-                            dropped_token=int(g[15]), dropped_malformed=int(g[16]))
         elif w == 'cfg':
             if phase != 'steps':
                 return 'spk-record-order', False
@@ -384,24 +372,15 @@ def speaker(spk, d):
     if cfg_failed and (len(cfg_failed) != 1 or fail is None or fail[1] not in ('vi_cfg', 'rx_cfg') or
                        fail[2] != cfg_failed[0]['rc'] or s['cfg_responses'][-1] is not cfg_failed[0]):
         return 'spk-cfg-failure-unaccounted', False
-    eos = s.get('eos')
-    eos_step = SPK_STEPS.index('eos') + 1
-    if (fail is not None and fail[0] == eos_step) or eos_step in steps:
-        # the EOS as received (Run29 failed here without it): its errno must follow from what the record shows
-        if eos is None:
-            return 'spk-eos-evidence-missing', False
-        want = eos['submit'] or eos['wait'] or (-121 if eos['dsp'] else 0)
-        if (fail[2] if fail is not None and fail[0] == eos_step else 0) != want:
-            return 'spk-eos-evidence-mismatch', False
     re_rsp = s.get('re_responses', [])
     re_failed = [r for r in re_rsp if r['rc'] != 0]
     if re_failed and (len(re_failed) != 1 or re_rsp[-1] is not re_failed[0] or fail is None or fail[1] != 'rx_re' or
                       fail[2] != re_failed[0]['rc']):
         return 'spk-re-failure-unaccounted', False
-    rc, step, sent, done, nbytes, eos_rc, amp_off, td_rc, pdr = end
+    rc, step, sent, done, nbytes, amp_off, td_rc, pdr = end
     session_rc, census = int(rest[-1]['groups'][0]), int(rest[-1]['groups'][1])
     s.update(steps_ok=len(steps), fail=fail and dict(step=fail[0], name=fail[1], rc=fail[2]), teardown=[t[0] for t in teardown],
-             end=dict(rc=rc, step=step, sent=sent, done=done, bytes=nbytes, eos=eos_rc, amp_off=amp_off, teardown=td_rc, pdr=pdr),
+             end=dict(rc=rc, step=step, sent=sent, done=done, bytes=nbytes, amp_off=amp_off, teardown=td_rc, pdr=pdr),
              session=dict(rc=session_rc, census=census),
              re=re_rec and dict(ch0=dict(stage=re_rec[0], written=re_rec[1], read=re_rec[2]),
                                 ch1=dict(stage=re_rec[3], written=re_rec[4], read=re_rec[5])))
@@ -433,11 +412,7 @@ def speaker(spk, d):
             any(r['len'] or r['rsp_size'] or r['err'] or r['value'] for i, r in enumerate(re_rsp) if i % 3 != 2) or
             [r['value'] for r in re_rsp[2::3]] != [re_rec[2], re_rec[5]]):
         return 'spk-re-not-verified', False
-    # played: the EOS completed on EOS_RENDERED with the request's token, render status 1 (stock: rendered)
-    if (eos['submit'] or eos['wait'] or eos['dsp'] or eos['rendered'] != 1 or eos['rendered_len'] != 8 or
-            eos['render_status'] != 1):
-        return 'spk-eos-not-rendered', False
-    if (names != list(TEARDOWN_ORDER) or any(t[1] != '0' or t[2] for t in teardown) or rc or step or td_rc or pdr or eos_rc or
+    if (names != list(TEARDOWN_ORDER) or any(t[1] != '0' or t[2] for t in teardown) or rc or step or td_rc or pdr or
             not amp_off or sent != done or nbytes != s['plan']['pcm']):
         return 'spk-end-not-clean', False
     if session_rc or census:

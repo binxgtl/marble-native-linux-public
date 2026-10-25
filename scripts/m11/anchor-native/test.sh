@@ -1001,19 +1001,19 @@ w5_mutant() { # name file pattern replacement assertion last-pass (same detectio
   echo "PASS W5 test detects mutant $name: Assertion \`$want'"
 }
 w5_spk_plan='PASS plan: generator format parsed (graphs, IDs, back ends, controls, Re, PCM); truncation, magic and section order refused'
-w5_spk_happy='PASS happy path: back ends before graphs, VI before RX, Re read back, gate, amplifier on, RX prepare, 13 buffers, EOS; amplifier off first, then stop, back-end close and close in order; regions held, no UNMAP'
+w5_spk_happy='PASS happy path: back ends before graphs, VI before RX, Re read back, gate, amplifier on, RX prepare, 13 buffers done, no EOS; amplifier off first, then stop, back-end close and close in order; regions held, no UNMAP'
 w5_spk_before='PASS before the gate: a refused RX START or a Re read-back that differs never writes Enable; started graphs stopped, back ends closed, graphs closed'
 # the amplifier switched on before the RX graph started: the gate's re-read catches it
 w5_mutant amp-before-start speaker_session_native.c 'done(s, M11_SPK_RX_PREPARE, "rx_prepare");' \
   '    done(s, M11_SPK_RX_PREPARE, "rx_prepare"); (void)set_switches(s, "Enable"); /* MUTANT */' \
-  'rc == 0 && rep.stage == M11_SPK_EOS && rep.amp_off_verified && !rep.teardown_rc' "$w5_spk_plan"
+  'rc == 0 && rep.stage == M11_SPK_PLAYED && rep.amp_off_verified && !rep.teardown_rc' "$w5_spk_plan"
 # a failed Re read-back does not stop the session
 w5_mutant re-unverified speaker_session_native.c 'if (rc || !r->re.pair_re_readback_verified) return fail(s, M11_SPK_RX_RE, "rx_re", rc ? rc : -EIO);' \
   '    (void)rc;' \
   'rc < 0 && rep.fail_step == M11_SPK_RX_RE && !rep.amp_touched && at("sw0=Enable") < 0' "$w5_spk_happy"
 # the teardown never drives the switches Disable
 w5_mutant amp-off-skipped speaker_session_native.c 'if (r->amp_touched) {' '    if (0) {' \
-  'rc == 0 && rep.stage == M11_SPK_EOS && rep.amp_off_verified && !rep.teardown_rc' "$w5_spk_plan"
+  'rc == 0 && rep.stage == M11_SPK_PLAYED && rep.amp_off_verified && !rep.teardown_rc' "$w5_spk_plan"
 # a single-parameter config sent to APM instead of its module (the stock routing rule)
 w5_mutant cfg-to-apm speaker_session_native.c 'const uint32_t dst = (((first[2] + 7u) & ~7u) + 16u == b->len) ? first[0] : M11_APM_MODULE_IID;' \
   '    const uint32_t dst = M11_APM_MODULE_IID; (void)first;' \
@@ -1030,7 +1030,7 @@ w5_mutant rx-be-left-open speaker_session_native.c 'rc = m11_snd_pcm_close(io->s
 # refuses the next session call
 w5_mutant bypass-custodian speaker_session_native.c 'int rc = m11_custodian_graph_cmd(s->io->cust, g, opcode, now(s));' \
   '    uint32_t st_ = 0; int rc = m11_apm_transact_graph_mgmt(eng(s), opcode, s->io->cust->graphs[g].sgs, s->io->cust->graphs[g].num_sgs, 300, &st_); /* MUTANT */' \
-  'rc == 0 && rep.stage == M11_SPK_EOS && rep.amp_off_verified && !rep.teardown_rc' "$w5_spk_plan"
+  'rc == 0 && rep.stage == M11_SPK_PLAYED && rep.amp_off_verified && !rep.teardown_rc' "$w5_spk_plan"
 # W5b: every out-of-band payload written at the same offset (a payload whose reply never came may still be read)
 w5_mutant oob-reused speaker_session_native.c 's->oob_next = (uint32_t)ALIGN_UP((size_t)s->oob_next + len);' \
   '    (void)0; /* MUTANT */' \
@@ -1162,11 +1162,6 @@ p5c_mutant re-read-shape-unchecked "    if (shape != [('01001006', 28, 0), ('010
 p5c_mutant re-failure-unaccounted "    if re_failed and (len(re_failed) != 1 or re_rsp[-1] is not re_failed[0] or fail is None or fail[1] != 'rx_re' or" \
   "    if False and re_failed and (len(re_failed) != 1 or re_rsp[-1] is not re_failed[0] or fail is None or fail[1] != 'rx_re' or" \
   "boot(unaccounted)"
-p5c_mutant eos-evidence-unchecked "        if (fail[2] if fail is not None and fail[0] == eos_step else 0) != want:" \
-  '        if False:' "'spk-eos-evidence-mismatch'"
-p5c_mutant eos-render-unchecked "    if (eos['submit'] or eos['wait'] or eos['dsp'] or eos['rendered'] != 1 or eos['rendered_len'] != 8 or" \
-  "    if False and (eos['submit'] or eos['wait'] or eos['dsp'] or eos['rendered'] != 1 or eos['rendered_len'] != 8 or" \
-  "'spk-eos-not-rendered'"
 p5c_mutant unmap-unchecked "    if any(r['op'] in (OP_UNMAP, OP_CLOSE_ALL) for r in intents):" '    if False:' "('an UNMAP journaled'"
 p3_mutant() { # name asroot pattern replacement assertion last-pass (same detection rule as gtn_mutant)
   local name="$1" asroot="$2" pat="$3" rep="$4" want="$5" last="$6" dir="$out/cen-mutant-$1" rc=0 got file=custodian_entry_native.c

@@ -121,7 +121,7 @@ static int session(void *user, m11_entry *e) {
     record_cb(e, line);
     const m11_speaker_io io = {.cust = &e->runner.cust, .map_fn = map_cb, .user = e, .snd = &snd, .plan = &plan,
         .record_fn = record_cb, .settle_fn = settle_cb, .now_fn = now_cb, .wait_timeout_ms = 1000,
-        .eos_timeout_ms = 3000, .amp_window_ms = 12000, .region_bytes = 65536, .write_buffers = 4, .buffer_ms = 40};
+        .amp_window_ms = 12000, .region_bytes = 65536, .write_buffers = 4, .buffer_ms = 40};
     int rc = m11_speaker_session_run(&io, &report);
     const int census = m11_crunner_census(&e->runner);
     snprintf(line, sizeof line, "phase=spk session rc=%d census=%d ctl_writes=%u readbacks=%u", rc, census, snd.ctl_writes,

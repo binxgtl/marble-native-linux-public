@@ -269,8 +269,8 @@ static void teardown(sess *s) {
         uint32_t dsp = 0;
         if (!m11_gpr_engine_wait_token(eng(s), s->rd_tok[i], 1u, &dsp, NULL, 0, NULL) && !dsp) r->rd_done++;
     }
-    rec(s, "phase=spk end rc=%d step=%d sent=%u done=%u bytes=%u eos=%d amp_off=%d teardown=%d pdr=%d",
-        r->rc, r->fail_step, r->buffers_sent, r->buffers_done, r->bytes_played, r->eos_rc, r->amp_off_verified,
+    rec(s, "phase=spk end rc=%d step=%d sent=%u done=%u bytes=%u amp_off=%d teardown=%d pdr=%d",
+        r->rc, r->fail_step, r->buffers_sent, r->buffers_done, r->bytes_played, r->amp_off_verified,
         r->teardown_rc, r->pdr_seen);
 }
 
@@ -384,36 +384,15 @@ static int run(sess *s) {
     if ((rc = m11_snd_pcm_prepare(io->snd, M11_SND_RX))) return fail(s, M11_SPK_RX_BE_PREPARE, "rx_be_prepare", rc);
     done(s, M11_SPK_RX_BE_PREPARE, "rx_be_prepare");
 
-    /* 7. play, then EOS */
+    /* 7. play: every buffer done with status 0; the teardown stops (stock PCM playback sends no EOS) */
     if ((rc = play(s, chunk, wr_stride))) return fail(s, M11_SPK_PLAYED, "play", rc);
     done(s, M11_SPK_PLAYED, "play");
-    uint32_t policy = 1u, eos_tok = 0u, dsp = UINT32_MAX;
-    const uint32_t drop_tok0 = eng(s)->rx_dropped_unknown_token, drop_bad0 = eng(s)->rx_dropped_malformed;
-    const int submit = m11_custodian_data_submit(io->cust, s->g_rx, p->wr_ep, M11_DATA_CMD_WR_SH_MEM_EP_EOS, &policy,
-                                                 sizeof policy, now(s), &eos_tok);
-    const int eos_tx = (int)eng(s)->last_tx_status;
-    int wait = 0;
-    if (!submit) wait = m11_gpr_engine_wait_token(eng(s), eos_tok, io->eos_timeout_ms, &dsp, NULL, 0, NULL);
-    pdr_note(s);
-    rc = submit ? submit : wait;
-    if (!rc && dsp) rc = -EREMOTEIO;
-    /* the EOS as received (m11_gpr_eos_evidence_t): IBASIC count/status, EOS_RENDERED count/length/port/{module,
-     * render status}, token-0 EOS_RENDERED events, packets dropped during the wait (unknown token, malformed) */
-    const m11_gpr_eos_evidence_t *ev = &eng(s)->eos_ev;
-    rec(s, "phase=spk eos_rsp tok=%08x submit=%d tx=%d wait=%d dsp=%08x ib=%u/%08x ren=%u/%u/%x/%x/%u ev=%u/%x/%u "
-        "drop=%u/%u", eos_tok, submit, eos_tx, wait, dsp, ev->ibasic_count, ev->ibasic_status, ev->rendered_count,
-        ev->rendered_len, ev->rendered_port, ev->rendered_word[0], ev->rendered_word[1], ev->event_count,
-        ev->event_word[0], ev->event_word[1], eng(s)->rx_dropped_unknown_token - drop_tok0,
-        eng(s)->rx_dropped_malformed - drop_bad0);
-    r->eos_rc = rc;
-    if (rc) return fail(s, M11_SPK_EOS, "eos", rc);
-    done(s, M11_SPK_EOS, "eos");
     return 0;
 }
 
 int m11_speaker_session_run(const m11_speaker_io *io, m11_speaker_report *rep) {
     if (!io || !rep || !io->cust || !io->cust->mgr || !io->cust->mgr->gpr || !io->map_fn || !io->plan || !io->now_fn ||
-        !io->wait_timeout_ms || !io->eos_timeout_ms || !io->amp_window_ms || !io->region_bytes)
+        !io->wait_timeout_ms || !io->amp_window_ms || !io->region_bytes)
         return -EINVAL;
     memset(rep, 0, sizeof *rep);
     sess s = {.io = io, .rep = rep, .cmd = UINT_MAX, .data = UINT_MAX, .g_vi = UINT_MAX, .g_rx = UINT_MAX};

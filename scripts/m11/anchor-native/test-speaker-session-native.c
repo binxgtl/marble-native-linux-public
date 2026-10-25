@@ -163,8 +163,7 @@ typedef struct {
     uint32_t drop_op;       /* never answer this opcode */
     int bad_re;             /* GET_CFG reports another Re */
     unsigned wr_delay_ms;   /* delay each BUFFER_DONE */
-    uint32_t eos_ibasic;    /* nonzero: an IBASIC with this status for the EOS before its EOS_RENDERED */
-    uint32_t eos_render;    /* nonzero: this render status instead of 1 (rendered) */
+    unsigned wr_status_nth; /* nonzero: that BUFFER_DONE reports data status 5 */
 } peer_cfg;
 
 static void reply(int ep, const m11_gpr_hdr_t *h, uint32_t opcode, const void *pl, size_t n) {
@@ -177,7 +176,8 @@ static void peer(int ep, peer_cfg c) {
     alarm(20);
     unsigned seen_fail = 0, maps = 0, unmaps = 0;
     uint32_t q12[2] = {0, 0};
-    int read_ch = -1; /* the channel the last stock read command selected */
+    int read_ch = -1;
+    unsigned wr_seen = 0; /* the channel the last stock read command selected */
     for (;;) {
         uint8_t rx[M11_GPR_MAX_PKT_BYTES];
         ssize_t n = recv(ep, rx, sizeof rx, 0);
@@ -216,17 +216,13 @@ static void peer(int ep, peer_cfg c) {
             if (c.wr_delay_ms) { struct timespec t = {0, (long)c.wr_delay_ms * 1000000L}; nanosleep(&t, NULL); }
             uint32_t w[8] = {0};
             memcpy(w, pl, 12); /* echo address and map handle */
+            if (c.wr_status_nth && ++wr_seen == c.wr_status_nth) w[3] = 5; /* data status at +12 */
             reply(ep, &h, M11_DATA_CMD_RSP_WR_SH_MEM_EP_DATA_BUFFER_DONE_V2, w, sizeof w);
         } else if (h.opcode == M11_DATA_CMD_RD_SH_MEM_EP_DATA_BUFFER_V2) {
             uint32_t w[14] = {0};
             reply(ep, &h, M11_DATA_CMD_RSP_RD_SH_MEM_EP_DATA_BUFFER_DONE_V2, w, sizeof w);
         } else if (h.opcode == M11_DATA_CMD_WR_SH_MEM_EP_EOS) {
-            if (c.eos_ibasic) {
-                m11_gpr_ibasic_rsp_t ib = {.cmd_opcode = h.opcode, .status = c.eos_ibasic};
-                reply(ep, &h, M11_GPR_IBASIC_RSP_RESULT, &ib, sizeof ib);
-            }
-            uint32_t w[2] = {h.dst_port, c.eos_render ? c.eos_render : 1u}; /* render status 1: rendered */
-            reply(ep, &h, M11_DATA_CMD_RSP_WR_SH_MEM_EP_EOS_RENDERED, w, sizeof w);
+            _exit(108); /* the session sends no EOS (stock PCM playback ends with stop) */
         } else {
             m11_gpr_ibasic_rsp_t r = {.cmd_opcode = h.opcode, .status = 0};
             reply(ep, &h, M11_GPR_IBASIC_RSP_RESULT, &r, sizeof r);
@@ -266,7 +262,6 @@ static char cfg_records[16][160];
 static unsigned ncfg_records;
 static char re_records[8][192];
 static unsigned nre_records;
-static char eos_record[192];
 static FILE *rec_out; /* M11_SPK_RECORDS: the happy path's records as speaker_entry_main writes them (P5 check cross-check) */
 static void record_cb(void *u, const char *line) {
     (void)u; nrec++;
@@ -274,7 +269,6 @@ static void record_cb(void *u, const char *line) {
         assert(ncfg_records < 16);
         snprintf(cfg_records[ncfg_records++], sizeof cfg_records[0], "%s", line);
     }
-    if (strstr(line, "phase=spk eos_rsp ") == line) snprintf(eos_record, sizeof eos_record, "%s", line);
     if (strstr(line, "phase=spk re_rsp ") == line) {
         assert(nre_records < 8);
         snprintf(re_records[nre_records++], sizeof re_records[0], "%s", line);
@@ -290,7 +284,7 @@ static int read_remote_errno(void *u, int fd, uint8_t *b, size_t cap, uint32_t m
 static void start(struct rig *r, peer_cfg c) {
     memset(r, 0, sizeof *r);
     nev = 0; nrec = 0; nsettle = 0; ignore_enable = 0; foreign_enable_at_rx_hw = 0; a_dir = 0; a_next = 0;
-    ncfg_records = 0; nre_records = 0; eos_record[0] = '\0';
+    ncfg_records = 0; nre_records = 0;
     memset(nodes, 0, sizeof nodes); memset(afd, 0, sizeof afd); memset(elem_value, 0, sizeof elem_value);
     elem_value[2] = elem_value[3] = 1; /* profiles start at Voice: the plan sets Music */
     if (fx_heap < 0) fx_heap = open("/dev/null", O_RDONLY | O_CLOEXEC);
@@ -391,7 +385,7 @@ static m11_speaker_plan plan;
 static int run_session(struct rig *r, m11_speaker_report *rep, uint32_t window_ms) {
     m11_speaker_io io = {.cust = &r->cust, .map_fn = map_cb, .user = r,
         .snd = &r->snd, .plan = &plan, .record_fn = record_cb, .settle_fn = settle_cb, .now_fn = now_cb, .wait_timeout_ms = 300,
-        .eos_timeout_ms = 300, .amp_window_ms = window_ms, .region_bytes = 65536, .write_buffers = 4, .buffer_ms = 40};
+        .amp_window_ms = window_ms, .region_bytes = 65536, .write_buffers = 4, .buffer_ms = 40};
     return m11_speaker_session_run(&io, rep);
 }
 static char op_ev[48];
@@ -442,14 +436,12 @@ int main(void) {
     if (rec_path) assert((rec_out = fopen(rec_path, "w")) != NULL);
     rc = run_session(&r, &rep, 5000);
     if (rec_out) { assert(fclose(rec_out) == 0); rec_out = NULL; }
-    printf("INFO happy rc=%d stage=%d sent=%u done=%u bytes=%u eos=%d events=%u records=%u\n",
-           rc, rep.stage, rep.buffers_sent, rep.buffers_done, rep.bytes_played, rep.eos_rc, nev, nrec);
-    assert(rc == 0 && rep.stage == M11_SPK_EOS && rep.amp_off_verified && !rep.teardown_rc);
+    printf("INFO happy rc=%d stage=%d sent=%u done=%u bytes=%u events=%u records=%u\n",
+           rc, rep.stage, rep.buffers_sent, rep.buffers_done, rep.bytes_played, nev, nrec);
+    assert(rc == 0 && rep.stage == M11_SPK_PLAYED && rep.amp_off_verified && !rep.teardown_rc);
     assert(rep.bytes_played == 96000 && rep.buffers_sent == 13 && rep.buffers_done == 13 && rep.rd_queued == 2);
     assert(rep.re.pair_re_readback_verified && rep.regions_mapped == 2);
     assert(ncfg_records == 9);
-    /* the EOS as received: no IBASIC, one EOS_RENDERED of 8 bytes from the WR end point, render status 1 */
-    assert(strstr(eos_record, " submit=0 tx=4 wait=0 dsp=00000000 ib=0/00000000 ren=1/8/40bd/40bd/1 ev=0/0/0 drop=0/0"));
     /* Re per channel: the write, the stock read command, the read; the read returns the value written */
     assert(nre_records == 6);
     assert(strstr(re_records[0], "op=01001006 req=28/0/10013d1b valid=1 status=00000000 rc=0 len=0"));
@@ -465,7 +457,9 @@ int main(void) {
     assert(at("tx_prepare") > at(op(M11_DATA_CMD_RD_SH_MEM_EP_DATA_BUFFER_V2, 0x4547)));
     int rx_start = last(op(M11_APM_CMD_GRAPH_START, 1)), amp_on = at("sw0=Enable"), amp_off = last("sw0=Disable");
     assert(amp_on > rx_start && last("sw1=Enable") < at("rx_prepare") && at("rx_prepare") < at(op(M11_DATA_CMD_WR_SH_MEM_EP_DATA_BUFFER_V2, 0x40BD)));
-    assert(at(op(M11_DATA_CMD_WR_SH_MEM_EP_EOS, 0x40BD)) < amp_off && last("sw1=Disable") > amp_on);
+    /* no EOS: the last BUFFER_DONE, then amplifier off, then the stop (stock PCM playback) */
+    assert(count(op(M11_DATA_CMD_WR_SH_MEM_EP_EOS, 0x40BD)) == 0 && last("sw1=Disable") > amp_on);
+    assert(last(op(M11_DATA_CMD_WR_SH_MEM_EP_DATA_BUFFER_V2, 0x40BD)) < amp_off);
     int rx_stop = at(op(M11_APM_CMD_GRAPH_STOP, 1));
     assert(amp_off < rx_stop && rx_stop < at("rx_drop") && at("rx_drop") < last(op(M11_APM_CMD_GRAPH_STOP, 1)));
     assert(last(op(M11_APM_CMD_GRAPH_STOP, 1)) < at("tx_drop") && at("tx_drop") < at(op(M11_APM_CMD_GRAPH_CLOSE, 1)));
@@ -484,7 +478,7 @@ int main(void) {
     /* W5b: both graphs went through the custodian's ledger and were closed there; the boot stays CLEAN */
     assert(r.cust.graphs[0].state == M11_GRAPH_FREE && r.cust.graphs[1].state == M11_GRAPH_FREE && r.boot.state == M11_ADSP_CLEAN);
     assert(stop(&r) == 0); /* the stand-in saw no UNMAP and no CLOSE_ALL */
-    puts("PASS happy path: back ends before graphs, VI before RX, Re read back, gate, amplifier on, RX prepare, 13 buffers, EOS; amplifier off first, then stop, back-end close and close in order; regions held, no UNMAP");
+    puts("PASS happy path: back ends before graphs, VI before RX, Re read back, gate, amplifier on, RX prepare, 13 buffers done, no EOS; amplifier off first, then stop, back-end close and close in order; regions held, no UNMAP");
 
     /* 2. RX START refused: never an amplifier write, and what started is undone */
     start(&r, (peer_cfg){.fail_op = M11_APM_CMD_GRAPH_START, .fail_nth = 2});
@@ -529,25 +523,12 @@ int main(void) {
     rc = run_session(&r, &rep, 150);
     assert(rc == -ETIME && rep.fail_step == M11_SPK_PLAYED && rep.amp_off_verified && rep.amp_off_ms - rep.amp_on_ms < 1500);
     assert(stop(&r) == 0);
-    /* 7. no EOS RENDERED: amplifier off */
-    start(&r, (peer_cfg){.drop_op = M11_DATA_CMD_WR_SH_MEM_EP_EOS});
+    /* 7. a buffer done with a data status: the stream stops there, amplifier off first */
+    start(&r, (peer_cfg){.wr_status_nth = 7});
     rc = run_session(&r, &rep, 5000);
-    assert(rc == -ETIMEDOUT && rep.fail_step == M11_SPK_EOS && rep.amp_off_verified && rep.bytes_played == 96000);
-    assert(strstr(eos_record, " wait=-110 ") && strstr(eos_record, " ib=0/00000000 ren=0/0/0/0/0 "));
+    assert(rc == -EREMOTEIO && rep.fail_step == M11_SPK_PLAYED && rep.amp_off_verified && rep.buffers_done == 6);
     assert(stop(&r) == 0);
-    /* Run29: an IBASIC error for the EOS before its EOS_RENDERED 1 (stock gsl_gpr_callback frees it): played */
-    start(&r, (peer_cfg){.eos_ibasic = 0x12});
-    rc = run_session(&r, &rep, 5000);
-    assert(rc == 0 && rep.eos_rc == 0 && rep.amp_off_verified);
-    assert(strstr(eos_record, " wait=0 dsp=00000000 ib=1/00000012 ren=1/8/40bd/40bd/1 "));
-    assert(stop(&r) == 0);
-    /* EOS dropped (render status 2) stays a failure, raw status on record, amplifier off first */
-    start(&r, (peer_cfg){.eos_render = 2});
-    rc = run_session(&r, &rep, 5000);
-    assert(rc == -EREMOTEIO && rep.fail_step == M11_SPK_EOS && rep.amp_off_verified);
-    assert(strstr(eos_record, " wait=-121 dsp=00000002 ib=0/00000000 ren=1/8/40bd/40bd/2 "));
-    assert(stop(&r) == 0);
-    puts("PASS after the gate: a refused buffer, an Enable that does not read back, the amplifier window and a missing EOS each end with the switches driven and read back Disable before any stop");
+    puts("PASS after the gate: a refused buffer, an Enable that does not read back, the amplifier window and a buffer done with a data status each end with the switches driven and read back Disable before any stop");
 
     /* 8. a profile item missing: nothing mapped, nothing sent */
     start(&r, (peer_cfg){0});

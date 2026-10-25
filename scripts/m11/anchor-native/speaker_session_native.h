@@ -19,8 +19,9 @@
  *     read back Disable;
  *  6. amplifier on: both switches Enable (read back), then the RX back end PREPARE (the kernel unmutes the
  *     codec DAIs);
- *  7. play: the plan's PCM through the write buffers, each refilled on its BUFFER_DONE, then EOS and its
- *     RENDERED, all inside amp_window_ms from the amplifier enable;
+ *  7. play: the plan's PCM through the write buffers, each refilled on its BUFFER_DONE, every buffer done
+ *     with status 0, inside amp_window_ms from the amplifier enable; then the stop (the teardown). No EOS, as
+ *     stock PCM playback: libagm_pcm_plugin.so has no agm_session_eos, only stop (Run30 EOS {0,0});
  *  8. teardown, always, from wherever the session stopped: both switches Disable first (read back) if
  *     either was ever written Enable, then GRAPH_STOP RX, RX back end close, GRAPH_STOP VI, TX back end
  *     close, GRAPH_CLOSE RX, GRAPH_CLOSE VI, each as the custodian's graph ledger allows (a graph left
@@ -48,7 +49,6 @@ typedef struct {
                                              * NULL: none */
     uint64_t (*now_fn)(void *user);
     uint32_t wait_timeout_ms;               /* per data buffer (commands use the custodian's budget) */
-    uint32_t eos_timeout_ms;
     uint32_t amp_window_ms;                 /* amplifier enable -> disable */
     size_t region_bytes;                    /* each of the two regions */
     unsigned write_buffers;                 /* 2..8 */
@@ -61,7 +61,7 @@ enum {
     M11_SPK_VI_BE_OPEN, M11_SPK_VI_OPEN, M11_SPK_VI_CAL, M11_SPK_VI_CFG, M11_SPK_VI_PREPARE, M11_SPK_VI_START,
     M11_SPK_VI_READS, M11_SPK_VI_BE_PREPARE,
     M11_SPK_RX_BE_OPEN, M11_SPK_RX_OPEN, M11_SPK_RX_CAL, M11_SPK_RX_CFG, M11_SPK_RX_RE, M11_SPK_RX_PREPARE,
-    M11_SPK_RX_START, M11_SPK_GATE, M11_SPK_AMP_ON, M11_SPK_RX_BE_PREPARE, M11_SPK_PLAYED, M11_SPK_EOS
+    M11_SPK_RX_START, M11_SPK_GATE, M11_SPK_AMP_ON, M11_SPK_RX_BE_PREPARE, M11_SPK_PLAYED
 };
 
 typedef struct {
@@ -69,13 +69,12 @@ typedef struct {
     unsigned regions_mapped;
     int vi_opened, vi_started, rx_opened, rx_started, amp_touched, amp_on;
     uint32_t buffers_sent, buffers_done, bytes_played, rd_queued, rd_done;
-    int eos_rc;
     uint64_t amp_on_ms, amp_off_ms;
     int teardown_rc, amp_off_verified, pdr_seen;
     m11_aw_apply_report_t re;
 } m11_speaker_report;
 
-/* 0 once the PCM played to its EOS and the teardown completed, otherwise the first failure (negative errno);
+/* 0 once every PCM buffer completed with status 0 and the teardown completed, otherwise the first failure (negative errno);
  * the report says where and what was undone. */
 int m11_speaker_session_run(const m11_speaker_io *, m11_speaker_report *);
 
