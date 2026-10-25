@@ -84,7 +84,7 @@ class Observation(unittest.TestCase):
    r=copy.deepcopy(rows);mutate(r);self.reject(r)
  def test_start_final_and_receipt(self):
   rows=self.decoded()
-  for mutate in (lambda r:r.pop(),lambda r:r.pop(-2),lambda r:r[-1].update(reaped=False),lambda r:r[-1].update(raw_status=9),lambda r:r[0].update(control_permitted=True),lambda r:r[-2].update(records=7)):
+  for mutate in (lambda r:r.pop(),lambda r:r.pop(-2),lambda r:r[-1].update(reaped=False),lambda r:r[-1].update(reaped=1),lambda r:r[-1].update(raw_status=False),lambda r:r[-1].update(control_permitted=0),lambda r:r[-1].update(raw_status=9),lambda r:r[0].update(sample=False),lambda r:r[0].update(control_permitted=True),lambda r:r[-2].update(records=7)):
    r=copy.deepcopy(rows);mutate(r);self.reject(r)
  def test_truncation_and_corruption(self):
   raw=self.capture()

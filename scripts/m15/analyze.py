@@ -56,7 +56,8 @@ def analyze(raw):
     rows=[json.loads(line,object_pairs_hook=no_duplicate_keys) for line in lines]
     if any(not isinstance(row,dict) for row in rows):raise ValueError('record is not an object')
     expected={'schema':'M15O1-supervisor','reaped':True,'raw_status':0,'errno':0,'control_permitted':False}
-    if not rows or rows[-1]!=expected:raise ValueError('missing/invalid supervisor receipt')
+    if not rows or rows[-1]!=expected or any(type(rows[-1][key]) is not type(value) for key,value in expected.items()):
+        raise ValueError('missing/invalid supervisor receipt')
     rows.pop()
     if len(rows)<2 or rows[0].get('kind')!='start' or rows[-1].get('kind')!='end':
         raise ValueError('missing start/end')
@@ -65,7 +66,8 @@ def analyze(raw):
         raise ValueError('invalid observation contract')
     if rows[0].get('control_permitted') is not False or rows[-1].get('control_permitted') is not False:
         raise ValueError('control permission forbidden')
-    if rows[-1].get('records')!=len(rows) or rows[-1].get('sample')!=samples-1:
+    if (rows[-1].get('records')!=len(rows) or type(rows[0].get('sample'))!=int
+        or rows[0]['sample']!=0 or type(rows[-1].get('sample'))!=int or rows[-1]['sample']!=samples-1):
         raise ValueError('final count mismatch')
     current=0;pending=None;previous=-1;data=[{} for _ in range(samples)];inventory=set();census=[]
     ports=[set() for _ in range(samples)]
