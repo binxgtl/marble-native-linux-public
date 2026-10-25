@@ -1,0 +1,23 @@
+{
+  "schema": "M15-observation-report-v1",
+  "raw_sha256": "118df73002b816c99f742bd207f79046f7617f70c8c8be9cfdd98a03edcde548",
+  "raw_bytes": 5945,
+  "records": 41,
+  "samples": [
+    {
+      "reported_usb_type": "PD_PPS",
+      "errors": [],
+      "reported_pd_type": true,
+      "typec_census_errno": 2,
+      "typec_fields": {}
+    }
+  ],
+  "transcript_complete": true,
+  "telemetry": "READABLE",
+  "freshness": "UNKNOWN",
+  "negotiated_contract": "UNKNOWN",
+  "protection_active": "UNKNOWN",
+  "charging_hardware_pass": false,
+  "control_permitted": false,
+  "limit_semantics": "reported values and thermal indices; not PDO/APDO, RDO or safety limits"
+}

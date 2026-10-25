@@ -18,6 +18,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Synthetic sysfs, real supervision, short I/O and ASan/UBSan
         run: bash scripts/m15/test.sh artifacts/m15/${{ runner.arch }}
+      - name: O1 compatibility and O2 vendor-partner/comparison negative tests
+        run: bash scripts/m15/phaseb/test.sh artifacts/m15/${{ runner.arch }}
       - name: Reproducible static observer (no hardware candidate)
         run: |
           set -euo pipefail
@@ -27,6 +29,11 @@ jobs:
           done
           cmp "$out/m15-observe-a" "$out/m15-observe-b"
           sha256sum "$out/m15-observe-a" > "$out/binary-sha256.txt"
+          for n in a b; do
+            gcc -std=c11 -O2 -Wall -Wextra -Werror -static -Wl,--build-id=none scripts/m15/phaseb/observe.c -o "$out/m15-observe-o2-$n"
+          done
+          cmp "$out/m15-observe-o2-a" "$out/m15-observe-o2-b"
+          sha256sum "$out/m15-observe-o2-a" > "$out/o2-binary-sha256.txt"
       - uses: actions/upload-artifact@v4
         if: always()
         with:

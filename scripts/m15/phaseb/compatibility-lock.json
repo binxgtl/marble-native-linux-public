@@ -1,0 +1,14 @@
+{
+  "schema": "M15O1-compatibility-lock-v1",
+  "base": "76a1620357c6c73b198a2d88976258867158673d",
+  "fixture_provenance": "Synthetic O1-format transcript and unchanged Phase A decoder result. No real sysfs, Android or hardware capture.",
+  "sha256": {
+    "scripts/m15/observe.c": "65d175b6202ac247e42ff551d622dd6e3288c6109ebe52ff88761965f82d6c92",
+    "scripts/m15/analyze.py": "430dc6f14e234734d22e8294ad352e4ac93f6c82c3e863f1d1ae845a30b5be71",
+    "scripts/m15/test.py": "54a495e74f5bd6e8b180a3ec1de0103a770615fd9785a7ed3463bfc66f6b32ba",
+    "scripts/m15/test-faults.c": "682081d97584602bba4a4652c24d5a08a84f442d3fe1c1a18edc0fe06d59ea75",
+    "scripts/m15/test.sh": "14e0d8c634a224ff7fd0b3fd6f93948201e2211b753eafa7252a6a0dbdbb4e67",
+    "scripts/m15/phaseb/fixtures/m15o1-expected.json": "18fbfe87d6882eb7b7835a0ffe23eb16d4c7640199dddda636ac1b2a750eff3f",
+    "scripts/m15/phaseb/fixtures/m15o1-synthetic.jsonl": "118df73002b816c99f742bd207f79046f7617f70c8c8be9cfdd98a03edcde548"
+  }
+}
