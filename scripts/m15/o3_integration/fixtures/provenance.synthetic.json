@@ -1,0 +1,41 @@
+{
+  "environment_labels": "Synthetic comparison roles only; not evidence of Android execution.",
+  "files": {
+    "android.context.synthetic.json": {
+      "bytes": 924,
+      "sha256": "1da0fff39a3f3c5a7ff5ca5d59029a321eb948202878370a3aee36b3b5b49f1a"
+    },
+    "android.synthetic.jsonl": {
+      "bytes": 8525,
+      "sha256": "c5ae458a5deb4b98a4b4f8a5d5359638f712f515fc83645770595b5deecbd7c5"
+    },
+    "expected.synthetic.json": {
+      "bytes": 283,
+      "sha256": "ab7eeb1cbaffa3ffb27921e6bf77af551e33e51a5f99d65e6e8f8848c969e3ea"
+    },
+    "native-mismatch.context.synthetic.json": {
+      "bytes": 929,
+      "sha256": "b6f197a141fb3e309c0384b8ce31c409531327c2de2ccfb353b1904acd8539d9"
+    },
+    "native.context.synthetic.json": {
+      "bytes": 923,
+      "sha256": "a8c38233c498f84f06f8cd4c116d2e367f02ae1d69ce234a865745e7295b3de8"
+    },
+    "native.synthetic.jsonl": {
+      "bytes": 8810,
+      "sha256": "a27125ff1141a62b8294f055018e9d4f159d1bb2018d1dfb99a75c36a54042d6"
+    },
+    "topology-mismatch.synthetic.json": {
+      "bytes": 481,
+      "sha256": "e98d4d0e4328c750dc62df50578bf0f28134d3030c7dd011431e5ade0170ce0a"
+    },
+    "topology.synthetic.json": {
+      "bytes": 475,
+      "sha256": "95d8d30a2d05516e975a8ea3bbe2c9dad682af36dce1d275586d3edd8092bdeb"
+    }
+  },
+  "schema": "M15O3-integration-fixture-bundle-v1",
+  "sealed_baseline": false,
+  "source": "Previously qualified synthetic O2 scaffolding, with explicit O3 headers and synthetic endpoint values. No phone execution or reconstructed Termux samples.",
+  "synthetic_only": true
+}

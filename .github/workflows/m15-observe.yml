@@ -55,6 +55,17 @@ jobs:
           done
           cmp "$out/m15-observe-o3-a" "$out/m15-observe-o3-b"
           sha256sum "$out/m15-observe-o3-a" > "$out/o3-binary-sha256.txt"
+      - name: Versioned O3 context and comparison integration, offline fixtures
+        run: |
+          set -euo pipefail
+          python3 scripts/m15/o3_integration/verify-legacy.py | tee artifacts/m15/${{ runner.arch }}/o3-integration-legacy.txt
+          python3 scripts/m15/o3_integration/test.py -v 2>&1 | tee artifacts/m15/${{ runner.arch }}/o3-integration-tests.txt
+          python3 scripts/m15/o3_integration/compare_v3.py \
+            --android-capture scripts/m15/o3_integration/fixtures/android.synthetic.jsonl \
+            --native-capture scripts/m15/o3_integration/fixtures/native.synthetic.jsonl \
+            --android-context scripts/m15/o3_integration/fixtures/android.context.synthetic.json \
+            --native-context scripts/m15/o3_integration/fixtures/native.context.synthetic.json \
+            > artifacts/m15/${{ runner.arch }}/comparison-o3-synthetic.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:

@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "M15 O3 capture context v2",
+  "description": "Environment is caller-declared. Android observer execution compatibility is UNKNOWN.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "environment",
+    "capture_sha256",
+    "topology",
+    "capture_bytes",
+    "topology_sha256",
+    "observation_schema",
+    "power_supply_contract",
+    "sealed_baseline",
+    "evidence_class"
+  ],
+  "properties": {
+    "schema": {
+      "const": "M15-context-v2"
+    },
+    "environment": {
+      "enum": [
+        "android",
+        "native"
+      ]
+    },
+    "capture_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "minLength": 64,
+      "maxLength": 64
+    },
+    "topology": {
+      "$ref": "topology-v2.schema.json"
+    },
+    "capture_bytes": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 2000000
+    },
+    "topology_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "minLength": 64,
+      "maxLength": 64
+    },
+    "observation_schema": {
+      "const": "M15O3"
+    },
+    "power_supply_contract": {
+      "const": "usb-or-usb-pd-v1"
+    },
+    "sealed_baseline": {
+      "const": false
+    },
+    "evidence_class": {
+      "const": "local-framed-unsealed"
+    }
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "capture_bytes": 8525,
+  "capture_sha256": "c5ae458a5deb4b98a4b4f8a5d5359638f712f515fc83645770595b5deecbd7c5",
+  "environment": "android",
+  "evidence_class": "local-framed-unsealed",
+  "observation_schema": "M15O3",
+  "power_supply_contract": "usb-or-usb-pd-v1",
+  "schema": "M15-context-v2",
+  "sealed_baseline": false,
+  "topology": {
+    "cable_inventory_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+    "charger_inventory_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+    "evidence_path": "direct-usb",
+    "instrumentation_inventory_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+    "observation_schema": "M15O3",
+    "power_source": "pc-usb",
+    "power_supply_contract": "usb-or-usb-pd-v1",
+    "schema": "M15-topology-v2"
+  },
+  "topology_sha256": "213646319a1f9714cf61aa391594e700fa6d6cf347fbaca684dc0907e4d58c62"
+}

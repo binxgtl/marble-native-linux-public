@@ -1,0 +1,10 @@
+{
+  "cable_inventory_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+  "charger_inventory_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+  "evidence_path": "direct-usb",
+  "instrumentation_inventory_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+  "observation_schema": "M15O3",
+  "power_source": "wall-charger",
+  "power_supply_contract": "usb-or-usb-pd-v1",
+  "schema": "M15-topology-v2"
+}
