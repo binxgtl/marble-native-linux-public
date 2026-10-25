@@ -36,9 +36,9 @@ static void child(void *arg) {
  }
  if(!strcmp(a->mode,"worker-crash")){assert(write(1,"prefix\n",7)==7);raise(SIGKILL);_exit(128);}
  if(!strcmp(a->mode,"getter-block")){assert(write(1,"read_begin fixture\n",19)==19);for(;;)pause();}
- assert(!strcmp(a->mode,"orphan-process"));
+ assert(!strcmp(a->mode,"orphan-process") || !strcmp(a->mode,"orphan-fast"));
  pid_t p=fork();assert(p>=0);
- if(!p){assert(setsid()>0);for(;;)pause();}
+ if(!p){assert(setsid()>0);if(!strcmp(a->mode,"orphan-fast"))_exit(0);for(;;)pause();}
  assert(write(1,a->raw->p,a->raw->n)==(ssize_t)a->raw->n);_exit(0);
 }
 int main(int argc,char **argv) {
@@ -64,7 +64,7 @@ int main(int argc,char **argv) {
   assert(kill(ambient,SIGKILL)==0);int waited;assert(waitpid(ambient,&waited,0)==ambient);
   goto output;
  }
- if(!strcmp(mode,"process") || !strcmp(mode,"closed-stdio") || !strcmp(mode,"worker-crash") || !strcmp(mode,"getter-block") || !strcmp(mode,"orphan-process")) {
+ if(!strcmp(mode,"process") || !strcmp(mode,"closed-stdio") || !strcmp(mode,"worker-crash") || !strcmp(mode,"getter-block") || !strcmp(mode,"orphan-process") || !strcmp(mode,"orphan-fast")) {
   assert(argc==9);struct childargs args={mode,argv[7],argv[8],&raw};
   if(!strcmp(mode,"closed-stdio")){close(0);close(1);close(2);}
   int rc=m15_supervise(s,child,&args,!strcmp(mode,"getter-block")?25u:5000u,now,&r);
@@ -94,7 +94,8 @@ export_if_ready:
  if(m15_reconnect(s,strcmp(mode,"reconnect-failed")!=0,now++))goto output;
  {
   FILE *f=fopen(argv[4],"wb");assert(f);struct sink target={f,mode,0};int rc=0;
-  while(m15_state(s)==M15_EXPORT && target.calls<100000){rc=m15_export_step(s,sink,&target,now++);if(rc)break;}
+  m15_sink writer=sink;if(!strcmp(mode,"null-sink"))writer=NULL;
+  while(m15_state(s)==M15_EXPORT && target.calls<100000){rc=m15_export_step(s,writer,&target,now++);if(rc)break;}
   assert(!fclose(f));
   if(!strcmp(mode,"stall"))m15_tick(s,now+300000);
   if(!strcmp(mode,"ack-timeout") && m15_state(s)==M15_ACK)m15_tick(s,now+30000);

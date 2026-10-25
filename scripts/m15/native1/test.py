@@ -62,7 +62,7 @@ class NativePhase1(unittest.TestCase):
         wire=base.with_suffix('.wire');report=base.with_suffix('.json');ackfile=self.root/'ack'
         if ack is not None:ackfile.write_bytes(ack)
         cmd=[str(DRIVER),mode,str(self.rawfile),str(self.meta),str(wire),str(ackfile) if ack is not None else '-',str(report)]
-        if mode in ('process','closed-stdio','worker-crash','getter-block','orphan-process'):cmd.extend([str(OBSERVER),str(self.fixture)])
+        if mode in ('process','closed-stdio','worker-crash','getter-block','orphan-process','orphan-fast'):cmd.extend([str(OBSERVER),str(self.fixture)])
         result=subprocess.run(cmd,capture_output=True,timeout=15)
         self.assertEqual(result.returncode,0,result.stderr.decode(errors='replace'))
         self.assertEqual(result.stderr,b'')
@@ -104,7 +104,7 @@ class NativePhase1(unittest.TestCase):
         for mode in ('short','eintr','eagain'):
             wire,r,_=self.driver(mode,ack=ack);self.assertEqual(wire,expected);self.assertEqual(r['state'],7)
     def test_disconnect_zero_write_short_failure_and_stall_fail_closed(self):
-        for mode in ('disconnect','short-fail','zero-write','overreported-write','stall'):
+        for mode in ('disconnect','short-fail','zero-write','overreported-write','stall','null-sink'):
             wire,r,raw=self.driver(mode);self.assertEqual(r['state'],8);self.assertEqual(raw,self.raw);self.reject(wire)
     def test_ram_exhaustion_preserves_original_prefix(self):
         wire,r,raw=self.driver('ram-exhausted');self.assertEqual(r['state'],8);self.assertEqual(raw,self.raw[:512]);self.assertEqual(wire,b'')
@@ -135,7 +135,7 @@ class NativePhase1(unittest.TestCase):
         wire,r,raw=self.driver('ambient-child');self.assertEqual(r['state'],8)
         self.assertEqual(r['error'],'nonexclusive-process-scope');self.assertEqual(raw,b'');self.assertEqual(wire,b'')
     def test_actual_orphan_setsid_worker_crash_and_blocked_worker(self):
-        for mode in ('orphan-process','worker-crash','getter-block'):
+        for mode in ('orphan-process','orphan-fast','worker-crash','getter-block'):
             wire,r,_=self.driver(mode);self.assertEqual(r['state'],8);self.assertEqual(wire,b'')
     def test_delete_1536_arbitrary_bytes_never_resynchronizes(self):
         wire,_,_,_=self.happy()

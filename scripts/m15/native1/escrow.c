@@ -195,6 +195,7 @@ int m15_reconnect(struct m15 *s,int pc,uint64_t now) {
 }
 int m15_export_step(struct m15 *s,m15_sink sink,void *arg,uint64_t now) {
  if(state_ok(s,M15_EXPORT,now))return -1;
+ if(!sink)return fail(s,"missing-nonblocking-sink");
  char t[128];const void *p;size_t n;
  if(next(s,&s->cursor,t,&p,&n)<=0 || s->cursor.used>=n)return fail(s,"export-cursor");
  size_t remaining=n-s->cursor.used;

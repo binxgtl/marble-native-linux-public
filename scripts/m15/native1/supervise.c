@@ -107,6 +107,9 @@ int m15_supervise(struct m15 *s,m15_child_fn fn,void *arg,unsigned deadline,
    pid_t pid=waitpid(-1,&status,WNOHANG);
    if(pid>0){
     int i=remember(s,seen,&count,pid,now);
+    /* A short-lived adopted zombie may reach waitpid before the next /proc
+     * census. It is still an unexpected orphan, not a successful collector. */
+    if(pid!=child){broken=1;m15_poison(s,"unexpected-adopted-worker");}
     if(i<0 || seen[i].reaped)broken=1;
     else {seen[i].reaped=1;r->reaped++;if(m15_owner_reaped(s,(uint64_t)pid,status,now))broken=1;}
     if(pid==child)r->raw_wait=status;
