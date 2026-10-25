@@ -147,9 +147,13 @@ static void rev6_session(void) {
     assert(mock.tx_pkt_count==tx);
     assert(!m11_custodian_data_submit(&c,gv,0x4547u,M11_DATA_CMD_RD_SH_MEM_EP_DATA_BUFFER_V2,rd,sizeof rd,107,&t1) && t1);
     assert(!m11_custodian_data_submit(&c,gv,0x40BDu,M11_DATA_CMD_WR_SH_MEM_EP_EOS,&pol,4,108,&t2) && t2 && mock.tx_pkt_count==tx+2);
-    /* the strict mock answers both with IBASIC status 1; the waits (no TX) collect them */
+    /* RD IBASIC error fails fast. EOS IBASIC is evidence only (stock contract);
+     * without EOS_RENDERED its bounded wait must time out, not report rendered. */
     assert(m11_gpr_engine_wait_token(&eng,t1,10,&dsp,NULL,0,NULL)==-EREMOTEIO);
-    assert(m11_gpr_engine_wait_token(&eng,t2,10,&dsp,NULL,0,NULL)==-EREMOTEIO);
+    dsp=UINT32_MAX;
+    assert(m11_gpr_engine_wait_token(&eng,t2,10,&dsp,NULL,0,NULL)==-ETIMEDOUT);
+    assert(eng.eos_ev.token==t2 && eng.eos_ev.ibasic_count==1 && eng.eos_ev.ibasic_status==1 &&
+           eng.eos_ev.rendered_count==0 && dsp==UINT32_MAX && mock.tx_pkt_count==tx+2);
     /* all of it was the custodian's own traffic: no latch, and a further MAP is admitted */
     assert(!(boot.reasons & M11_TAINT_FOREIGN_TRAFFIC) && boot.state==M11_ADSP_CLEAN);
     unsigned k=UINT_MAX;

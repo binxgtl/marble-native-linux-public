@@ -2,8 +2,8 @@ param([Parameter(Mandatory=$true)][string]$OutDir,[ValidateRange(1,900)][int]$Se
  [Parameter(Mandatory=$true)][ValidatePattern('^[0-9a-f]{32}$')][string]$JournalNonce,
  [Parameter(Mandatory=$true)][ValidatePattern('^[0-9a-f]{64}$')][string]$JournalIdentity,
  [Parameter(Mandatory=$true)][string]$StockSummary)
-# P5 (Run29 speaker candidate) receive-only observer: p4/host-observer.ps1 (the Run23 observer) with the
-# M11R29 USB identity, the 600 s default window and the P5 host check, which also compares the cmdline
+# P5 (Run30 speaker candidate) receive-only observer: p4/host-observer.ps1 (the Run23 observer) with the
+# M11R30 USB identity, the 600 s default window and the P5 host check, which also compares the cmdline
 # verdict and tokens with the local stock summary (B3). Never writes to the device.
 $ErrorActionPreference='Stop'
 . "$PSScriptRoot/host-reader.ps1"
@@ -16,7 +16,7 @@ $status=[ordered]@{receiver='p5-continuous-binary-v2';start_utc=[DateTime]::UtcN
 try {
  while([DateTime]::UtcNow -lt $until -and $null -eq $port){
   $devices=@(Get-PnpDevice -PresentOnly)
-  $parent=@($devices | Where-Object InstanceId -eq 'USB\VID_1D6B&PID_0104\M11R29')
+  $parent=@($devices | Where-Object InstanceId -eq 'USB\VID_1D6B&PID_0104\M11R30')
   $acm=@($devices | Where-Object {$_.InstanceId -like 'USB\VID_1D6B&PID_0104&MI_00*' -and $_.FriendlyName -match '\(COM[0-9]+\)'})
   if($parent.Count -gt 1 -or $acm.Count -gt 1){throw 'Ambiguous USB identity'}
   if($parent.Count -ne 1 -or $acm.Count -ne 1){Start-Sleep -Milliseconds 100;continue}

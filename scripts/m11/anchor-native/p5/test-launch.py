@@ -1,4 +1,4 @@
-"""Execute the actual P5 (Run29) launcher's PlanOnly branch; never invokes a phone tool.
+"""Execute the actual P5 (Run30) launcher's PlanOnly branch; never invokes a phone tool.
 M11_PWSH may name the PowerShell executable (CI: pwsh)."""
 import hashlib
 import json
@@ -17,7 +17,7 @@ with tempfile.TemporaryDirectory() as d:
              for n in ('host-observer.ps1', 'host-reader.ps1', 'receiver.cs', 'check-capture.py', 'launch.ps1')}
     staging = dict(boot_path='never-open.img', boot_sha256='0' * 64, journal_nonce=NONCE, runtime_identity=IDENTITY,
                    stock_summary_path=str(summary), stock_summary_sha256=hashlib.sha256(summary.read_bytes()).hexdigest())
-    m = dict(schema='m11-run29-candidate-v1', hardware='NOT BOOTED', host_source_sha256=hosts, local_staging=staging)
+    m = dict(schema='m11-run30-candidate-v1', hardware='NOT BOOTED', host_source_sha256=hosts, local_staging=staging)
     p.write_text(json.dumps(m))
     cmd = [pwsh, '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', str(HERE / 'launch.ps1'),
            '-Manifest', str(p), '-OutDir', str(Path(d) / 'capture'), '-PlanOnly']
@@ -25,7 +25,7 @@ with tempfile.TemporaryDirectory() as d:
     plan = json.loads(run.stdout)
     args = plan['observer_arguments']
     assert Path(plan['observer']).resolve() == (HERE / 'host-observer.ps1').resolve()
-    assert args[2] == plan['observer'] and plan['protocol'] == 'M11I3' and plan['usb_serial'] == 'M11R29'
+    assert args[2] == plan['observer'] and plan['protocol'] == 'M11I3' and plan['usb_serial'] == 'M11R30'
     assert args[args.index('-JournalNonce') + 1] == NONCE and args[args.index('-JournalIdentity') + 1] == IDENTITY
     assert args[args.index('-Seconds') + 1] == '600' and args[args.index('-StockSummary') + 1] == str(summary)
     assert not (Path(d) / 'capture').exists()
@@ -42,7 +42,7 @@ with tempfile.TemporaryDirectory() as d:
         assert subprocess.run(cmd, capture_output=True, text=True).returncode != 0, broken
     m['local_staging'] = staging
     for bad in (dict(schema='m11-run23-candidate-v1'), dict(schema='m11-run' + '25-candidate-v1'),
-                dict(schema='m11-run26-candidate-v1'), dict(schema='m11-run27-candidate-v1'), dict(schema='m11-run28-candidate-v1'), dict(hardware='BOOTED')):
+                dict(schema='m11-run26-candidate-v1'), dict(schema='m11-run27-candidate-v1'), dict(schema='m11-run28-candidate-v1'), dict(schema='m11-run29-candidate-v1'), dict(hardware='BOOTED')):
         p.write_text(json.dumps(dict(m, **bad)))
         assert subprocess.run(cmd, capture_output=True, text=True).returncode != 0, bad
     hosts['host-observer.ps1'] = '0' * 64; p.write_text(json.dumps(m))
@@ -51,6 +51,6 @@ with tempfile.TemporaryDirectory() as d:
     hosts['host-observer.ps1'] = hashlib.sha256((HERE / 'host-observer.ps1').read_bytes()).hexdigest(); p.write_text(json.dumps(m))
     run = subprocess.run(cmd[:-1], capture_output=True, text=True)
     assert run.returncode != 0 and 'Explicit one-shot hardware approval required' in run.stderr + run.stdout, run
-print('PASS actual P5 launch PlanOnly selects the receive-only M11R29 observer (600 s) with the journal nonce/identity '
+print('PASS actual P5 launch PlanOnly selects the receive-only M11R30 observer (600 s) with the journal nonce/identity '
       'and the B3 stock summary; missing identity/summary, a wrong schema, host-source drift and a missing approval '
       'are rejected; no tool location encoded; zero phone commands')

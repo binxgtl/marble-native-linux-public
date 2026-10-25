@@ -1,8 +1,10 @@
 """Synthetic inputs only (no stock ACDB, XML or calibration in CI): speaker_plan payloads, order and refusals."""
 import hashlib
+import io
 import struct
 import sys
 import unittest
+import wave
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -249,6 +251,34 @@ def headers(blob):
 
 
 class Plan(unittest.TestCase):
+    def test_imported_wav_contract_and_exact_pcm(self):
+        pcm = bytearray(48000 * 2 * 2 // 2)  # 500ms stereo; synthetic silence with two sample witnesses
+        struct.pack_into('<hh', pcm, 400, 1731, -1731)
+        def wav(data=pcm, rate=48000, ch=2, width=2):
+            f = io.BytesIO()
+            with wave.open(f, 'wb') as w:
+                w.setparams((ch, width, rate, 0, 'NONE', 'not compressed')); w.writeframes(data)
+            return f.getvalue()
+        source = wav()
+        got, meta = sp.wav_pcm(source, 500)
+        self.assertEqual(got, pcm)
+        self.assertEqual(meta['peak_sample'], 1731)
+        self.assertEqual(meta['source_sha256'], hashlib.sha256(source).hexdigest())
+        sig = dict(duration_ms=500, fade_ms=0, peak_mdbfs=-10000, tones_hz=[])
+        out, summary = sp.build(Fixture().build(), XML, RE, 8, sig, wav_bytes=source)
+        self.assertEqual(out, sp.build(Fixture().build(), XML, RE, 8, sig, wav_bytes=source)[0])
+        secs = sections(out)
+        self.assertEqual(secs[-1][1], pcm)
+        self.assertEqual(secs[-2][1], struct.pack('<IIIii', 500, 0, 0, -10000, 1))
+        tone = self.build(signal=dict(sig, tones_hz=[440, 880], fade_ms=10))[0]
+        self.assertEqual(secs[:6], sections(tone)[:6])  # graphs, backend, controls and Re unchanged
+        for bad in (b'not wav', wav(rate=44100), wav(ch=1), wav(width=1), source[:-4], wav(data=pcm[:-4])):
+            with self.assertRaises(ValueError): sp.wav_pcm(bad, 500)
+        for sample, offset in ((32767, 400), (-32768, 400), (2, 0)):
+            bad = bytearray(pcm); struct.pack_into('<h', bad, offset, sample)
+            with self.assertRaises(ValueError): sp.wav_pcm(wav(bad), 500)
+        with self.assertRaises(ValueError): sp.build(Fixture().build(), XML, RE, 8, dict(sig, tones_hz=[440]), wav_bytes=source)
+
     def build(self, fx=None, level=8, signal=SIGNAL):
         return sp.build((fx or Fixture()).build(), XML, RE, level, signal)
 

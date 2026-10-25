@@ -345,7 +345,8 @@ static void put_graph(uint32_t id, const uint32_t *sgs, uint32_t nsg, uint32_t n
     for (uint32_t i = 0; i < ncfg; i++) { bl = 0; param(blob, &bl, 0x428F, 0x08001017 + i, i); put32((uint32_t)bl); putb(blob, bl); }
     sec_end(s);
 }
-static size_t build_plan(uint32_t duration_ms) {
+static size_t media_sig_at, media_pcm_at;
+static size_t build_plan_mode(uint32_t duration_ms, int imported) {
     memset(plan_buf, 0, sizeof plan_buf);
     pl_at = 64;
     static const uint32_t vi_sgs[] = {0xB00000D5, 0xB00000CE}, rx_sgs[] = {0xB0000002, 0xB0000025, 0xB0000024, 0xB0000023};
@@ -371,16 +372,20 @@ static size_t build_plan(uint32_t duration_ms) {
     }
     sec_end(s);
     s = sec_begin(5); put32(6372); put32(7003); sec_end(s);
-    s = sec_begin(6); put32(duration_ms); put32(10); put32(1); put32((uint32_t)-10000); put32(0); put32(440); sec_end(s);
+    s = sec_begin(6); media_sig_at = pl_at;
+    put32(duration_ms); put32(imported ? 0 : 10); put32(imported ? 0 : 1); put32((uint32_t)-10000);
+    put32(imported ? 1 : 0); if (!imported) put32(440); sec_end(s);
     s = sec_begin(7);
+    media_pcm_at = pl_at;
     uint32_t bytes = 48000u * duration_ms / 1000u * 4u;
-    for (uint32_t i = 0; i < bytes; i++) plan_buf[pl_at++] = (uint8_t)(i * 7u);
+    for (uint32_t i = 0; i < bytes; i++) plan_buf[pl_at++] = imported ? 0 : (uint8_t)(i * 7u);
     sec_end(s);
     memcpy(plan_buf, "M11SPK01", 8);
     uint32_t hdr[4] = {1, (uint32_t)pl_at, 8, 64};
     memcpy(plan_buf + 8, hdr, sizeof hdr);
     return pl_at;
 }
+static size_t build_plan(uint32_t duration_ms) { return build_plan_mode(duration_ms, 0); }
 
 static m11_speaker_plan plan;
 static int run_session(struct rig *r, m11_speaker_report *rep, uint32_t window_ms) {
@@ -398,6 +403,26 @@ int main(void) {
     struct rig r; m11_speaker_report rep; int rc;
 
     /* plan parsing */
+    size_t media_len = build_plan_mode(500, 1);
+    m11_speaker_plan media;
+    assert(m11_speaker_plan_parse(plan_buf, media_len, &media) == 0 && media.signal_kind == 1 && !media.num_tones);
+    const size_t fields[] = {0, 4, 8, 12, 16};
+    const uint32_t wrong[] = {501, 10, 1, (uint32_t)-6000, 2};
+    for (unsigned i = 0; i < 5; ++i) {
+        uint32_t saved; memcpy(&saved, plan_buf + media_sig_at + fields[i], 4);
+        memcpy(plan_buf + media_sig_at + fields[i], &wrong[i], 4);
+        assert(m11_speaker_plan_parse(plan_buf, media_len, &media) == -EBADMSG);
+        memcpy(plan_buf + media_sig_at + fields[i], &saved, 4);
+    }
+    const int16_t loud[] = {10362, -32768};
+    for (unsigned i = 0; i < 2; ++i) {
+        memcpy(plan_buf + media_pcm_at + 8, &loud[i], 2);
+        assert(m11_speaker_plan_parse(plan_buf, media_len, &media) == -EBADMSG);
+    }
+    memset(plan_buf + media_pcm_at + 8, 0, 2);
+    plan_buf[media_pcm_at] = 2;
+    assert(m11_speaker_plan_parse(plan_buf, media_len, &media) == -EBADMSG);
+    puts("PASS imported PCM parser: exact duration, source kind, peak cap and silent edges; malformed metadata/loud samples refused");
     size_t plen = build_plan(500);
     assert(m11_speaker_plan_parse(plan_buf, plen, &plan) == 0);
     assert(plan.vi.num_sgs == 2 && plan.rx.num_sgs == 4 && plan.rx.num_cfgs == 6 && plan.vi.num_cfgs == 3);

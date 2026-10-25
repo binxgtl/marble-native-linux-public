@@ -17,11 +17,13 @@ data; it never enters Git or CI. CI runs test_speaker_plan.py on a synthetic ACD
 """
 import argparse
 import hashlib
+import io
 import json
 import math
 import struct
 from pathlib import Path
 import sys
+import wave
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import graph_plan as gp  # noqa: E402  ACDB metadata walker (r2)
@@ -413,7 +415,36 @@ def control_entry(name, value):
     return nm.ljust(44, b'\0') + val.ljust(20, b'\0')
 
 
-def build(acdb_bytes, usecase_text, re_pair, volume_level, signal):
+def wav_pcm(data, duration_ms, *, rate=48000, channels=2, peak_mdbfs=-10000):
+    """Strict local PCM import, no resampling/normalization. Original bytes remain local.
+    Imported PCM uses SIGNAL kind1, zero tones, exact duration and a -10dBFS ceiling.
+    Over-ceiling media is refused, never silently amplified or clipped."""
+    if not 500 <= duration_ms <= 10000 or peak_mdbfs != -10000:
+        raise ValueError('imported PCM outside reviewed duration/peak contract')
+    try:
+        with wave.open(io.BytesIO(data), 'rb') as w:
+            if (w.getframerate(), w.getnchannels(), w.getsampwidth(), w.getcomptype()) != (rate, channels, 2, 'NONE'):
+                raise ValueError('WAV must be uncompressed 48kHz stereo S16_LE')
+            frames = w.getnframes()
+            if frames * 1000 != duration_ms * rate:
+                raise ValueError('WAV duration differs from the admitted duration')
+            pcm = w.readframes(frames)
+    except (wave.Error, EOFError) as exc:
+        raise ValueError('malformed WAV') from exc
+    if len(pcm) != frames * channels * 2:
+        raise ValueError('truncated WAV PCM')
+    peak = max(abs(v[0]) for v in struct.iter_unpack('<h', pcm))
+    if peak > 10361:  # floor(32767 * 10**(-10/20)), also checked by the native parser
+        raise ValueError('WAV peak exceeds -10dBFS ceiling')
+    # Avoid adding an unreviewed discontinuity. The operator-provided clip is already faded.
+    edge = struct.unpack('<' + str(channels) + 'h', pcm[:channels * 2]) + struct.unpack('<' + str(channels) + 'h', pcm[-channels * 2:])
+    if any(abs(v) > 1 for v in edge):
+        raise ValueError('WAV first/last frame must be at silence')
+    return pcm, dict(source='local_wav', source_sha256=hashlib.sha256(data).hexdigest(), frames=frames,
+                     peak_sample=peak, pcm_sha256=hashlib.sha256(pcm).hexdigest())
+
+
+def build(acdb_bytes, usecase_text, re_pair, volume_level, signal, *, wav_bytes=None):
     acdb = Acdb(acdb_bytes)
     plans = {p['usecase']: p for p in gp.derive_gkvs(usecase_text)}
     ll = plans['PAL_STREAM_LOW_LATENCY RX instance 1 -> PAL_DEVICE_OUT_SPEAKER']
@@ -436,9 +467,16 @@ def build(acdb_bytes, usecase_text, re_pair, volume_level, signal):
     controls = b''.join(control_entry(n, v) for n, v in (
         ('aw_dev_0_prof', 'Music'), ('aw_dev_1_prof', 'Music')))
     re_body = struct.pack('<ii', *re_pair)
-    sig = struct.pack('<IIIii', signal['duration_ms'], signal['fade_ms'], len(signal['tones_hz']),
-                      signal['peak_mdbfs'], 0) + u32(*signal['tones_hz'])
-    pcm = synth_pcm(signal, stream[0], stream[2])
+    if wav_bytes is None:
+        sig = struct.pack('<IIIii', signal['duration_ms'], signal['fade_ms'], len(signal['tones_hz']),
+                          signal['peak_mdbfs'], 0) + u32(*signal['tones_hz'])
+        pcm = synth_pcm(signal, stream[0], stream[2])
+        media = None
+    else:
+        if signal['fade_ms'] or signal['tones_hz']:
+            raise ValueError('imported PCM signal must have no synthesized tones/fades')
+        pcm, media = wav_pcm(wav_bytes, signal['duration_ms'], peak_mdbfs=signal['peak_mdbfs'])
+        sig = struct.pack('<IIIii', signal['duration_ms'], 0, 0, signal['peak_mdbfs'], 1)
     sections = [(SEC_GRAPH, vi_body), (SEC_GRAPH, rx_body), (SEC_IDS, ids), (SEC_BACKEND, backend),
                 (SEC_CONTROL, controls), (SEC_RE, re_body), (SEC_SIGNAL, sig), (SEC_PCM, pcm)]
     body = b''.join(u32(t, len(b)) + pad8(b) for t, b in sections)
@@ -452,6 +490,8 @@ def build(acdb_bytes, usecase_text, re_pair, volume_level, signal):
                    module_instances={k: gp.h(v) for k, v in {**rx_ids, **vi_ids}.items()},
                    vi=vi_sum, rx=rx_sum, signal=signal, pcm_bytes=len(pcm),
                    pcm_sha256=hashlib.sha256(pcm).hexdigest())
+    if media is not None:
+        summary['media'] = media
     return out, summary
 
 

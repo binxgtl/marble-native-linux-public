@@ -143,8 +143,11 @@ int m11_speaker_plan_parse(const uint8_t *buf, size_t len, m11_speaker_plan *out
             if (n < sizeof v) return -EBADMSG;
             memcpy(v, r.p, sizeof v);
             out->duration_ms = v[0]; out->fade_ms = v[1]; out->num_tones = v[2];
+            out->signal_kind = v[4];
             memcpy(&out->peak_mdbfs, &v[3], 4);
-            if (n != sizeof v + 4u * out->num_tones || !out->num_tones || out->duration_ms < 500 ||
+            if (n != sizeof v + 4u * out->num_tones || out->signal_kind > 1u ||
+                (!out->signal_kind && !out->num_tones) ||
+                (out->signal_kind && (out->num_tones || out->fade_ms || out->peak_mdbfs != -10000)) || out->duration_ms < 500 ||
                 out->duration_ms > 10000 || out->peak_mdbfs > -6000 || out->peak_mdbfs < -40000)
                 return -EBADMSG;
             break;
@@ -153,6 +156,16 @@ int m11_speaker_plan_parse(const uint8_t *buf, size_t len, m11_speaker_plan *out
             /* exactly duration x rate frames of 16-bit stereo, rounded down per tone by the generator */
             uint64_t max = (uint64_t)out->stream_rate * out->duration_ms / 1000u * out->stream_channels * 2u;
             if (!n || n % (2u * out->stream_channels) || n > max) return -EBADMSG;
+            if (out->signal_kind) {
+                if (n != max) return -EBADMSG;
+                for (size_t j = 0; j < n; j += 2) {
+                    int16_t sample;
+                    memcpy(&sample, r.p + j, 2);
+                    if (sample > 10361 || sample < -10361) return -EBADMSG;
+                    if ((j < out->stream_channels * 2u || j >= n - out->stream_channels * 2u) &&
+                        (sample > 1 || sample < -1)) return -EBADMSG;
+                }
+            }
             out->pcm.data = r.p;
             out->pcm.len = n;
             break;

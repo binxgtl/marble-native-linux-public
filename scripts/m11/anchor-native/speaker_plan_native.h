@@ -45,7 +45,7 @@ typedef struct {
     uint32_t num_controls;
     m11_plan_control control[M11_PLAN_MAX_CTLS];
     int32_t re_mohm[2];
-    uint32_t duration_ms, fade_ms, num_tones;
+    uint32_t duration_ms, fade_ms, num_tones, signal_kind; /* 0 synthesized tones, 1 imported PCM */
     int32_t peak_mdbfs;
     m11_plan_blob pcm;                    /* S16_LE interleaved at stream_rate x stream_channels */
     uint8_t acdb_sha256[32];

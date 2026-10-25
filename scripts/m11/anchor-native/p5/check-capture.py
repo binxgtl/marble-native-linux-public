@@ -1,7 +1,7 @@
-"""P5 (Run29 speaker candidate) strict host-side evidence check (docs/m11-argon-speaker-run-design.md, W6).
+"""P5 (Run30 speaker candidate) strict host-side evidence check (docs/m11-argon-speaker-run-design.md, W6).
 
 Two layers, both fail closed, no healing or resynchronization:
-  1. transport: p4/check-capture.py's, byte for byte, with START run=M11R29 (M11I3 stream, E stream a complete
+  1. transport: p4/check-capture.py's, byte for byte, with START run=M11R30 (M11I3 stream, E stream a complete
      instrumentation journal bound to the on-device nonce/identity);
   2. records: every M11P4 (env phase) / M11P5 (PID1 hold) / M11ENTRY / M11INTENT / M11SPK / M11TERMINAL kernel
      record parsed by its exact grammar, written by PID1 (caller=T1, facility user, the writer's level), then
@@ -29,7 +29,7 @@ from pathlib import Path
 import re
 
 MAX_CAPTURE = 64 * 1024 * 1024
-RUN = b'M11R29'
+RUN = b'M11R30'
 HEADER = re.compile(rb'M11I3 ([SKEWF]) (0|[1-9][0-9]{0,8}) ([1-9][0-9]{0,4})\n\Z')
 START = re.compile(rb'run=' + RUN + rb' nonce=([0-9a-f]{32})\n\Z')
 FINAL = re.compile(rb'frames=(0|[1-9][0-9]*) bytes=(0|[1-9][0-9]*) events=(0|[1-9][0-9]*) kernel_drops=(0|[1-9][0-9]*) '
@@ -47,7 +47,7 @@ def _load_inspect_journal():
 inspect_journal = _load_inspect_journal()
 
 
-# ---------------------------------------------------------------- 1. transport (Run23 rule, M11R29)
+# ---------------------------------------------------------------- 1. transport (Run23 rule, M11R30)
 def decode(data, journal_nonce=None, journal_identity=None):
     """Returns (streams, kernel record bodies, report). Same rule as the Run23 check."""
     journal_error = journal_records = None
