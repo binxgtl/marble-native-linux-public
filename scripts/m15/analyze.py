@@ -54,6 +54,7 @@ def analyze(raw):
         raise ValueError('truncated/oversized transcript')
     lines=raw.decode('utf-8',errors='strict').splitlines()
     rows=[json.loads(line,object_pairs_hook=no_duplicate_keys) for line in lines]
+    if any(not isinstance(row,dict) for row in rows):raise ValueError('record is not an object')
     expected={'schema':'M15O1-supervisor','reaped':True,'raw_status':0,'errno':0,'control_permitted':False}
     if not rows or rows[-1]!=expected:raise ValueError('missing/invalid supervisor receipt')
     rows.pop()
@@ -130,7 +131,7 @@ def analyze(raw):
         # Plausibility is not a safe operating envelope or permission to charge.
         require(0<values.get('battery/voltage_now',0)<20_000_000,'battery voltage implausible')
         require(-1000<values.get('battery/temp',-1001)<2000,'battery temperature implausible')
-        require(0<=values.get('battery/charge_control_limit',-1)<=values.get('battery/charge_control_limit_max',-2),'thermal index invalid')
+        require(0<=values.get('battery/charge_control_limit',-1)<values.get('battery/charge_control_limit_max',-2),'thermal index invalid')
         for name in ('voltage_now','voltage_max','current_max','input_current_limit'):
             require(values.get('usb/'+name,-1)>=0,'USB '+name+' invalid')
         try:active=selected(values.get('usb/usb_type',''))

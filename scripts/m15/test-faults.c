@@ -10,7 +10,7 @@ ssize_t __real_read(int,void *,size_t);
 ssize_t __real_write(int,const void *,size_t);
 ssize_t __wrap_read(int fd,void *buf,size_t size) {
  const char *mode=getenv("M15_TEST_FAULT");
- if(mode && !strcmp(mode,"read-block") && fd>2) {
+ if(mode && !strcmp(mode,"read-block")) {
   char p[64],target[4096];snprintf(p,sizeof(p),"/proc/self/fd/%d",fd);
   ssize_t n=readlink(p,target,sizeof(target)-1);
   if(n>0){target[n]=0;if(strstr(target,"/battery/type"))sleep(10);}

@@ -72,7 +72,7 @@ class Observation(unittest.TestCase):
   for value in ('PD_PPS','[PD] [PD_PPS]','[PD] PD','[Imaginary]',' [PD]','[PD]  SDP'):
    p.write_text(value+'\n');self.assertEqual(analyze.analyze(self.capture())['telemetry'],'BLOCKED')
  def test_wrong_supply_type_and_bad_thermal_index(self):
-  for name,value in [('usb/type','Wireless'),('battery/charge_control_limit','11')]:
+  for name,value in [('usb/type','Wireless'),('battery/charge_control_limit','10'),('battery/charge_control_limit','11')]:
    p=self.root/'class/power_supply'/name;p.write_text(value+'\n');self.assertEqual(analyze.analyze(self.capture())['telemetry'],'BLOCKED');p.write_text(VALUES[name]+'\n')
  def test_sequence_gap_duplicate_and_order(self):
   rows=self.decoded()
@@ -116,7 +116,7 @@ class Observation(unittest.TestCase):
   for mode in ('short-read','short-write','eintr'):
    p=self.run_tool(fault=mode);self.assertEqual(p.returncode,0,(mode,p.stderr));self.assertTrue(analyze.analyze(p.stdout)['transcript_complete'])
   for mode in ('read-block','output-error'):
-   p=self.run_tool(fault=mode,extra=['--deadline-ms','100']);self.assertNotEqual(p.returncode,0);self.assertIn(b'"reaped":true',p.stderr)
+   p=self.run_tool(fault=mode,extra=['--deadline-ms','100']);self.assertNotEqual(p.returncode,0,(mode,p.stderr));self.assertIn(b'"reaped":true',p.stderr)
    with self.assertRaises(ValueError):analyze.analyze(p.stdout)
 
 if __name__=='__main__':unittest.main(argv=['test.py',*remaining])
