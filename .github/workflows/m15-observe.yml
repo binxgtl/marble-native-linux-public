@@ -76,6 +76,8 @@ jobs:
             if [ "$variant" = sanitize ]; then binary=artifacts/m15/${{ runner.arch }}/observe-o3-sanitize; fi
             sudo -E python3 scripts/m15/termux/test.py --binary "$binary" -v 2>&1 | tee artifacts/m15/${{ runner.arch }}/termux-$variant.txt
           done
+      - name: Native Phase1 RAM escrow, real subreaper, independent host (offline)
+        run: bash scripts/m15/native1/test.sh artifacts/m15/${{ runner.arch }}
       - uses: actions/upload-artifact@v4
         if: always()
         with:
