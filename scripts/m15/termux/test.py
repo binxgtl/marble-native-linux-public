@@ -169,7 +169,7 @@ exec '{BINARY}' "$@"
         result=subprocess.run(['/bin/sh',str(self.session/'capture.sh'),'qualify',str(alias),self.observer_sha,self.topology],capture_output=True)
         self.assertNotEqual(result.returncode,0);self.assertFalse(self.trace.exists())
     def test_hash_write_failure_retains_raw_without_valid_receipt(self):
-        self.put_tool('sha256sum','[ "$1" != capture.raw ] || exit 1; exec /usr/bin/sha256sum "$@"')
+        self.put_tool('sha256sum','for file do [ "$file" != capture.raw ] || exit 1; done; exec /usr/bin/sha256sum "$@"')
         self.assertNotEqual(self.run_phase().returncode,0)
         self.assertTrue((self.session/'qualify/capture.raw').stat().st_size>0)
         self.assertEqual((self.session/'qualify/capture.exit').read_bytes(),b'0\n')
