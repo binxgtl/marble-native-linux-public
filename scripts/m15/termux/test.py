@@ -62,8 +62,12 @@ exec '{BINARY}' "$@"
     def put_tool(self,name,body):
         target=self.bin/name;target.write_text('#!/bin/sh\n'+body+'\n');target.chmod(0o700)
     def run_phase(self,phase='qualify',**env):
-        return subprocess.run(['/bin/sh',str(self.session/'capture.sh'),phase,str(self.session),self.observer_sha,self.topology],
+        result=subprocess.run(['/bin/sh','-x',str(self.session/'capture.sh'),phase,str(self.session),self.observer_sha,self.topology],
                               capture_output=True,env={**self.env,**env},timeout=15)
+        if result.returncode:
+            for path in (self.session/phase).glob('*.stderr'):
+                result.stderr+=b'\n'+path.name.encode()+b': '+path.read_bytes()
+        return result
     def verify(self,phase='qualify'):
         return verify.verify(self.session,phase,self.topology,observer_sha=self.observer_sha,runner_sha=self.runner_sha)
     def qualify(self):
