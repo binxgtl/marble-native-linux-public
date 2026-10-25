@@ -44,6 +44,17 @@ jobs:
           done
           cmp "$out/m15-observe-o2-a" "$out/m15-observe-o2-b"
           sha256sum "$out/m15-observe-o2-a" > "$out/o2-binary-sha256.txt"
+      - name: Versioned USB_PD contract and exploratory-data non-promotion
+        run: bash scripts/m15/o3/test.sh artifacts/m15/${{ runner.arch }}
+      - name: Reproducible static O3 observer (offline only)
+        run: |
+          set -euo pipefail
+          out=artifacts/m15/${{ runner.arch }}
+          for n in a b; do
+            gcc -std=c11 -O2 -Wall -Wextra -Werror -static -Wl,--build-id=none scripts/m15/o3/observe.c -o "$out/m15-observe-o3-$n"
+          done
+          cmp "$out/m15-observe-o3-a" "$out/m15-observe-o3-b"
+          sha256sum "$out/m15-observe-o3-a" > "$out/o3-binary-sha256.txt"
       - uses: actions/upload-artifact@v4
         if: always()
         with:

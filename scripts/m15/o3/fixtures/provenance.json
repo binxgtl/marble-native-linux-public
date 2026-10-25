@@ -1,0 +1,25 @@
+{
+  "schema": "M15O3-fixture-provenance-v1",
+  "synthetic_only": true,
+  "raw_termux_transcript_supplied": false,
+  "sealed_baseline": false,
+  "reported_sample_count": 3,
+  "synthetic_fixture_count": 2,
+  "pairing": "Synthetic range endpoint combinations, NOT recovered individual samples or measured timing.",
+  "missing_fields": "Unreported fields use explicit synthetic ENOENT fixtures, never invented measurements or observed kernel errno.",
+  "summary": "Operator-reported aggregate only; not a sealed O1/O2/O3 trace.",
+  "files": {
+    "termux-exploratory-summary.json": {
+      "sha256": "36ba3ac42add802a493dbfa2a43fbd8253a6a6a1a984645ca41714ad289c4a04",
+      "bytes": 1375
+    },
+    "range-endpoint-a.synthetic.jsonl": {
+      "sha256": "a67864c4f0d6a15439fcd7c365bdf9610e7b757afbb1227d3b0ac10bcd6cd513",
+      "bytes": 8453
+    },
+    "range-endpoint-b.synthetic.jsonl": {
+      "sha256": "9273ba9798407eaef902a8e665f6ec328288853184ab476adc55d3a8fe2b23e6",
+      "bytes": 8453
+    }
+  }
+}

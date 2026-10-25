@@ -1,0 +1,39 @@
+{
+  "schema": "M15-exploratory-summary-v1",
+  "provenance": "Operator-reported aggregate of three root-read-only Termux samples; no raw sample files or seals supplied.",
+  "reported_sample_count": 3,
+  "setup_description": "Android stock userspace, Redmi Note 12 Turbo, UGREEN45W C-C; detailed inventory/topology unverified",
+  "raw_capture_available": false,
+  "timestamps_available": false,
+  "individual_sample_pairing": "UNKNOWN",
+  "sealed_m15o2_baseline": false,
+  "reported_values": {
+    "battery/status": "Charging",
+    "battery/capacity": 35,
+    "battery/temp_deciC": {
+      "minimum": 367,
+      "maximum": 368
+    },
+    "usb/type": "USB_PD",
+    "usb/usb_type_selected": "PD_PPS",
+    "usb/voltage_now_uV": {
+      "minimum": 8432000,
+      "maximum": 8477000
+    },
+    "battery/current_now_uA": {
+      "minimum": -4127000,
+      "maximum": -3668000
+    },
+    "usb/current_now_uA": 0,
+    "usb/current_max_uA": 4500000,
+    "qcom-battery/pdo2_hex": "0002d12c",
+    "qcom-battery/apdo_max_vendor_raw": 33,
+    "qcom-battery/power_max_vendor_raw": 33
+  },
+  "unreported_fields": "Not reconstructed as device measurements; synthetic parser tests supply clearly labelled scaffolding.",
+  "freshness": "UNKNOWN",
+  "negotiated_contract": "UNKNOWN",
+  "protection_active": "UNKNOWN",
+  "android_observer_compatibility": "UNKNOWN",
+  "control_permitted": false
+}
