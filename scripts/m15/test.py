@@ -117,6 +117,7 @@ class Observation(unittest.TestCase):
    p=self.run_tool(fault=mode);self.assertEqual(p.returncode,0,(mode,p.stderr));self.assertTrue(analyze.analyze(p.stdout)['transcript_complete'])
   for mode in ('read-block','output-error'):
    p=self.run_tool(fault=mode,extra=['--deadline-ms','100']);self.assertNotEqual(p.returncode,0,(mode,p.stderr));self.assertIn(b'"reaped":true',p.stderr)
+   if mode=='read-block':self.assertIn(b'read-block injected',p.stderr)
    with self.assertRaises(ValueError):analyze.analyze(p.stdout)
 
 if __name__=='__main__':unittest.main(argv=['test.py',*remaining])
