@@ -66,6 +66,13 @@ jobs:
             --android-context scripts/m15/o3_integration/fixtures/android.context.synthetic.json \
             --native-context scripts/m15/o3_integration/fixtures/native.context.synthetic.json \
             > artifacts/m15/${{ runner.arch }}/comparison-o3-synthetic.json
+      - name: Termux RAM workflow offline qualification (no Android device)
+        run: |
+          set -euo pipefail
+          sh -n scripts/m15/termux/capture.sh
+          for variant in normal sanitize; do
+            sudo -E python3 scripts/m15/termux/test.py --binary artifacts/m15/${{ runner.arch }}/observe-o3-$variant -v 2>&1 | tee artifacts/m15/${{ runner.arch }}/termux-$variant.txt
+          done
       - uses: actions/upload-artifact@v4
         if: always()
         with:
