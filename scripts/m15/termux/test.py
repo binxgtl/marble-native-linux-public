@@ -162,5 +162,25 @@ exec '{BINARY}' "$@"
                                '--phase','qualify','--topology-file-sha256','PRIVATE-FIXTURE-DO-NOT-ECHO'],capture_output=True)
         self.assertEqual(result.returncode,1);self.assertNotIn(b'PRIVATE-FIXTURE-DO-NOT-ECHO',result.stdout+result.stderr)
         report=json.loads(result.stdout);self.assertFalse(report['control_permitted']);self.assertFalse(report['sealed_baseline'])
+    def test_directory_mode_and_symlink_session_fail_closed(self):
+        self.session.chmod(0o750);self.assertNotEqual(self.run_phase().returncode,0);self.assertFalse(self.trace.exists())
+        self.session.chmod(0o700)
+        alias=self.host/'m15-o3-alias';alias.symlink_to(self.session,target_is_directory=True)
+        result=subprocess.run(['/bin/sh',str(self.session/'capture.sh'),'qualify',str(alias),self.observer_sha,self.topology],capture_output=True)
+        self.assertNotEqual(result.returncode,0);self.assertFalse(self.trace.exists())
+    def test_hash_write_failure_retains_raw_without_valid_receipt(self):
+        self.put_tool('sha256sum','[ "$1" != capture.raw ] || exit 1; exec /usr/bin/sha256sum "$@"')
+        self.assertNotEqual(self.run_phase().returncode,0)
+        self.assertTrue((self.session/'qualify/capture.raw').stat().st_size>0)
+        self.assertEqual((self.session/'qualify/capture.exit').read_bytes(),b'0\n')
+        with self.assertRaises(ValueError):self.verify()
+        self.assertFalse((self.session/'qualification.ok').exists())
+    def test_valid_framing_with_core_error_stays_blocked_and_unsealed(self):
+        self.qualify();(self.tree/'class/power_supply/battery/temp').unlink()
+        self.assertEqual(self.run_phase('acquire').returncode,0)
+        report=self.verify('acquire');self.assertEqual(report['telemetry'],'BLOCKED')
+        for name in ('freshness','negotiated_contract','protection_active','android_termux_launch'):
+            self.assertEqual(report[name],'UNKNOWN')
+        self.assertFalse(report['control_permitted']);self.assertFalse(report['sealed_baseline'])
 
 if __name__=='__main__':unittest.main(argv=[sys.argv[0],*extra])

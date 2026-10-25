@@ -66,6 +66,7 @@ def verify(session,phase,topology_sha,*,observer_sha=OBSERVER_SHA,runner_sha=Non
         qualification=verify(session,'qualify',topology_sha,observer_sha=observer_sha,runner_sha=runner_sha)
         if read(session/'qualification.ok',65)!=(qualification['hash_index_sha256']+'\n').encode():raise ValueError('missing qualification admission')
     return {'schema':'M15-Termux-verification-v1','phase':phase,'transcript_complete':True,
+            'observer_sha256':observer_sha,'wrapper_sha256':runner_sha,'topology_file_sha256':topology_sha,
             'raw_sha256':sha(raw),'raw_bytes':len(raw),'process_rc':0,'hash_index_sha256':sha(index),
             'topology_canonical_sha256':topology_digest,'telemetry':report['telemetry'],
             'readiness':'OFFLINE_FORMAT_VERIFIED_RUNTIME_ORIGIN_UNATTESTED',
