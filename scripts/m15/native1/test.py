@@ -137,6 +137,9 @@ class NativePhase1(unittest.TestCase):
     def test_hash_mismatch_and_raw_bit_corruption(self):
         wire,_,_,_=self.happy();at=wire.index(b'END\n')+50
         self.reject(wire[:at]+bytes([wire[at]^1])+wire[at+1:])
+    def test_frozen_memory_corruption_poisoned_by_sender_and_host(self):
+        wire,r,_=self.driver('frozen-corrupt');self.assertEqual(r['state'],8)
+        self.assertEqual(r['error'],'accepted-bytes-mismatch');self.reject(wire)
     def test_final_counts_and_manifest_are_digest_bound(self):
         wire,_,_,_=self.happy();last=wire.rfind(b'\nF ')+1;self.assertGreater(last,0)
         footer=wire[last:].split();footer[1]=str(int(footer[1])+1).encode()

@@ -40,11 +40,19 @@ int m15_supervise(struct m15 *s,m15_child_fn fn,void *arg,unsigned deadline,
  int previous=0;
  if(prctl(PR_GET_CHILD_SUBREAPER,&previous) || prctl(PR_SET_CHILD_SUBREAPER,1) || m15_census_begin(s))
   {m15_poison(s,"subreaper-setup");return -1;}
- int pipes[2][2];
+ int pipes[2][2]={{-1,-1},{-1,-1}};
  if(pipe2(pipes[0],O_CLOEXEC) || pipe2(pipes[1],O_CLOEXEC))
-  {m15_poison(s,"pipe-setup");return -1;}
+  {
+   for(unsigned i=0;i<2;i++)for(unsigned j=0;j<2;j++)if(pipes[i][j]>=0)close(pipes[i][j]);
+   m15_census_closed(s);(void)prctl(PR_SET_CHILD_SUBREAPER,previous);
+   m15_poison(s,"pipe-setup");return -1;
+  }
  pid_t child=fork();
- if(child<0){m15_poison(s,"fork-failure");return -1;}
+ if(child<0){
+  for(unsigned i=0;i<2;i++)for(unsigned j=0;j<2;j++)close(pipes[i][j]);
+  m15_census_closed(s);(void)prctl(PR_SET_CHILD_SUBREAPER,previous);
+  m15_poison(s,"fork-failure");return -1;
+ }
  if(!child) {
   if(setpgid(0,0) || dup2(pipes[0][1],STDOUT_FILENO)<0 || dup2(pipes[1][1],STDERR_FILENO)<0)_exit(120);
   for(unsigned i=0;i<2;i++){close(pipes[i][0]);close(pipes[i][1]);}
@@ -52,12 +60,15 @@ int m15_supervise(struct m15 *s,m15_child_fn fn,void *arg,unsigned deadline,
  }
  struct seen seen[16];unsigned count=0;
  int broken=remember(s,seen,&count,child,logical)<0;
+ int eof[2]={0,0};
  for(unsigned i=0;i<2;i++){
   close(pipes[i][1]);
   int flags=fcntl(pipes[i][0],F_GETFL);
-  if(flags<0 || fcntl(pipes[i][0],F_SETFL,flags|O_NONBLOCK))broken=1;
+  if(flags<0 || fcntl(pipes[i][0],F_SETFL,flags|O_NONBLOCK)){
+   broken=1;close(pipes[i][0]);pipes[i][0]=-1;eof[i]=1;
+  }
  }
- uint64_t start=ms(),stop=0;int eof[2]={0,0},closed=0;
+ uint64_t start=ms(),stop=0;int closed=0;
  while(1) {
   uint64_t elapsed=ms()-start,now=logical+elapsed;
   if(children(s,seen,&count,child,now,stop!=0))broken=1;
@@ -93,7 +104,7 @@ int m15_supervise(struct m15 *s,m15_child_fn fn,void *arg,unsigned deadline,
   struct pollfd fds[2]={{pipes[0][0],POLLIN,0},{pipes[1][0],POLLIN,0}};
   if(poll(fds,2,2)<0 && errno!=EINTR)broken=1;
  }
- for(unsigned i=0;i<2;i++)close(pipes[i][0]);
+ for(unsigned i=0;i<2;i++)if(pipes[i][0]>=0)close(pipes[i][0]);
  r->tracked=count;
  r->elapsed_ms=ms()-start;
  if(closed)(void)prctl(PR_SET_CHILD_SUBREAPER,previous);

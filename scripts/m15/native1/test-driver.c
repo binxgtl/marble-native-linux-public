@@ -34,8 +34,8 @@ static void child(void *arg) {
  if(!strcmp(a->mode,"process")) {
   execl(a->observer,"observer","--fixture-root",a->fixture,"--samples","3","--interval-ms","1000","--deadline-ms","90000",(char *)NULL);_exit(127);
  }
- if(!strcmp(a->mode,"worker-crash")){(void)write(1,"prefix\n",7);raise(SIGKILL);_exit(128);}
- if(!strcmp(a->mode,"getter-block")){(void)write(1,"read_begin fixture\n",19);for(;;)pause();}
+ if(!strcmp(a->mode,"worker-crash")){assert(write(1,"prefix\n",7)==7);raise(SIGKILL);_exit(128);}
+ if(!strcmp(a->mode,"getter-block")){assert(write(1,"read_begin fixture\n",19)==19);for(;;)pause();}
  assert(!strcmp(a->mode,"orphan-process"));
  pid_t p=fork();assert(p>=0);
  if(!p){assert(setsid()>0);for(;;)pause();}
@@ -82,6 +82,7 @@ int main(int argc,char **argv) {
 export_if_ready:
  if(m15_state(s)!=M15_RECONNECT)goto output;
  if(!strcmp(mode,"frozen-append")){assert(m15_append(s,M15_RAW,"x",1)==-1);}
+ if(!strcmp(mode,"frozen-corrupt")){size_t len;unsigned char *p=(unsigned char *)m15_evidence(s,M15_RAW,&len);assert(len);p[0]^=1;}
  if(!strcmp(mode,"reconnect-timeout")){m15_tick(s,now+300000);goto output;}
  if(m15_reconnect(s,strcmp(mode,"reconnect-failed")!=0,now++))goto output;
  {
