@@ -1,0 +1,34 @@
+name: M15 charging observations offline
+on:
+  push:
+    branches: [m15/charging-pd]
+    paths: ['scripts/m15/**', '.github/workflows/m15-observe.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  regression:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Synthetic sysfs, real supervision, short I/O and ASan/UBSan
+        run: bash scripts/m15/test.sh artifacts/m15/${{ runner.arch }}
+      - name: Reproducible static observer (no hardware candidate)
+        run: |
+          set -euo pipefail
+          out=artifacts/m15/${{ runner.arch }}
+          for n in a b; do
+            gcc -std=c11 -O2 -Wall -Wextra -Werror -static -Wl,--build-id=none scripts/m15/observe.c -o "$out/m15-observe-$n"
+          done
+          cmp "$out/m15-observe-a" "$out/m15-observe-b"
+          sha256sum "$out/m15-observe-a" > "$out/binary-sha256.txt"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: m15-observe-${{ runner.arch }}-${{ github.sha }}
+          path: artifacts/m15/${{ runner.arch }}/
