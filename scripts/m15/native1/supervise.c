@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 #define _GNU_SOURCE
 #include "supervise.h"
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -13,6 +14,15 @@
 #include <unistd.h>
 struct seen { pid_t pid; int reaped; };
 static uint64_t ms(void) { struct timespec t;if(clock_gettime(CLOCK_MONOTONIC,&t))return 0;return (uint64_t)t.tv_sec*1000+(unsigned long)t.tv_nsec/1000000; }
+static int exclusive(void) {
+ char path[100];snprintf(path,sizeof(path),"/proc/self/task/%ld/children",(long)getpid());
+ FILE *f=fopen(path,"r");if(!f)return 0;
+ int empty=fgetc(f)==EOF && !ferror(f);fclose(f);if(!empty)return 0;
+ DIR *d=opendir("/proc/self/task");if(!d)return 0;
+ unsigned tasks=0;struct dirent *entry;errno=0;
+ while((entry=readdir(d)))if(entry->d_name[0]>='0' && entry->d_name[0]<='9')tasks++;
+ int error=errno;closedir(d);return tasks==1 && !error;
+}
 static int remember(struct m15 *s,struct seen seen[16],unsigned *count,pid_t pid,uint64_t now) {
  for(unsigned i=0;i<*count;i++)if(seen[i].pid==pid)return (int)i;
  if(*count>=16 || m15_owner_add(s,(uint64_t)pid,now))return -1;
@@ -35,13 +45,20 @@ int m15_supervise(struct m15 *s,m15_child_fn fn,void *arg,unsigned deadline,
                   uint64_t logical,struct m15_process_result *r) {
  memset(r,0,sizeof(*r));
  int status=0;errno=0;
- if(!fn || !deadline || deadline>100000 || waitpid(-1,&status,WNOHANG)!=-1 || errno!=ECHILD)
+ if(!fn || !deadline || deadline>100000 || !exclusive() || waitpid(-1,&status,WNOHANG)!=-1 || errno!=ECHILD)
   {m15_poison(s,"nonexclusive-process-scope");return -1;}
  int previous=0;
  if(prctl(PR_GET_CHILD_SUBREAPER,&previous) || prctl(PR_SET_CHILD_SUBREAPER,1) || m15_census_begin(s))
   {m15_poison(s,"subreaper-setup");return -1;}
  int pipes[2][2]={{-1,-1},{-1,-1}};
- if(pipe2(pipes[0],O_CLOEXEC) || pipe2(pipes[1],O_CLOEXEC))
+ int pipe_failure=pipe2(pipes[0],O_CLOEXEC) || pipe2(pipes[1],O_CLOEXEC);
+ /* Closed inherited stdio must not alias the pipe fds closed after dup2. */
+ for(unsigned i=0;i<2 && !pipe_failure;i++)for(unsigned j=0;j<2;j++)if(pipes[i][j]<3){
+  int replacement=fcntl(pipes[i][j],F_DUPFD_CLOEXEC,3);
+  if(replacement<0){pipe_failure=1;break;}
+  close(pipes[i][j]);pipes[i][j]=replacement;
+ }
+ if(pipe_failure)
   {
    for(unsigned i=0;i<2;i++)for(unsigned j=0;j<2;j++)if(pipes[i][j]>=0)close(pipes[i][j]);
    m15_census_closed(s);(void)prctl(PR_SET_CHILD_SUBREAPER,previous);

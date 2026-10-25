@@ -29,6 +29,19 @@ def capture():
     result=encode(body+[rows[-1]]);assert host.contract.analyze_o3(result)['telemetry']=='READABLE'
     return result
 
+def reference_wire(files):
+    # A second encoder, stdlib/hashlib only: not the production C serializer.
+    nonce=b'0102030405060708090a0b0c0d0e0f10'
+    digest=lambda b:hashlib.sha256(b).hexdigest().encode()
+    manifest=b'M15E1 '+nonce+b' '+digest(files[3])+b' 6\n'
+    manifest+=b''.join(b'I %d %d '%(i,len(raw))+digest(raw)+b'\n' for i,raw in enumerate(files))+b'END\n'
+    wire=manifest;seq=0
+    for i,raw in enumerate(files):
+        for offset in range(0,len(raw),1024):
+            data=raw[offset:offset+1024];wire+=b'D %d %d %d %d\n'%(seq,i,offset,len(data))+data;seq+=1
+    suffix=b'M15E1 FINAL\nframes=%d bytes=%d manifest='%(seq,len(wire))+digest(manifest)+b'\n'
+    return wire+b'F %d %d '%(seq,len(wire))+digest(manifest)+b' '+digest(wire+suffix)+b'\n'
+
 META={'schema':'M15-native-phase1-metadata-v1','synthetic_only':True,'launcher':'offline-subreaper',
       'evidence_path':'ram-escrow-deferred-export','observation_schema':'M15O3','power_supply_contract':'usb-or-usb-pd-v1',
       'freshness':'UNKNOWN','negotiated_contract':'UNKNOWN','protection_active':'UNKNOWN',
@@ -49,7 +62,7 @@ class NativePhase1(unittest.TestCase):
         wire=base.with_suffix('.wire');report=base.with_suffix('.json');ackfile=self.root/'ack'
         if ack is not None:ackfile.write_bytes(ack)
         cmd=[str(DRIVER),mode,str(self.rawfile),str(self.meta),str(wire),str(ackfile) if ack is not None else '-',str(report)]
-        if mode in ('process','worker-crash','getter-block','orphan-process'):cmd.extend([str(OBSERVER),str(self.fixture)])
+        if mode in ('process','closed-stdio','worker-crash','getter-block','orphan-process'):cmd.extend([str(OBSERVER),str(self.fixture)])
         result=subprocess.run(cmd,capture_output=True,timeout=15)
         self.assertEqual(result.returncode,0,result.stderr.decode(errors='replace'))
         self.assertEqual(result.stderr,b'')
@@ -115,6 +128,12 @@ class NativePhase1(unittest.TestCase):
         data,report,_=host.decode(wire);self.assertEqual(data['capture.raw'],raw);self.assertEqual(report['telemetry'],'READABLE')
         self.assertIn(b'tracked=1\nreaped=1\ncensus_closed=1\n',data['status.txt'])
         self.assertEqual(host.contract.o3.legacy.load(raw)[0]['samples'],3)
+    def test_closed_inherited_stdio_does_not_close_pipe_duplicates(self):
+        wire,r,_=self.driver('closed-stdio');self.assertEqual(r['state'],6)
+        self.assertEqual(host.decode(wire)[1]['telemetry'],'READABLE')
+    def test_ambient_child_scope_rejected_without_spawning_collector(self):
+        wire,r,raw=self.driver('ambient-child');self.assertEqual(r['state'],8)
+        self.assertEqual(r['error'],'nonexclusive-process-scope');self.assertEqual(raw,b'');self.assertEqual(wire,b'')
     def test_actual_orphan_setsid_worker_crash_and_blocked_worker(self):
         for mode in ('orphan-process','worker-crash','getter-block'):
             wire,r,_=self.driver(mode);self.assertEqual(r['state'],8);self.assertEqual(wire,b'')
@@ -163,5 +182,19 @@ class NativePhase1(unittest.TestCase):
         result=subprocess.run([sys.executable,str(HERE/'host.py'),str(bad),'--ack',str(ack)],capture_output=True)
         self.assertEqual(result.returncode,1);self.assertFalse(ack.exists())
         self.assertNotIn(b'PRIVATE-FIXTURE-DO-NOT-ECHO',result.stdout+result.stderr)
+    def test_independent_reference_encoder_exact_wire_vector(self):
+        journal=b'0 PC_WAIT 0 0\n1 PC_ACK 0 0\n2 ISOLATED 0 0\n3 COLLECT 0 0\n4 OWN 1001 0\n5 REAP 1001 0\n6 FREEZE 0 0\n'
+        status=b'wait_status=0\ntracked=1\nreaped=1\ncensus_closed=1\n'
+        expected=reference_wire([self.raw,b'',journal,self.meta.read_bytes(),status,b''])
+        wire,_,_,ack=self.happy();self.assertEqual(expected,wire)
+        self.assertEqual(host.decode(expected)[2],ack)
+    def test_rehashed_but_false_lifecycle_census_and_native_metadata_rejected(self):
+        wire,_,_,_=self.happy();files=host.decode(wire)[0]
+        original=[files[name] for name in host.NAMES]
+        for slot,bad in [(2,original[2].replace(b'5 REAP 1001 0\n',b'')),
+                         (4,b'wait_status=0\ntracked=1\nreaped=0\ncensus_closed=1\n'),
+                         (2,original[2]+b'7 OWN 1002 0\n'),
+                         (3,json.dumps({**META,'launcher':'android-termux'}).encode())]:
+            altered=original.copy();altered[slot]=bad;self.reject(reference_wire(altered))
 
 if __name__=='__main__':unittest.main(argv=[sys.argv[0],*remaining])

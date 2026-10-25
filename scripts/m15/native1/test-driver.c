@@ -31,7 +31,7 @@ static ssize_t sink(void *arg,const void *p,size_t n) {
 struct childargs { const char *mode,*observer,*fixture;const struct bytes *raw; };
 static void child(void *arg) {
  struct childargs *a=arg;
- if(!strcmp(a->mode,"process")) {
+ if(!strcmp(a->mode,"process") || !strcmp(a->mode,"closed-stdio")) {
   execl(a->observer,"observer","--fixture-root",a->fixture,"--samples","3","--interval-ms","1000","--deadline-ms","90000",(char *)NULL);_exit(127);
  }
  if(!strcmp(a->mode,"worker-crash")){assert(write(1,"prefix\n",7)==7);raise(SIGKILL);_exit(128);}
@@ -58,8 +58,15 @@ int main(int argc,char **argv) {
  if(m15_isolated(s,1,strcmp(mode,"bad-unbind")!=0,now++))goto output;
  if(m15_wall(s,strcmp(mode,"pc-present")!=0,1,now++))goto output;
  struct m15_process_result r={0};
- if(!strcmp(mode,"process") || !strcmp(mode,"worker-crash") || !strcmp(mode,"getter-block") || !strcmp(mode,"orphan-process")) {
+ if(!strcmp(mode,"ambient-child")) {
+  pid_t ambient=fork();assert(ambient>=0);if(!ambient)for(;;)pause();
+  assert(m15_supervise(s,child,NULL,100,now,&r)==-1);
+  assert(kill(ambient,SIGKILL)==0);int waited;assert(waitpid(ambient,&waited,0)==ambient);
+  goto output;
+ }
+ if(!strcmp(mode,"process") || !strcmp(mode,"closed-stdio") || !strcmp(mode,"worker-crash") || !strcmp(mode,"getter-block") || !strcmp(mode,"orphan-process")) {
   assert(argc==9);struct childargs args={mode,argv[7],argv[8],&raw};
+  if(!strcmp(mode,"closed-stdio")){close(0);close(1);close(2);}
   int rc=m15_supervise(s,child,&args,!strcmp(mode,"getter-block")?25u:5000u,now,&r);
   now+=r.elapsed_ms+1;
   if(rc || m15_finish(s,r.raw_wait,r.census_closed,now++))goto export_if_ready;
