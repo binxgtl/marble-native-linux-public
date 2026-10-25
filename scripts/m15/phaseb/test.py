@@ -209,5 +209,15 @@ class PhaseB(unittest.TestCase):
         bad=self.root/'bad.jsonl';bad.write_text('{"schema":"PRIVATE-FIXTURE-SECRET"}\n')
         p=subprocess.run([os.sys.executable,str(Path(replay.__file__)),str(bad)],capture_output=True,timeout=2)
         self.assertNotEqual(p.returncode,0);self.assertNotIn(b'PRIVATE-FIXTURE-SECRET',p.stdout+p.stderr)
+        self.check_unknown(json.loads(p.stdout))
+    def test_compare_cli_failure_keeps_unknowns_and_no_private_echo(self):
+        raw=self.raw();capture=self.root/'capture.jsonl';capture.write_bytes(raw)
+        ac=self.context(raw,'android');ac['topology']['serial_number']='PRIVATE-FIXTURE-SECRET'
+        ctx=self.root/'context.json';ctx.write_text(json.dumps(ac))
+        p=subprocess.run([os.sys.executable,str(Path(compare.__file__)),'--android-capture',str(capture),
+                          '--native-capture',str(capture),'--android-context',str(ctx),'--native-context',str(ctx)],
+                         capture_output=True,timeout=2)
+        self.assertNotEqual(p.returncode,0);self.assertNotIn(b'PRIVATE-FIXTURE-SECRET',p.stdout+p.stderr)
+        self.check_unknown(json.loads(p.stdout))
 
 if __name__=='__main__':unittest.main(argv=['test.py',*extra])

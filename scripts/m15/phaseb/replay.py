@@ -144,7 +144,9 @@ def main():
     try:r=analyze(a.capture.read_bytes())
     except (ValueError,TypeError,KeyError,OSError):
         # Do not echo malformed or privacy-sensitive raw input in errors.
-        print(json.dumps({'transcript_complete':False,'error':'invalid transcript','control_permitted':False}));return 1
+        print(json.dumps({'transcript_complete':False,'error':'invalid transcript','control_permitted':False,
+                          'freshness':'UNKNOWN','negotiated_contract':'UNKNOWN','protection_active':'UNKNOWN',
+                          'android_observer_compatibility':'UNKNOWN','charging_hardware_pass':False}));return 1
     print(json.dumps(r,indent=2));return 0 if r['telemetry']=='READABLE' else 2
 
 if __name__=='__main__':raise SystemExit(main())

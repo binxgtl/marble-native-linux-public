@@ -57,7 +57,9 @@ def main():
         nc=json.loads(a.native_context.read_bytes(),object_pairs_hook=replay.o1.no_duplicate_keys)
         r=compare(a.android_capture.read_bytes(),a.native_capture.read_bytes(),ac,nc)
     except (ValueError,TypeError,KeyError,OSError):
-        print(json.dumps({'comparison_eligibility':'BLOCKED','error':'invalid comparison input','control_permitted':False}));return 1
+        print(json.dumps({'comparison_eligibility':'BLOCKED','error':'invalid comparison input','control_permitted':False,
+                          'freshness':'UNKNOWN','negotiated_contract':'UNKNOWN','protection_active':'UNKNOWN',
+                          'android_observer_compatibility':'UNKNOWN','charging_hardware_pass':False}));return 1
     print(json.dumps(r,indent=2));return 0 if r['comparison_eligibility']=='ELIGIBLE' else 2
 
 if __name__=='__main__':raise SystemExit(main())
