@@ -71,7 +71,7 @@ def kmsg(lines):
     return out
 
 
-def capture(bodies, run=b'M11R30', ev=None):
+def capture(bodies, run=b'M11R31', ev=None):
     ev = journal() if ev is None else ev
     pieces = [frame('S', 0, b'run=' + run + b' nonce=0123456789abcdef0123456789abcdef\n')]
     for b in bodies:
@@ -155,7 +155,7 @@ def boot(spk=None, maps=2, extra_intents=(), session=None, terminal=None, seal=T
     return lines
 
 
-def verdict(lines, run=b'M11R30'):
+def verdict(lines, run=b'M11R31'):
     _, r = C.check(capture(kmsg(lines), run=run), JN, JI, ('1', 'absent', 'absent'))
     return r['p5_verdict'], r
 
@@ -198,7 +198,7 @@ def test_checker():
     lines = spk_lines()
     lines.insert(1, S + 'cfg_rsp dst=00004545 param=08001008 valid=1 status=00000001 rc=-121')
     assert verdict(boot(lines))[0] == 'spk-cfg-failure-unaccounted'
-    # Re: the read command refused (or Run30's GET_CFG of the write envelope) is accounted to rx_re
+    # Re: the read command refused (or Run28's GET_CFG of the write envelope) is accounted to rx_re
     refused = spk_lines(fail=(16, -121))
     at = next(i for i, ln in enumerate(refused) if 'step=16 rx_re' in ln)
     refused[at:at] = [re_rsp('01001006', '28/0/10013d1b'),
@@ -207,9 +207,9 @@ def test_checker():
     assert v == 'speaker-failed:rx_re:amp-never-enabled', v
     assert r['p5']['speaker']['re_responses'][1] == dict(op='01001006', size=24, type=1, msg='10013d1b', valid=1,
                                                          status=0x12, rc=-121, len=0, rsp_size=0, err=0, value=0)
-    run30 = spk_lines(fail=(16, -121))
-    run30[at:at] = [re_rsp('01001006', '28/0/10013d1b'), re_rsp('01001007', '28/0/10013d1b', rc=-121, status=0x12)]
-    assert verdict(boot(run30))[0] == 'speaker-failed:rx_re:amp-never-enabled'
+    run31 = spk_lines(fail=(16, -121))
+    run31[at:at] = [re_rsp('01001006', '28/0/10013d1b'), re_rsp('01001007', '28/0/10013d1b', rc=-121, status=0x12)]
+    assert verdict(boot(run31))[0] == 'speaker-failed:rx_re:amp-never-enabled'
     unaccounted = spk_lines(re_records=re_ok(0, 26100)[:2] + [re_rsp('01001007', '8/0/00000000', rc=-121, status=1)] +
                             re_ok(1, 28684))
     assert verdict(boot(unaccounted))[0] == 'spk-re-failure-unaccounted'
@@ -217,14 +217,15 @@ def test_checker():
     assert verdict(boot(no_cmd))[0] == 'spk-re-not-verified'
     print('PASS Re response provenance: a refused read command and Run28 GET_CFG fail at rx_re; an unaccounted '
           'failure and a read without its command are rejected')
-    # no EOS (stock PCM playback ends with stop; Run30 EOS {0,0}): an EOS record or an eos step is not this session
+    # no EOS (stock PCM playback ends with stop; consumed Run30 EOS {0,0}): an EOS record or an eos step is not this session
     lines = spk_lines()
     lines.insert(-3, S + 'eos_rsp tok=0000009b submit=0 tx=4 wait=0 dsp=00000000 ib=0/00000000 ren=1/8/40bd/40bd/1')
     assert verdict(boot(lines))[0] == 'spk-record-invalid'
     lines = spk_lines()
     lines.insert(-3, S + 'step=23 eos rc=0')
     assert verdict(boot(lines))[0] == 'spk-record-order'
-    print('PASS P5 check: no EOS in the speaker session (an EOS record or step 23 is rejected)')
+    assert verdict(boot(extra_intents=[intent(3, '04001002', 'policy=1')]))[0] == 'unexpected-eos-intent'
+    print('PASS P5 check: no EOS in the speaker session (EOS intent, response and step 23 rejected)')
     cases = [
         ('Re read-back failed (amplifier never enabled)', boot(spk_lines(fail=(16, -74))), 'speaker-failed:rx_re:amp-never-enabled'),
         ('RX START refused', boot(spk_lines(fail=(18, -121))), 'speaker-failed:rx_start:amp-never-enabled'),
@@ -256,6 +257,7 @@ def test_checker():
     assert r['p5_verdict'] == 'record-not-from-pid1', r['p5_verdict']
     assert verdict(boot(), run=b'M11R25')[0] == 'transport-invalid'
     assert verdict(boot(), run=b'M11R26')[0] == 'transport-invalid'
+    assert verdict(boot(), run=b'M11R30')[0] == 'transport-invalid'
     print(f'PASS P5 check: {len(cases) + 3} other shapes classified by category (failed steps with the amplifier state, '
           'UNSAFE amplifier, Re, PCM, UNMAP, MAP count, seal, plan, environment, grammar, order, caller, run id)')
 
