@@ -1,0 +1,13 @@
+{
+  "capture_sha256": "0dfa929e93d469043378ae3600aece2c740199e51a516810ef57ab634061b6e9",
+  "environment": "native",
+  "schema": "M15-context-v1",
+  "topology": {
+    "cable_inventory_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+    "charger_inventory_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+    "evidence_path": "direct-usb",
+    "instrumentation_inventory_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+    "power_source": "wall-charger",
+    "schema": "M15-topology-v1"
+  }
+}

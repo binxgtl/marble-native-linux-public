@@ -1,0 +1,13 @@
+{
+  "capture_sha256": "e1d2b5e7e01127de82b69647247f50e62fd44291c3826ff4af7ebc2df1ab76ca",
+  "environment": "android",
+  "schema": "M15-context-v1",
+  "topology": {
+    "cable_inventory_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+    "charger_inventory_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+    "evidence_path": "direct-usb",
+    "instrumentation_inventory_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+    "power_source": "pc-usb",
+    "schema": "M15-topology-v1"
+  }
+}

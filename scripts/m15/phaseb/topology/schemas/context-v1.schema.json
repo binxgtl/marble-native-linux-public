@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "M15 local capture context v1",
+  "description": "Environment is caller-declared. Android observer execution compatibility is UNKNOWN.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "environment",
+    "capture_sha256",
+    "topology"
+  ],
+  "properties": {
+    "schema": {
+      "const": "M15-context-v1"
+    },
+    "environment": {
+      "enum": [
+        "android",
+        "native"
+      ]
+    },
+    "capture_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "minLength": 64,
+      "maxLength": 64
+    },
+    "topology": {
+      "$ref": "topology-v1.schema.json"
+    }
+  }
+}

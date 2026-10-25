@@ -1,0 +1,15 @@
+{
+  "duration_ms": 112,
+  "eligible_result": "ELIGIBLE",
+  "field_count": 27,
+  "mismatch_result": "BLOCKED",
+  "observed_differences": [
+    "power_supply/usb/current_now",
+    "qcom-battery/apdo_max"
+  ],
+  "schema": "M15-fixture-expectations-v1",
+  "synthetic_only": true,
+  "unavailable": [
+    "qcom-battery/power_max"
+  ]
+}

@@ -1,0 +1,39 @@
+{
+  "description": "No Android/native device was executed; labels are synthetic comparison roles.",
+  "files": {
+    "android.context.synthetic.json": {
+      "bytes": 573,
+      "sha256": "2a2fa1da3b5cf4bc5f3ccc91ab2ffb51fa1b8d9fe76a19f66ef2c14a9fd0d431"
+    },
+    "android.synthetic.jsonl": {
+      "bytes": 8483,
+      "sha256": "e1d2b5e7e01127de82b69647247f50e62fd44291c3826ff4af7ebc2df1ab76ca"
+    },
+    "expected.synthetic.json": {
+      "bytes": 330,
+      "sha256": "26c31cf4fdc7c5611b997704c3f0ee0f92c5ab9816a29ae55dac61ab960b4cde"
+    },
+    "native-mismatch.context.synthetic.json": {
+      "bytes": 578,
+      "sha256": "875c1062108ccc086d0ed12c216032fae183c383a1b59e31786d4349a3706850"
+    },
+    "native.context.synthetic.json": {
+      "bytes": 572,
+      "sha256": "5775c6a6f1b342ab19da349553e2b312ee820c3e679e41bac2a82fbd2be3154e"
+    },
+    "native.synthetic.jsonl": {
+      "bytes": 8768,
+      "sha256": "0dfa929e93d469043378ae3600aece2c740199e51a516810ef57ab634061b6e9"
+    },
+    "topology-pc.synthetic.json": {
+      "bytes": 395,
+      "sha256": "e529fd590c68479675c502638d13818c2dbebbf739b6b413144b6adcb6f43afb"
+    },
+    "topology-wall.synthetic.json": {
+      "bytes": 401,
+      "sha256": "01dc4caeb72f1332aa879c7e740b368f3469c34703281b262a0b0bf0fcf28dc7"
+    }
+  },
+  "schema": "M15-fixture-bundle-v1",
+  "synthetic_only": true
+}

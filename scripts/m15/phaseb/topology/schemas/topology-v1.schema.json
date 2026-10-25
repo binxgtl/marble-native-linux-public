@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "M15 declared topology v1",
+  "description": "Inventory comparison eligibility only; not physical attestation or negotiated PD/PPS equivalence.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "charger_inventory_sha256",
+    "cable_inventory_sha256",
+    "instrumentation_inventory_sha256",
+    "power_source",
+    "evidence_path"
+  ],
+  "properties": {
+    "schema": {
+      "const": "M15-topology-v1"
+    },
+    "charger_inventory_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "minLength": 64,
+      "maxLength": 64
+    },
+    "cable_inventory_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "minLength": 64,
+      "maxLength": 64
+    },
+    "instrumentation_inventory_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "minLength": 64,
+      "maxLength": 64
+    },
+    "power_source": {
+      "enum": [
+        "pc-usb",
+        "wall-charger",
+        "pd-analyzer-source"
+      ]
+    },
+    "evidence_path": {
+      "enum": [
+        "direct-usb",
+        "ram-offline",
+        "external-analyzer"
+      ]
+    }
+  }
+}

@@ -20,6 +20,16 @@ jobs:
         run: bash scripts/m15/test.sh artifacts/m15/${{ runner.arch }}
       - name: O1 compatibility and O2 vendor-partner/comparison negative tests
         run: bash scripts/m15/phaseb/test.sh artifacts/m15/${{ runner.arch }}
+      - name: Offline topology manifests and end-to-end comparison fixture CLI
+        run: |
+          set -euo pipefail
+          python3 scripts/m15/phaseb/topology/test.py -v 2>&1 | tee artifacts/m15/${{ runner.arch }}/topology-tests.txt
+          python3 scripts/m15/phaseb/compare.py \
+            --android-capture scripts/m15/phaseb/topology/fixtures/android.synthetic.jsonl \
+            --native-capture scripts/m15/phaseb/topology/fixtures/native.synthetic.jsonl \
+            --android-context scripts/m15/phaseb/topology/fixtures/android.context.synthetic.json \
+            --native-context scripts/m15/phaseb/topology/fixtures/native.context.synthetic.json \
+            > artifacts/m15/${{ runner.arch }}/comparison-synthetic.json
       - name: Reproducible static observer (no hardware candidate)
         run: |
           set -euo pipefail
