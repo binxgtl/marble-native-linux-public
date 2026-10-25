@@ -1,0 +1,36 @@
+name: M12 Run11 native disconnect and reconnect
+on:
+  push:
+    branches: [m12/wifi]
+    paths: ['scripts/m12/run11/**', '.github/workflows/m12-run11.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  regression:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Production main, real control peer, PID1 parser and historical regressions
+        run: bash scripts/m12/run11/test.sh artifacts/m12/run11-${{ runner.arch }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: m12-run11-tests-${{ runner.arch }}-${{ github.sha }}
+          path: artifacts/m12/run11-${{ runner.arch }}/
+  build:
+    needs: regression
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash scripts/m12/run11/build.sh artifacts/m12/run11-build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: m12-run11-build-${{ github.sha }}
+          path: artifacts/m12/run11-build/
