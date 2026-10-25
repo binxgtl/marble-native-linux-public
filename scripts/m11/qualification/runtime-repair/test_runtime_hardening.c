@@ -1895,7 +1895,8 @@ static void p6_spf_state_bare_ack_is_not_success(void) {
 #define P7_WR_EP 0x40BDu
 #define P7_RD_EP 0x4547u
 /* gen_arg0: payload length override (0 = exact), gen_arg1: data status, gen_arg2: 1 = answer from APM's
- * port instead of the end point's, 2 = an IBASIC error instead of the completion */
+ * port instead of the end point's, 2 = an IBASIC error instead of the completion, 3 = an IBASIC status 0x12
+ * before the completion, 4 = the completion as a token-0 event */
 static void gen_data_rsp(sc_t *s, uint32_t token, uint32_t opcode) {
     uint8_t pl[64], p[SC_PKT_MAX];
     memset(pl, 0, sizeof(pl));
@@ -1905,6 +1906,8 @@ static void gen_data_rsp(sc_t *s, uint32_t token, uint32_t opcode) {
     else if (opcode == M11_DATA_CMD_WR_SH_MEM_EP_EOS) { rsp = M11_DATA_CMD_RSP_WR_SH_MEM_EP_EOS_RENDERED; len = 8; at = 4; }
     else if (opcode == M11_DATA_CMD_RD_SH_MEM_EP_DATA_BUFFER_V2) { rsp = M11_DATA_CMD_RSP_RD_SH_MEM_EP_DATA_BUFFER_DONE_V2; len = 56; at = 0; }
     if (s->gen_arg2 == 2u) { sc_push_ibasic(s, 0, port, token, opcode, 1u); return; }
+    if (s->gen_arg2 == 3u) sc_push_ibasic(s, 0, port, token, opcode, 0x12u);
+    if (s->gen_arg2 == 4u) token = 0u;
     if (s->gen_arg0) len = s->gen_arg0;
     memcpy(pl + at, &s->gen_arg1, sizeof(uint32_t));
     size_t n = sc_build(p, M11_GPR_DOMAIN_ADSP, s->gen_arg2 == 1u ? M11_APM_MODULE_IID : port, token, rsp, pl, len);
@@ -1968,6 +1971,48 @@ static void p7_malformed_or_misrouted_completions_are_dropped(void) {
         CHECK(rc == -ETIMEDOUT && SCG.rx_dropped_malformed == 1u, "opcode 0x%08x misrouted: rc=%d", ops[i], rc);
         sc_teardown();
     }
+}
+
+/* Run29: stock gsl_gpr_callback frees every IBASIC for the EOS; only EOS_RENDERED completes it. The raw
+ * evidence keeps the IBASIC status and the render status as received. */
+static void p7_eos_completes_on_rendered_only(void) {
+    uint32_t dsp = 0;
+    size_t len = 0;
+    sc_setup(gen_data_rsp, false);
+    SC.gen_arg1 = 1u; SC.gen_arg2 = 3u; /* IBASIC 0x12, then EOS_RENDERED 1 */
+    int rc = p7_send(M11_DATA_CMD_WR_SH_MEM_EP_EOS, &dsp, &len);
+    CHECK(rc == 0 && dsp == 0u && len == 8u, "IBASIC then rendered: rc=%d dsp=%u", rc, dsp);
+    CHECK(SCG.eos_ev.token != 0u && SCG.eos_ev.ibasic_count == 1u && SCG.eos_ev.ibasic_status == 0x12u);
+    CHECK(SCG.eos_ev.rendered_count == 1u && SCG.eos_ev.rendered_len == 8u && SCG.eos_ev.rendered_word[1] == 1u &&
+          SCG.eos_ev.rendered_port == P7_WR_EP);
+    sc_teardown();
+    sc_setup(gen_data_rsp, false);
+    SC.gen_arg2 = 2u; /* an IBASIC error and nothing else: not a completion, the wait times out */
+    rc = p7_send(M11_DATA_CMD_WR_SH_MEM_EP_EOS, &dsp, &len);
+    CHECK(rc == -ETIMEDOUT && SCG.eos_ev.ibasic_count == 1u && SCG.eos_ev.ibasic_status == 1u &&
+          SCG.eos_ev.rendered_count == 0u, "IBASIC only: rc=%d", rc);
+    sc_teardown();
+    sc_setup(gen_data_rsp, false);
+    SC.gen_arg1 = 2u; SC.gen_arg2 = 3u; /* dropped stays a failure, its raw status kept */
+    rc = p7_send(M11_DATA_CMD_WR_SH_MEM_EP_EOS, &dsp, &len);
+    CHECK(rc == -EREMOTEIO && dsp == 2u && SCG.eos_ev.rendered_word[1] == 2u && SCG.eos_ev.ibasic_count == 1u);
+    sc_teardown();
+    sc_setup(gen_data_rsp, false);
+    SC.gen_arg1 = 0u; /* invalid: normalized to UINT32_MAX, raw 0 kept */
+    rc = p7_send(M11_DATA_CMD_WR_SH_MEM_EP_EOS, &dsp, &len);
+    CHECK(rc == -EREMOTEIO && dsp == UINT32_MAX && SCG.eos_ev.rendered_count == 1u && SCG.eos_ev.rendered_word[1] == 0u);
+    sc_teardown();
+    sc_setup(gen_data_rsp, false);
+    SC.gen_arg1 = 1u; SC.gen_arg2 = 4u; /* EOS_RENDERED as a token-0 event: recorded, never a completion */
+    rc = p7_send(M11_DATA_CMD_WR_SH_MEM_EP_EOS, &dsp, &len);
+    CHECK(rc == -ETIMEDOUT && SCG.eos_ev.event_count == 1u && SCG.eos_ev.event_word[1] == 1u &&
+          SCG.eos_ev.rendered_count == 0u, "token-0 event: rc=%d", rc);
+    sc_teardown();
+    sc_setup(gen_data_rsp, false);
+    SC.gen_arg2 = 2u; /* a WR buffer IBASIC error still fails fast: only the EOS follows stock here */
+    rc = p7_send(M11_DATA_CMD_WR_SH_MEM_EP_DATA_BUFFER_V2, &dsp, &len);
+    CHECK(rc == -EREMOTEIO && SCG.eos_ev.token == 0u);
+    sc_teardown();
 }
 
 static void p7_data_command_nack_fails_fast(void) {
@@ -2213,6 +2258,7 @@ int main(void) {
     RUN(p7_data_commands_complete_on_their_own_responses);
     RUN(p7_malformed_or_misrouted_completions_are_dropped);
     RUN(p7_data_command_nack_fails_fast);
+    RUN(p7_eos_completes_on_rendered_only);
 #endif
     /* Simulator integration */
     RUN(sim_positive_path_unchanged);

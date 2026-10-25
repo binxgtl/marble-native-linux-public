@@ -183,6 +183,10 @@ MUTANTS = [
            "        if (get_rsp.env.data[0] != cal->q12_re[ch]) {",
            "        if (false && get_rsp.env.data[0] != cal->q12_re[ch]) { /* MUTANT */",
            "accept a read-back that differs from what was written"),
+    Mutant("M36", "P7", "m11_gpr_engine.c",
+           "        if (slot->req_opcode == M11_DATA_CMD_WR_SH_MEM_EP_EOS) {",
+           "        if (0) { /* MUTANT: an IBASIC for the EOS completes it (Run29) */",
+           "complete the EOS on an IBASIC instead of EOS_RENDERED"),
     Mutant("M35", "P3", "m11_aw_protection.c",
            "        rc = round_trip(user, safety_ctx->sp_rx_module_iid, M11_APM_CMD_SET_CFG,\n"
            "                        &read_cmd, sizeof(read_cmd), timeout_ms, NULL, 0, NULL, &handed);",

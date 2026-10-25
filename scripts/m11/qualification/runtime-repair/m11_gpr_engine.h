@@ -188,6 +188,25 @@ typedef enum {
     M11_GPR_RX_TRANSPORT_ERR = 2,  /* Engine state error, timeout, or poll_read_fn < 0 */
 } m11_gpr_rx_status_t;
 
+/*
+ * Raw evidence of the last WR_SH_MEM_EP_EOS submitted (Run29 failed at EOS with -121 and none of this recorded).
+ * Stock libar-gsl gsl_gpr_callback (0x120238) frees every IBASIC_RSP_RESULT for a data command, EOS included,
+ * whatever its status, and acts on DATA_CMD_RSP_WR_SH_MEM_EP_EOS_RENDERED only ({module, render status}: 1
+ * rendered, 2 dropped, else invalid). The engine does the same: an IBASIC for the EOS is counted here and the
+ * wait goes on for the render status. Everything is as received, before any normalization.
+ */
+typedef struct {
+    uint32_t token;             /* the EOS request's token; 0 = none submitted */
+    uint32_t ibasic_count;      /* IBASIC_RSP_RESULT with that token (not a completion) */
+    uint32_t ibasic_status;     /* the last one's status */
+    uint32_t rendered_count;    /* EOS_RENDERED with that token, any length or port */
+    uint32_t rendered_len;      /* the last one's payload length */
+    uint32_t rendered_port;     /* and its source port */
+    uint32_t rendered_word[2];  /* {module instance, render status} as received */
+    uint32_t event_count;       /* EOS_RENDERED with token 0 (an event: recorded, never a completion) */
+    uint32_t event_word[2];
+} m11_gpr_eos_evidence_t;
+
 /* Monotonic millisecond clock (injectable for deterministic tests). */
 typedef uint64_t (*m11_gpr_clock_ms_fn)(void *user);
 
@@ -212,6 +231,7 @@ typedef struct {
     void               *clock_user;
     uint32_t            rx_ibasic_ack_without_data;
     uint32_t            orphans_lost;  /* orphaned slots discarded by close or PDR */
+    m11_gpr_eos_evidence_t eos_ev;
     m11_gpr_slot_t      slots[M11_GPR_MAX_PENDING];
 } m11_gpr_engine_t;
 

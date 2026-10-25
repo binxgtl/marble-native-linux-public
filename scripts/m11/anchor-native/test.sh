@@ -1162,6 +1162,11 @@ p5c_mutant re-read-shape-unchecked "    if (shape != [('01001006', 28, 0), ('010
 p5c_mutant re-failure-unaccounted "    if re_failed and (len(re_failed) != 1 or re_rsp[-1] is not re_failed[0] or fail is None or fail[1] != 'rx_re' or" \
   "    if False and re_failed and (len(re_failed) != 1 or re_rsp[-1] is not re_failed[0] or fail is None or fail[1] != 'rx_re' or" \
   "boot(unaccounted)"
+p5c_mutant eos-evidence-unchecked "        if (fail[2] if fail is not None and fail[0] == eos_step else 0) != want:" \
+  '        if False:' "'spk-eos-evidence-mismatch'"
+p5c_mutant eos-render-unchecked "    if (eos['submit'] or eos['wait'] or eos['dsp'] or eos['rendered'] != 1 or eos['rendered_len'] != 8 or" \
+  "    if False and (eos['submit'] or eos['wait'] or eos['dsp'] or eos['rendered'] != 1 or eos['rendered_len'] != 8 or" \
+  "'spk-eos-not-rendered'"
 p5c_mutant unmap-unchecked "    if any(r['op'] in (OP_UNMAP, OP_CLOSE_ALL) for r in intents):" '    if False:' "('an UNMAP journaled'"
 p3_mutant() { # name asroot pattern replacement assertion last-pass (same detection rule as gtn_mutant)
   local name="$1" asroot="$2" pat="$3" rep="$4" want="$5" last="$6" dir="$out/cen-mutant-$1" rc=0 got file=custodian_entry_native.c

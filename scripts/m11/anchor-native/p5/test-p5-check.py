@@ -111,7 +111,12 @@ def re_ok(ch, value):
             re_rsp('01001007', '8/0/00000000', n=28, rsp=f'4/00000000/{value}')]
 
 
-def spk_lines(fail=None, re_read=None, amp_off_rc=0, teardown=None, end_bytes=PCM, re_records=None):
+def eos_rsp(submit=0, wait=0, dsp=0, ib='0/00000000', ren='1/8/40bd/40bd/1', ev='0/0/0', drop='0/0'):
+    return S + (f'eos_rsp tok=0000009b submit={submit} tx=4 wait={wait} dsp={dsp:08x} ib={ib} ren={ren} ev={ev} '
+                f'drop={drop}')
+
+
+def spk_lines(fail=None, re_read=None, amp_off_rc=0, teardown=None, end_bytes=PCM, re_records=None, eos=None):
     """The session's records: steps 1..23 (or up to a failing step), Re after rx_cfg, teardown, end, session."""
     out = [S + f'plan sha=ec7b1fc40b91d01f bytes=984360 pcm={PCM} level=8']
     q = (26100, 28684)
@@ -122,8 +127,12 @@ def spk_lines(fail=None, re_read=None, amp_off_rc=0, teardown=None, end_bytes=PC
             r = re_read or q
             out += re_ok(0, r[0]) + re_ok(1, r[1]) if re_records is None else re_records
             out.append(S + f're ch0=3/{q[0]}/{r[0]} ch1=3/{q[1]}/{r[1]}')
+        if name == 'eos' and eos != '':
+            out.append(eos or eos_rsp())
         out.append(S + f'step={n} {name} rc=0')
     if fail:
+        if C.SPK_STEPS[fail[0] - 1] == 'eos' and eos != '':
+            out.append(eos or eos_rsp(wait=fail[1]))
         out.append(S + f'step={fail[0]} {C.SPK_STEPS[fail[0] - 1]} rc={fail[1]}')
     amp = fail is None or fail[0] >= C.AMP_ON
     names = teardown if teardown is not None else ([n for n in C.TEARDOWN_ORDER if amp or n != 'amp_off'])
@@ -217,6 +226,21 @@ def test_checker():
     assert verdict(boot(no_cmd))[0] == 'spk-re-not-verified'
     print('PASS Re response provenance: a refused read command and Run28 GET_CFG fail at rx_re; an unaccounted '
           'failure and a read without its command are rejected')
+    # EOS (Run29): the errno must follow from the recorded evidence; played needs render status 1
+    for ev, rc in ((eos_rsp(wait=-110, ib='1/00000012', ren='0/0/0/0/0'), -110),
+                   (eos_rsp(wait=-121, dsp=2, ren='1/8/40bd/40bd/2'), -121),
+                   (eos_rsp(wait=-121, dsp=0xffffffff, ren='1/8/40bd/40bd/0'), -121),
+                   (eos_rsp(submit=-5, dsp=0xffffffff, ren='0/0/0/0/0'), -5)):
+        v, r = verdict(boot(spk_lines(fail=(23, rc), eos=ev)))
+        assert v == 'speaker-failed:eos:amp-off-verified', (v, ev)
+    assert r['p5']['speaker']['eos']['submit'] == -5
+    assert verdict(boot(spk_lines(fail=(23, -121), eos='')))[0] == 'spk-eos-evidence-missing'
+    assert verdict(boot(spk_lines(fail=(23, -121), eos=eos_rsp(wait=-110))))[0] == 'spk-eos-evidence-mismatch'
+    assert verdict(boot(spk_lines(eos=eos_rsp(ren='1/8/40bd/40bd/2'))))[0] == 'spk-eos-not-rendered'
+    v, r = verdict(boot(spk_lines(eos=eos_rsp(ib='1/00000012'))))
+    assert v == C.EXPECTED and r['p5']['speaker']['eos']['ibasic_status'] == 0x12, v
+    print('PASS EOS evidence: timeout, dropped, invalid and submit failures account for the errno; missing or '
+          'contradictory evidence and a non-rendered EOS rejected; an IBASIC before EOS_RENDERED 1 is recorded, not fatal')
     cases = [
         ('Re read-back failed (amplifier never enabled)', boot(spk_lines(fail=(16, -74))), 'speaker-failed:rx_re:amp-never-enabled'),
         ('RX START refused', boot(spk_lines(fail=(18, -121))), 'speaker-failed:rx_start:amp-never-enabled'),

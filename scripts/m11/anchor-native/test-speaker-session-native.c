@@ -163,6 +163,8 @@ typedef struct {
     uint32_t drop_op;       /* never answer this opcode */
     int bad_re;             /* GET_CFG reports another Re */
     unsigned wr_delay_ms;   /* delay each BUFFER_DONE */
+    uint32_t eos_ibasic;    /* nonzero: an IBASIC with this status for the EOS before its EOS_RENDERED */
+    uint32_t eos_render;    /* nonzero: this render status instead of 1 (rendered) */
 } peer_cfg;
 
 static void reply(int ep, const m11_gpr_hdr_t *h, uint32_t opcode, const void *pl, size_t n) {
@@ -219,7 +221,11 @@ static void peer(int ep, peer_cfg c) {
             uint32_t w[14] = {0};
             reply(ep, &h, M11_DATA_CMD_RSP_RD_SH_MEM_EP_DATA_BUFFER_DONE_V2, w, sizeof w);
         } else if (h.opcode == M11_DATA_CMD_WR_SH_MEM_EP_EOS) {
-            uint32_t w[2] = {h.dst_port, 1}; /* render status 1: rendered */
+            if (c.eos_ibasic) {
+                m11_gpr_ibasic_rsp_t ib = {.cmd_opcode = h.opcode, .status = c.eos_ibasic};
+                reply(ep, &h, M11_GPR_IBASIC_RSP_RESULT, &ib, sizeof ib);
+            }
+            uint32_t w[2] = {h.dst_port, c.eos_render ? c.eos_render : 1u}; /* render status 1: rendered */
             reply(ep, &h, M11_DATA_CMD_RSP_WR_SH_MEM_EP_EOS_RENDERED, w, sizeof w);
         } else {
             m11_gpr_ibasic_rsp_t r = {.cmd_opcode = h.opcode, .status = 0};
@@ -260,6 +266,7 @@ static char cfg_records[16][160];
 static unsigned ncfg_records;
 static char re_records[8][192];
 static unsigned nre_records;
+static char eos_record[192];
 static FILE *rec_out; /* M11_SPK_RECORDS: the happy path's records as speaker_entry_main writes them (P5 check cross-check) */
 static void record_cb(void *u, const char *line) {
     (void)u; nrec++;
@@ -267,6 +274,7 @@ static void record_cb(void *u, const char *line) {
         assert(ncfg_records < 16);
         snprintf(cfg_records[ncfg_records++], sizeof cfg_records[0], "%s", line);
     }
+    if (strstr(line, "phase=spk eos_rsp ") == line) snprintf(eos_record, sizeof eos_record, "%s", line);
     if (strstr(line, "phase=spk re_rsp ") == line) {
         assert(nre_records < 8);
         snprintf(re_records[nre_records++], sizeof re_records[0], "%s", line);
@@ -282,7 +290,7 @@ static int read_remote_errno(void *u, int fd, uint8_t *b, size_t cap, uint32_t m
 static void start(struct rig *r, peer_cfg c) {
     memset(r, 0, sizeof *r);
     nev = 0; nrec = 0; nsettle = 0; ignore_enable = 0; foreign_enable_at_rx_hw = 0; a_dir = 0; a_next = 0;
-    ncfg_records = 0; nre_records = 0;
+    ncfg_records = 0; nre_records = 0; eos_record[0] = '\0';
     memset(nodes, 0, sizeof nodes); memset(afd, 0, sizeof afd); memset(elem_value, 0, sizeof elem_value);
     elem_value[2] = elem_value[3] = 1; /* profiles start at Voice: the plan sets Music */
     if (fx_heap < 0) fx_heap = open("/dev/null", O_RDONLY | O_CLOEXEC);
@@ -415,6 +423,8 @@ int main(void) {
     assert(rep.bytes_played == 96000 && rep.buffers_sent == 13 && rep.buffers_done == 13 && rep.rd_queued == 2);
     assert(rep.re.pair_re_readback_verified && rep.regions_mapped == 2);
     assert(ncfg_records == 9);
+    /* the EOS as received: no IBASIC, one EOS_RENDERED of 8 bytes from the WR end point, render status 1 */
+    assert(strstr(eos_record, " submit=0 tx=4 wait=0 dsp=00000000 ib=0/00000000 ren=1/8/40bd/40bd/1 ev=0/0/0 drop=0/0"));
     /* Re per channel: the write, the stock read command, the read; the read returns the value written */
     assert(nre_records == 6);
     assert(strstr(re_records[0], "op=01001006 req=28/0/10013d1b valid=1 status=00000000 rc=0 len=0"));
@@ -498,6 +508,19 @@ int main(void) {
     start(&r, (peer_cfg){.drop_op = M11_DATA_CMD_WR_SH_MEM_EP_EOS});
     rc = run_session(&r, &rep, 5000);
     assert(rc == -ETIMEDOUT && rep.fail_step == M11_SPK_EOS && rep.amp_off_verified && rep.bytes_played == 96000);
+    assert(strstr(eos_record, " wait=-110 ") && strstr(eos_record, " ib=0/00000000 ren=0/0/0/0/0 "));
+    assert(stop(&r) == 0);
+    /* Run29: an IBASIC error for the EOS before its EOS_RENDERED 1 (stock gsl_gpr_callback frees it): played */
+    start(&r, (peer_cfg){.eos_ibasic = 0x12});
+    rc = run_session(&r, &rep, 5000);
+    assert(rc == 0 && rep.eos_rc == 0 && rep.amp_off_verified);
+    assert(strstr(eos_record, " wait=0 dsp=00000000 ib=1/00000012 ren=1/8/40bd/40bd/1 "));
+    assert(stop(&r) == 0);
+    /* EOS dropped (render status 2) stays a failure, raw status on record, amplifier off first */
+    start(&r, (peer_cfg){.eos_render = 2});
+    rc = run_session(&r, &rep, 5000);
+    assert(rc == -EREMOTEIO && rep.fail_step == M11_SPK_EOS && rep.amp_off_verified);
+    assert(strstr(eos_record, " wait=-121 dsp=00000002 ib=0/00000000 ren=1/8/40bd/40bd/2 "));
     assert(stop(&r) == 0);
     puts("PASS after the gate: a refused buffer, an Enable that does not read back, the amplifier window and a missing EOS each end with the switches driven and read back Disable before any stop");
 

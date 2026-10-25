@@ -32,7 +32,7 @@ typedef struct {
 
 static void rec(sess *s, const char *fmt, ...) {
     if (!s->io->record_fn) return;
-    char line[160];
+    char line[192]; /* speaker_entry_main frames it in 224 bytes */
     va_list ap;
     va_start(ap, fmt);
     int n = vsnprintf(line, sizeof line, fmt, ap);
@@ -388,11 +388,23 @@ static int run(sess *s) {
     if ((rc = play(s, chunk, wr_stride))) return fail(s, M11_SPK_PLAYED, "play", rc);
     done(s, M11_SPK_PLAYED, "play");
     uint32_t policy = 1u, eos_tok = 0u, dsp = UINT32_MAX;
-    rc = m11_custodian_data_submit(io->cust, s->g_rx, p->wr_ep, M11_DATA_CMD_WR_SH_MEM_EP_EOS, &policy, sizeof policy,
-                                   now(s), &eos_tok);
-    if (!rc) rc = m11_gpr_engine_wait_token(eng(s), eos_tok, io->eos_timeout_ms, &dsp, NULL, 0, NULL);
+    const uint32_t drop_tok0 = eng(s)->rx_dropped_unknown_token, drop_bad0 = eng(s)->rx_dropped_malformed;
+    const int submit = m11_custodian_data_submit(io->cust, s->g_rx, p->wr_ep, M11_DATA_CMD_WR_SH_MEM_EP_EOS, &policy,
+                                                 sizeof policy, now(s), &eos_tok);
+    const int eos_tx = (int)eng(s)->last_tx_status;
+    int wait = 0;
+    if (!submit) wait = m11_gpr_engine_wait_token(eng(s), eos_tok, io->eos_timeout_ms, &dsp, NULL, 0, NULL);
     pdr_note(s);
+    rc = submit ? submit : wait;
     if (!rc && dsp) rc = -EREMOTEIO;
+    /* the EOS as received (m11_gpr_eos_evidence_t): IBASIC count/status, EOS_RENDERED count/length/port/{module,
+     * render status}, token-0 EOS_RENDERED events, packets dropped during the wait (unknown token, malformed) */
+    const m11_gpr_eos_evidence_t *ev = &eng(s)->eos_ev;
+    rec(s, "phase=spk eos_rsp tok=%08x submit=%d tx=%d wait=%d dsp=%08x ib=%u/%08x ren=%u/%u/%x/%x/%u ev=%u/%x/%u "
+        "drop=%u/%u", eos_tok, submit, eos_tx, wait, dsp, ev->ibasic_count, ev->ibasic_status, ev->rendered_count,
+        ev->rendered_len, ev->rendered_port, ev->rendered_word[0], ev->rendered_word[1], ev->event_count,
+        ev->event_word[0], ev->event_word[1], eng(s)->rx_dropped_unknown_token - drop_tok0,
+        eng(s)->rx_dropped_malformed - drop_bad0);
     r->eos_rc = rc;
     if (rc) return fail(s, M11_SPK_EOS, "eos", rc);
     done(s, M11_SPK_EOS, "eos");

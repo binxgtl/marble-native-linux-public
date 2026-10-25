@@ -293,6 +293,10 @@ int m11_gpr_engine_submit_ex(m11_gpr_engine_t *eng, uint8_t client_data,
     slot->req_opcode = opcode;
     slot->expected_rsp_opcode = expected_rsp_for_req(opcode);
     slot->retain_on_timeout = m11_gpr_opcode_retains_on_timeout(opcode);
+    if (opcode == M11_DATA_CMD_WR_SH_MEM_EP_EOS) {
+        memset(&eng->eos_ev, 0, sizeof(eng->eos_ev));
+        eng->eos_ev.token = tok;
+    }
 
     int wrc = eng->transport.write_fn(eng->transport.user, eng->held_fd, pkt, pkt_len);
     *out_token = tok; /* valid from here on, even if write_fn failed */
@@ -357,6 +361,11 @@ int m11_gpr_engine_pump_once(m11_gpr_engine_t *eng, uint32_t timeout_ms) {
 
     /* Check if this is an unsolicited event (token == 0) */
     if (hdr.token == 0) {
+        if (hdr.opcode == M11_DATA_CMD_RSP_WR_SH_MEM_EP_EOS_RENDERED && eng->eos_ev.token) {
+            eng->eos_ev.event_count++;
+            memset(eng->eos_ev.event_word, 0, sizeof(eng->eos_ev.event_word));
+            memcpy(eng->eos_ev.event_word, pl, pl_len < 8u ? pl_len : 8u);
+        }
         eng->rx_unsolicited_events++;
         eng->last_rx_status = M11_GPR_RX_OK;
         if (eng->event_cb) {
@@ -371,6 +380,14 @@ int m11_gpr_engine_pump_once(m11_gpr_engine_t *eng, uint32_t timeout_ms) {
             slot = &eng->slots[i];
             break;
         }
+    }
+    if (eng->eos_ev.token && hdr.token == eng->eos_ev.token &&
+        hdr.opcode == M11_DATA_CMD_RSP_WR_SH_MEM_EP_EOS_RENDERED) {
+        eng->eos_ev.rendered_count++;
+        eng->eos_ev.rendered_len = (uint32_t)pl_len;
+        eng->eos_ev.rendered_port = hdr.src_port;
+        memset(eng->eos_ev.rendered_word, 0, sizeof(eng->eos_ev.rendered_word));
+        memcpy(eng->eos_ev.rendered_word, pl, pl_len < 8u ? pl_len : 8u);
     }
     if (!slot || slot->completed) {
         eng->rx_dropped_unknown_token++;
@@ -398,6 +415,13 @@ int m11_gpr_engine_pump_once(m11_gpr_engine_t *eng, uint32_t timeout_ms) {
             eng->rx_dropped_malformed++;
             eng->last_rx_status = M11_GPR_RX_DROPPED_PACKET;
             return -EPROTO;
+        }
+        if (slot->req_opcode == M11_DATA_CMD_WR_SH_MEM_EP_EOS) {
+            /* stock gsl_gpr_callback frees it, whatever the status: the EOS completes on EOS_RENDERED only */
+            eng->eos_ev.ibasic_count++;
+            eng->eos_ev.ibasic_status = ib.status;
+            eng->last_rx_status = M11_GPR_RX_OK;
+            return 0;
         }
         if (ib.status == 0u && slot->expected_rsp_opcode != M11_GPR_IBASIC_RSP_RESULT) {
             /*
