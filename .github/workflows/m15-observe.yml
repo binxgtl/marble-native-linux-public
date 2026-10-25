@@ -70,6 +70,7 @@ jobs:
         run: |
           set -euo pipefail
           sh -n scripts/m15/termux/capture.sh
+          findmnt -n -o OPTIONS /dev | tee artifacts/m15/${{ runner.arch }}/termux-host-dev-mount.txt
           for variant in normal sanitize; do
             sudo -E python3 scripts/m15/termux/test.py --binary artifacts/m15/${{ runner.arch }}/observe-o3-$variant -v 2>&1 | tee artifacts/m15/${{ runner.arch }}/termux-$variant.txt
           done

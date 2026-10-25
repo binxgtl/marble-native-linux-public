@@ -23,15 +23,17 @@ class Workflow(unittest.TestCase):
     def setUp(self):
         self.assertEqual(os.getuid(),0,'CI must run this RAM-only Linux harness via sudo')
         self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup);self.host=Path(self.tmp.name)
-        self.session=Path('/dev')/('m15-o3-test-'+uuid.uuid4().hex)
+        self.session=self.host/('m15-o3-test-'+uuid.uuid4().hex)
         self.session.mkdir(mode=0o700);self.addCleanup(lambda:shutil.rmtree(self.session))
         self.bin=self.host/'bin';self.bin.mkdir();self.tree=self.host/'fixture'
         self.env=os.environ.copy()
-        # Only production PATH is replaced. Mock filesystem type/uid tools expose
-        # guard faults; all other wrapper logic and shell process control is real.
+        # CI denies executing files staged below /dev (rc126/Permission denied).
+        # Substitute only the RAM prefix and PATH in the test copy; production
+        # keeps its /dev/tmpfs restriction. Mock fs/uid tools expose guard faults.
         original=(HERE/'capture.sh').read_text()
         self.assertEqual(original.count('PATH=/system/bin:/system/xbin'),1)
-        self.runner=original.replace('PATH=/system/bin:/system/xbin',f'PATH={self.bin}:/usr/bin:/bin')
+        self.assertEqual(original.count('/dev/'),2)
+        self.runner=original.replace('PATH=/system/bin:/system/xbin',f'PATH={self.bin}:/usr/bin:/bin').replace('/dev/',str(self.host)+'/')
         (self.session/'capture.sh').write_text(self.runner)
         self.put_tool('stat','if [ "$1" = -f ]; then printf "%s\\n" "${M15_MOCK_FS:-tmpfs}"; else exec /usr/bin/stat "$@"; fi')
         self.put_tool('id','if [ -n "${M15_MOCK_UID:-}" ]; then printf "%s\\n" "$M15_MOCK_UID"; else exec /usr/bin/id "$@"; fi')
