@@ -104,6 +104,9 @@ jobs:
           $PSVersionTable | Out-File runtime.txt
           python --version >> runtime.txt
           ./scripts/m15/native4/test-receiver.ps1 -Wire fixture/native1-normal/native1-synthetic.wire -Out artifacts/m15/windows | Tee-Object receiver-tests.txt
+      - name: COM completion/cancellation ownership fault injection (no COM open)
+        shell: pwsh
+        run: ./scripts/m15/native4/test-com.ps1 -Out artifacts/m15/windows/com-tests.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
