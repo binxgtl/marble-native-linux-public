@@ -80,8 +80,35 @@ jobs:
         run: bash scripts/m15/native1/test.sh artifacts/m15/${{ runner.arch }}
       - name: Native Phase3 custodian IPC and saved-file ACK integration (offline)
         run: bash scripts/m15/native3/test.sh artifacts/m15/${{ runner.arch }}
+      - name: Phase4 actual namespace PID1 ownership (offline)
+        run: bash scripts/m15/native4/test.sh artifacts/m15/${{ runner.arch }}
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: m15-observe-${{ runner.arch }}-${{ github.sha }}
           path: artifacts/m15/${{ runner.arch }}/
+  windows-receiver:
+    needs: regression
+    runs-on: windows-2025
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: m15-observe-X64-${{ github.sha }}
+          path: fixture
+      - name: Offline CSharp receiver and independent Python saved-file replay
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $PSVersionTable | Out-File runtime.txt
+          python --version >> runtime.txt
+          ./scripts/m15/native4/test-receiver.ps1 -Wire fixture/native1-normal/native1-synthetic.wire -Out artifacts/m15/windows | Tee-Object receiver-tests.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: m15-native4-windows-${{ github.sha }}
+          path: |
+            artifacts/m15/windows/
+            receiver-tests.txt
+            runtime.txt
