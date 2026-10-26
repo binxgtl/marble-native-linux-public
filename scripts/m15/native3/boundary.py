@@ -9,6 +9,7 @@ class Boundary:
         if not re.fullmatch('[0-9a-f]{32}',run) or run=='0'*32:raise ValueError('run')
         self.run=run;self.sequence=0;self.phase='pc';self.failed=False
         self.pending=None;self.journal=[];self.owners={};self.escrow_lost=False
+        self.collector=None
     def reject(self,reason):
         self.failed=True;raise ValueError(reason)
     def call_begin(self,name):
@@ -34,24 +35,39 @@ class Boundary:
         if expected is None or name!=expected or type(facts)!=dict or set(facts)!=set(required) or any(facts[k] is not True for k in required):self.reject('event-contract')
         calls={'pc':'admission','isolate':'unbind','wall':'attachment','reconnect':'rebind'}
         if self.phase in calls and (not self.journal or self.journal[-1]!=('end',calls[self.phase],0,0)):self.reject('missing-returned-operation')
-        if name in ('frozen','ack') and any(v is None for v in self.owners.values()):self.reject('unresolved-owner')
+        if name in ('frozen','ack') and not self.ownership_complete():self.reject('incomplete-collector-ownership')
         self.sequence+=1;self.phase=next_phase
-    def own(self,pid,start):
+    def own(self,pid,start,*,collector=False):
         key=(pid,start)
-        if self.failed or pid<=1 or start<0 or key in self.owners:self.reject('owner')
+        if (self.failed or self.phase not in ('pc','isolate','wall','collect') or
+            type(pid)!=int or type(start)!=int or pid<=1 or start<0 or
+            type(collector)!=bool or key in self.owners):self.reject('owner')
+        if collector and (self.phase!='collect' or self.collector is not None):self.reject('collector-owner')
         self.owners[key]=None
+        if collector:self.collector=key
+    @staticmethod
+    def terminal_wait(status):
+        # Canonical Linux waitpid status: exit byte or signal (+ core bit).
+        # Reject stop/continue, bool, negative, out-of-range and stray high bits.
+        if type(status)!=int or not 0<=status<=65535:return False
+        return status&255==0 or (status>>8==0 and 1<=status&127<=64)
+    def ownership_complete(self):
+        return (self.collector is not None and self.collector in self.owners and
+                bool(self.owners) and all(self.terminal_wait(v) and v==0 for v in self.owners.values()))
     def reaped(self,pid,start,status,custodian=False):
         key=(pid,start)
         if key not in self.owners or self.owners[key] is not None:self.reject('unknown-reap')
+        if not self.terminal_wait(status):self.reject('nonterminal-wait')
         self.owners[key]=status
         if custodian and (self.phase!='recovered' or status!=0):
             self.escrow_lost=True;self.failed=True
+        if status!=0:self.failed=True
     def timeout(self):
         # Deliberately no manufactured call_end, success, kill or teardown fact.
         self.failed=True
     @property
     def release_permitted(self):
-        return not self.failed and self.phase=='recovered' and all(v==0 for v in self.owners.values())
+        return not self.failed and self.phase=='recovered' and self.ownership_complete()
 
 class KernelSpool:
     def __init__(self,budget):

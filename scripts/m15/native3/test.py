@@ -168,6 +168,7 @@ class Integration(unittest.TestCase):
               (None,'ack',{'saved_file_verified':True,'ack_bound':True})]
         for seq,(call,event,facts) in enumerate(rows):
             if call:b.call_begin(call);b.call_end(call,0,0)
+            if event=='frozen':b.own(123,456,collector=True);b.reaped(123,456,0)
             b.event(seq,'1'*32,event,facts)
         self.assertTrue(b.release_permitted)
     def test_boundary_real_errno_and_missing_return(self):
@@ -186,8 +187,40 @@ class Integration(unittest.TestCase):
             self.assertFalse(b.release_permitted)
     def test_boundary_custodian_loss_every_phase(self):
         for phase in ('pc','isolate','wall','collect','reconnect','export','recovered'):
-            b=Boundary('1'*32);b.phase=phase;b.own(123,456);b.reaped(123,456,9,custodian=True)
+            b=Boundary('1'*32);b.own(123,456);b.phase=phase;b.reaped(123,456,9,custodian=True)
             self.assertTrue(b.escrow_lost);self.assertFalse(b.release_permitted)
+    def test_boundary_empty_owners_reject_freeze_ack_and_release(self):
+        for phase,event,facts in [('collect','frozen',{'collector_receipt':True,'census_closed':True}),
+                                  ('export','ack',{'saved_file_verified':True,'ack_bound':True})]:
+            b=Boundary('1'*32);b.phase=phase
+            with self.assertRaises(ValueError):b.event(0,'1'*32,event,facts)
+            self.assertTrue(b.failed);self.assertFalse(b.release_permitted)
+        b=Boundary('1'*32);b.phase='recovered';self.assertFalse(b.release_permitted)
+    def test_boundary_worker_cannot_substitute_for_collector(self):
+        b=Boundary('1'*32);b.phase='collect';b.own(123,456);b.reaped(123,456,0)
+        with self.assertRaises(ValueError):b.event(0,'1'*32,'frozen',{'collector_receipt':True,'census_closed':True})
+        self.assertFalse(b.release_permitted)
+    def test_boundary_terminal_wait_validation(self):
+        for status in (None,False,True,-1,65536,0x137f,0xffff,0x10009,0x80,0x7f,0x41,'0'):
+            b=Boundary('1'*32);b.phase='collect';b.own(123,456,collector=True)
+            with self.assertRaises(ValueError):b.reaped(123,456,status)
+            self.assertIsNone(b.owners[(123,456)]);self.assertFalse(b.release_permitted)
+    def test_boundary_failed_terminal_wait_is_recorded_but_never_releases(self):
+        for status in (256,9,0x89,0xff00):
+            b=Boundary('1'*32);b.phase='collect';b.own(123,456,collector=True);b.reaped(123,456,status)
+            self.assertEqual(b.owners[(123,456)],status);self.assertTrue(b.failed)
+            with self.assertRaises(ValueError):b.event(0,'1'*32,'frozen',{'collector_receipt':True,'census_closed':True})
+            self.assertFalse(b.release_permitted)
+    def test_boundary_unreaped_worker_blocks_completed_collector(self):
+        b=Boundary('1'*32);b.phase='collect';b.own(123,456,collector=True);b.own(124,457);b.reaped(123,456,0)
+        with self.assertRaises(ValueError):b.event(0,'1'*32,'frozen',{'collector_receipt':True,'census_closed':True})
+        self.assertFalse(b.release_permitted)
+    def test_boundary_duplicate_collector_and_postfreeze_owner_rejected(self):
+        b=Boundary('1'*32);b.phase='collect';b.own(123,456,collector=True)
+        with self.assertRaises(ValueError):b.own(124,457,collector=True)
+        b=Boundary('1'*32);b.phase='collect';b.own(123,456,collector=True);b.reaped(123,456,0)
+        b.event(0,'1'*32,'frozen',{'collector_receipt':True,'census_closed':True})
+        with self.assertRaises(ValueError):b.own(124,457)
     def test_boundary_unknown_or_duplicate_reap(self):
         b=Boundary('1'*32);b.own(123,456)
         with self.assertRaises(ValueError):b.reaped(123,457,0)
