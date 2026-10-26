@@ -21,17 +21,21 @@ static void custodian(int out,int in,int mode){
  assert(!prctl(PR_SET_CHILD_SUBREAPER,1));
  send_byte(out,'B');assert(receive(in)=='G');
  pid_t worker=fork();assert(worker>=0);
- if(!worker){assert(setsid()>0);if(mode==2){struct timespec t={0,100000000};nanosleep(&t,NULL);}_exit(0);}
+ if(!worker){assert(setsid()>0);if(mode==6)raise(SIGSTOP);if(mode==7){execl("/nonexistent-m15-fixture","fixture",(char *)NULL);_exit(127);}if(mode==2){struct timespec t={0,100000000};nanosleep(&t,NULL);}_exit(0);}
  send_byte(out,'W');
  if(mode==2){for(;;)pause();}
- int status;assert(waitpid(worker,&status,0)==worker && status==0);
+ int status;
+ if(mode==6){assert(waitpid(worker,&status,WUNTRACED)==worker && WIFSTOPPED(status));assert(!kill(worker,SIGCONT));}
+ assert(waitpid(worker,&status,0)==worker);
+ if(mode==7){assert(WIFEXITED(status)&&WEXITSTATUS(status)==127);send_byte(out,'E');for(;;)pause();}
+ assert(status==0);
  assert(waitpid(-1,&status,WNOHANG)==-1 && errno==ECHILD);
  send_byte(out,'F');assert(receive(in)=='A');send_byte(out,'R');
  assert(receive(in)=='L');_exit(0);
 }
 int main(int argc,char **argv){
  assert(argc==3 && !strcmp(argv[1],"--namespace-fixture") && getpid()==1);
- int mode=atoi(argv[2]);assert(mode>=0 && mode<=5);
+ int mode=atoi(argv[2]);assert(mode>=0 && mode<=7);
  assert(signal(SIGCHLD,SIG_DFL)!=SIG_ERR);assert(signal(SIGPIPE,SIG_IGN)!=SIG_ERR);
  int to[2],from[2];assert(!pipe2(to,O_CLOEXEC)&&!pipe2(from,O_CLOEXEC));
  /* Unrelated logger belongs to PID1, never to the collector ledger. */
@@ -47,8 +51,8 @@ int main(int argc,char **argv){
   send_byte(to[1],'G');assert(receive(from[0])=='W');
   if(mode==2)failed=1;
   else {
-   assert(receive(from[0])=='F');
-   if(mode==3)failed=1;
+   char result=receive(from[0]);assert(result==(mode==7?'E':'F'));
+   if(mode==3 || mode==7)failed=1;
    else {send_byte(to[1],'A');assert(receive(from[0])=='R');recovered=1;
     if(mode==4 || mode==5)failed=1;
     else { /* Separate parent sidecar before explicit release. */
@@ -72,8 +76,8 @@ int main(int argc,char **argv){
  }
  assert(closed && child_reaped && logger_reaped);
  assert(mode!=2 || adopted==1);
- assert(mode!=0 || (!failed && recovered && released && !adopted));
- assert(mode==0 || (failed && !released));
+ assert((mode!=0 && mode!=6) || (!failed && recovered && released && !adopted));
+ assert(mode==0 || mode==6 || (failed && !released));
  printf("RESULT pid1=1 mode=%d hold=%d recovered=%d released=%d adopted=%d device_safety=UNKNOWN\n",mode,failed,recovered,released,adopted);
  close(pidfd);close(to[1]);close(from[0]);
  /* Fixture completion exits namespace; not production HOLD implementation. */

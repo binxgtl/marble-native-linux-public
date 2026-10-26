@@ -9,7 +9,7 @@ for variant in normal sanitize; do
  if [[ $variant == sanitize ]]; then flags+=(-O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -fno-pie -no-pie); fi
  gcc "${flags[@]}" scripts/m15/native4/pid1.c -o "$out/pid1-$variant"
  gcc "${flags[@]}" scripts/m15/native1/escrow.c scripts/m15/native1/supervise.c scripts/m15/native4/custodian.c -o "$out/native4-custodian-$variant"
- for mode in 0 1 2 3 4 5; do
+ for mode in 0 1 2 3 4 5 6 7; do
   # Namespace teardown may prevent LSan from tracing PID1; ASan/UBSan remain on.
   sudo env ASAN_OPTIONS=detect_leaks=0 timeout 15s unshare --mount --pid --fork --mount-proc "$out/pid1-$variant" --namespace-fixture "$mode"
  done | tee "$out/native4-pid1-$variant.txt"
