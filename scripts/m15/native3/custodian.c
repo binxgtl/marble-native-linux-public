@@ -31,7 +31,7 @@ static size_t command(struct m15 *s,unsigned seq,char out[512]) {
  uint64_t deadline=now()+3000;
  while(now()<deadline && n<sizeof(b)-1) {
   char c;ssize_t k=read(0,&c,1);
-  if(k==1){b[n++]=c;if(c=='\n')break;}
+  if(k==1){if(c!='\n' && ((unsigned char)c<32 || (unsigned char)c>126))held(s);b[n++]=c;if(c=='\n')break;}
   else if(k==0 || (errno!=EAGAIN && errno!=EINTR))held(s);
   else {struct pollfd f={0,POLLIN,0};if(poll(&f,1,10)<0 && errno!=EINTR)held(s);}
  }

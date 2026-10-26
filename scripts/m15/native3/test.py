@@ -12,6 +12,7 @@ import tempfile
 import time
 import unittest
 from receiver import Receiver,host
+from boundary import Boundary,KernelSpool,provenance
 
 p=argparse.ArgumentParser();p.add_argument('--custodian',type=Path,required=True)
 p.add_argument('--observer',type=Path,required=True);p.add_argument('--wire',type=Path,required=True)
@@ -99,6 +100,8 @@ class Integration(unittest.TestCase):
         l=self.link();l.start();l.p.stdin.close();l.until(b'HOLD');self.assertIsNone(l.p.poll())
     def test_partial_ipc(self):
         l=self.link();l.until(b'READY');l.p.stdin.write(b'M15IPC1 partial');l.p.stdin.flush();l.until(b'HOLD',5)
+    def test_embedded_nul_cannot_hide_ipc_suffix(self):
+        l=self.link();l.start();l.command(2,b'WALL 1 1\x00ignored\n');l.until(b'HOLD');self.assertFalse(l.raw)
     def test_unbind_failure_stops_before_collection(self):
         l=self.link();ready=l.until(b'READY').split();l.command(0,b'M15PC1 '+ready[1]+b' '+ready[2]+b'\n')
         l.until(b'ISOLATE');l.command(1,b'ISOLATED 1 0\n');l.until(b'HOLD');self.assertFalse(l.raw)
@@ -155,5 +158,55 @@ class Integration(unittest.TestCase):
     def test_receiver_budget(self):
         r=self.receiver()
         with self.assertRaises(ValueError):r.feed(b'x'*(16*1024*1024+1))
+    def test_boundary_full_synthetic_connector_lifecycle(self):
+        b=Boundary('1'*32)
+        rows=[('admission','admitted',{'host_receipt':True}),
+              ('unbind','isolated',{'transmitter_reaped':True,'unbind_readback_empty':True}),
+              ('attachment','attached',{'operator_declared_wall':True,'pc_absent':True}),
+              (None,'frozen',{'collector_receipt':True,'census_closed':True}),
+              ('rebind','connected',{'pc_configured':True}),
+              (None,'ack',{'saved_file_verified':True,'ack_bound':True})]
+        for seq,(call,event,facts) in enumerate(rows):
+            if call:b.call_begin(call);b.call_end(call,0,0)
+            b.event(seq,'1'*32,event,facts)
+        self.assertTrue(b.release_permitted)
+    def test_boundary_real_errno_and_missing_return(self):
+        b=Boundary('1'*32);b.call_begin('admission')
+        with self.assertRaises(ValueError):b.call_end('admission',-1,5)
+        self.assertEqual(b.journal[-1],('end','admission',-1,5));self.assertFalse(b.release_permitted)
+        b=Boundary('1'*32);b.call_begin('admission');b.timeout()
+        self.assertEqual(b.journal,[('begin','admission')]);self.assertFalse(b.release_permitted)
+    def test_boundary_forged_events(self):
+        for seq,run,facts in [(1,'1'*32,{'host_receipt':True}),
+                              (0,'2'*32,{'host_receipt':True}),
+                              (0,'1'*32,{'host_receipt':1}),
+                              (0,'1'*32,{'host_receipt':True,'extra':True})]:
+            b=Boundary('1'*32);b.call_begin('admission');b.call_end('admission',0,0)
+            with self.assertRaises(ValueError):b.event(seq,run,'admitted',facts)
+            self.assertFalse(b.release_permitted)
+    def test_boundary_custodian_loss_every_phase(self):
+        for phase in ('pc','isolate','wall','collect','reconnect','export','recovered'):
+            b=Boundary('1'*32);b.phase=phase;b.own(123,456);b.reaped(123,456,9,custodian=True)
+            self.assertTrue(b.escrow_lost);self.assertFalse(b.release_permitted)
+    def test_boundary_unknown_or_duplicate_reap(self):
+        b=Boundary('1'*32);b.own(123,456)
+        with self.assertRaises(ValueError):b.reaped(123,457,0)
+        self.assertFalse(b.release_permitted)
+    def test_kernel_spool_exact_bytes_and_freeze(self):
+        s=KernelSpool(128);raw=b'6,101,999,-;fixture\n';s.append(raw)
+        self.assertEqual(s.freeze()[0],raw)
+        with self.assertRaises(ValueError):s.append(raw)
+    def test_kernel_spool_loss_duplicate_and_overflow(self):
+        for second in (b'6,101,1000,-;duplicate\n',b'6,103,1000,-;gap\n',b'broken\n',b'x'*200):
+            s=KernelSpool(128);s.append(b'6,101,999,-;fixture\n')
+            with self.assertRaises(ValueError):s.append(second)
+            with self.assertRaises(ValueError):s.freeze()
+    def test_provenance_never_promotes_native_or_android(self):
+        v={k:'a'*64 for k in ('source','observer','launcher','kernel','closure','firmware','topology','evidence_path')}
+        v.update(schema='M15-native-integration-fixture-v1',synthetic_only=True,
+                 launcher_kind='dedicated-custodian',control_permitted=False,sealed_baseline=False)
+        self.assertFalse(provenance(v)['comparison_eligible'])
+        for key,value in [('synthetic_only',False),('launcher_kind','android-termux'),('control_permitted',True),('observer','bad')]:
+            with self.assertRaises(ValueError):provenance(dict(v,**{key:value}))
 
 if __name__=='__main__':unittest.main(argv=['test.py']+REST)
