@@ -16,6 +16,7 @@ namespace M15Offline {
   readonly long[] sizes=new long[6]; readonly StringBuilder line=new StringBuilder();
   public bool Done {get;private set;}
   public long Bytes {get{return total;}}
+  string nonce;public string ExpectedAck {get;private set;}
   static long Num(string s) {
    if(!Regex.IsMatch(s,@"\A(?:0|[1-9][0-9]{0,9})\z"))throw new InvalidDataException("integer");
    return long.Parse(s,System.Globalization.CultureInfo.InvariantCulture);
@@ -25,7 +26,7 @@ namespace M15Offline {
    string[] a=s.Split(' ');
    if(phase==0){
     if(a.Length!=4||a[0]!="M15E1"||!Regex.IsMatch(a[1],@"\A[0-9a-f]{32}\z")||a[1]==new string('0',32)||!Hash(a[2])||a[3]!="6")throw new InvalidDataException("header");
-    phase=1;return;
+    nonce=a[1];phase=1;return;
    }
    if(phase==1){
     if(a.Length!=4||a[0]!="I"||Num(a[1])!=index||!Hash(a[3]))throw new InvalidDataException("manifest");
@@ -37,7 +38,7 @@ namespace M15Offline {
    while(file<6 && offset==sizes[file]){file++;offset=0;}
    if(file==6){
     if(a.Length!=5||a[0]!="F"||Num(a[1])!=sequence||Num(a[2])!=total-s.Length-1||!Hash(a[3])||!Hash(a[4]))throw new InvalidDataException("final");
-    Done=true;return;
+    ExpectedAck="M15ACK1 "+nonce+" "+a[3]+" "+a[4]+"\n";Done=true;return;
    }
    if(a.Length!=5||a[0]!="D"||Num(a[1])!=sequence||Num(a[2])!=file||Num(a[3])!=offset||Num(a[4])!=Math.Min(1024,sizes[file]-offset))throw new InvalidDataException("frame");
    payload=Num(a[4]);sequence++;
@@ -72,7 +73,7 @@ namespace M15Offline {
     f.Flush(true);
    }
    byte[] ack=verify(path);
-   if(ack==null||ack.Length>256||!Regex.IsMatch(Encoding.ASCII.GetString(ack),@"\AM15ACK1 [0-9a-f]{32} [0-9a-f]{64} [0-9a-f]{64}\n\z"))throw new InvalidDataException("ack");
+   if(ack==null||ack.Length>256||Encoding.ASCII.GetString(ack)!=scan.ExpectedAck)throw new InvalidDataException("ack-binding");
    transport.Reconcile();
    int off=0;
    while(off<ack.Length){
@@ -87,10 +88,10 @@ namespace M15Offline {
   readonly byte[] bytes;readonly int chunk;readonly string fault;int at=0;
   public readonly MemoryStream Ack=new MemoryStream();public int Reads=0;
   public FakeTransport(byte[] bytes,int chunk,string fault){this.bytes=bytes;this.chunk=chunk;this.fault=fault;}
-  public int Read(byte[] b){Reads++;if(fault=="read")throw new IOException("fixture");
+  public int Read(byte[] b){Reads++;if(fault=="slow")System.Threading.Thread.Sleep(20);if(fault=="zero")return 0;if(fault=="read")throw new IOException("fixture");
    if(at==bytes.Length)throw new Exception("EOF read forbidden: sender waits for ACK");
    int n=Math.Min(Math.Min(chunk,b.Length),bytes.Length-at);Array.Copy(bytes,at,b,0,n);at+=n;return n;}
   public void Reconcile(){if(fault=="pending"||fault=="overrun"||at!=bytes.Length)throw new IOException("unresolved-or-extra");}
-  public int Write(byte[] b,int off,int n){if(fault=="ack")return 0;n=Math.Min(n,3);Ack.Write(b,off,n);return n;}
+  public int Write(byte[] b,int off,int n){if(fault=="ack"||(fault=="partial-ack"&&off>0))return 0;n=Math.Min(n,3);Ack.Write(b,off,n);return n;}
  }
 }
