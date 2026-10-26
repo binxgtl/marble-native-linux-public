@@ -78,6 +78,8 @@ jobs:
           done
       - name: Native Phase1 RAM escrow, real subreaper, independent host (offline)
         run: bash scripts/m15/native1/test.sh artifacts/m15/${{ runner.arch }}
+      - name: Native Phase3 custodian IPC and saved-file ACK integration (offline)
+        run: bash scripts/m15/native3/test.sh artifacts/m15/${{ runner.arch }}
       - uses: actions/upload-artifact@v4
         if: always()
         with:

@@ -1,0 +1,159 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
+import argparse
+import errno
+import json
+import os
+from pathlib import Path
+import selectors
+import signal
+import subprocess
+import tempfile
+import time
+import unittest
+from receiver import Receiver,host
+
+p=argparse.ArgumentParser();p.add_argument('--custodian',type=Path,required=True)
+p.add_argument('--observer',type=Path,required=True);p.add_argument('--wire',type=Path,required=True)
+ARGS,REST=p.parse_known_args()
+
+class Link:
+    def __init__(self,root,observer=None):
+        self.p=subprocess.Popen([str(ARGS.custodian.resolve()),'--offline-fixture',
+            str((observer or ARGS.observer).resolve()),str(root/'fixture'),'collect'],
+            stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,start_new_session=True)
+        self.selector=selectors.DefaultSelector();self.lines=[];self.pending=b'';self.raw=bytearray()
+        for f in (self.p.stdout,self.p.stderr):
+            os.set_blocking(f.fileno(),False);self.selector.register(f,selectors.EVENT_READ)
+    def until(self,prefix,timeout=15):
+        end=time.monotonic()+timeout
+        while time.monotonic()<end:
+            for i,line in enumerate(self.lines):
+                if line.startswith(prefix):return self.lines.pop(i)
+            for key,_ in self.selector.select(.05):
+                raw=os.read(key.fileobj.fileno(),4096)
+                if not raw:self.selector.unregister(key.fileobj);continue
+                if key.fileobj is self.p.stdout:self.raw.extend(raw)
+                else:
+                    self.pending+=raw
+                    while b'\n' in self.pending:
+                        line,self.pending=self.pending.split(b'\n',1);self.lines.append(line)
+            if self.p.poll() is not None and not self.selector.get_map():raise RuntimeError('custodian-lost: ownership/safety UNKNOWN')
+        raise TimeoutError(prefix)
+    def command(self,seq,payload,nonce=b'0102030405060708090a0b0c0d0e0f10'):
+        self.p.stdin.write(b'M15IPC1 '+nonce+b' '+str(seq).encode()+b' '+payload);self.p.stdin.flush()
+    def start(self):
+        ready=self.until(b'READY ').split()
+        self.command(0,b'M15PC1 '+ready[1]+b' '+ready[2]+b'\n');self.until(b'ISOLATE_BEGIN')
+        self.command(1,b'ISOLATED 1 1\n');self.until(b'WALL_WAIT')
+    def freeze(self):
+        self.start();self.command(2,b'WALL 1 1\n');self.until(b'FROZEN')
+    def export(self):
+        self.command(3,b'PC 1\n');line=self.until(b'WAIT_ACK ')
+        count=int(line.split()[1]);end=time.monotonic()+2
+        while len(self.raw)<count and time.monotonic()<end:
+            for key,_ in self.selector.select(.02):
+                raw=os.read(key.fileobj.fileno(),4096)
+                if key.fileobj is self.p.stdout:self.raw.extend(raw)
+                elif raw:raise AssertionError('unexpected control')
+        if len(self.raw)!=count:raise AssertionError('incomplete wire')
+        return bytes(self.raw)
+    def close(self):
+        # TEST teardown only. Never a runtime recovery policy or safety proof.
+        if self.p.poll() is None:os.killpg(self.p.pid,signal.SIGKILL)
+        self.p.wait(timeout=5)
+        self.selector.close()
+        for f in (self.p.stdin,self.p.stdout,self.p.stderr):f.close()
+
+class Integration(unittest.TestCase):
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup);self.root=Path(self.tmp.name)
+        self.wire=ARGS.wire.read_bytes()
+        files,_,_=host.decode(self.wire)
+        for row in host.contract.o3.legacy.load(files['capture.raw']):
+            if row.get('kind')=='read_end' and row['rc']==0:
+                path=self.root/'fixture'/'class'/row['group']/row['path'];path.parent.mkdir(parents=True,exist_ok=True)
+                path.write_text(row['value']+'\n')
+    def link(self,observer=None):
+        link=Link(self.root,observer);self.addCleanup(link.close);return link
+    def receiver(self,**kw):
+        r=Receiver(self.root/'capture',**kw);self.addCleanup(lambda:r.abort() if r.fd is not None else None);return r
+    def test_full_custodian_o3_saved_replay_ack_with_unrelated_child(self):
+        logger=subprocess.Popen(['sleep','30']);self.addCleanup(lambda:(logger.kill(),logger.wait()) if logger.poll() is None else None)
+        l=self.link();l.freeze();raw=l.export();r=self.receiver()
+        for at in range(0,len(raw),7):r.feed(raw[at:at+7])
+        ack=r.finish(len(raw));l.command(4,ack);l.until(b'RECOVERED evidence_only')
+        self.assertEqual(l.p.wait(timeout=5),0);self.assertIsNone(logger.poll())
+        self.assertEqual((self.root/'capture').read_bytes(),raw)
+    def test_missing_ack_retains_live_custodian(self):
+        l=self.link();l.freeze();l.export();l.until(b'HOLD',5);self.assertIsNone(l.p.poll())
+    def test_wrong_ack_retains_live_custodian(self):
+        l=self.link();l.freeze();l.export();l.command(4,b'wrong\n');l.until(b'HOLD');self.assertIsNone(l.p.poll())
+    def test_broken_reconnect(self):
+        l=self.link();l.freeze();l.command(3,b'PC 0\n');l.until(b'HOLD');self.assertFalse(l.raw)
+    def test_wrong_sequence(self):
+        l=self.link();l.until(b'READY');l.command(1,b'wrong\n');l.until(b'HOLD')
+    def test_wrong_nonce(self):
+        l=self.link();l.until(b'READY');l.command(0,b'wrong\n',b'0'*32);l.until(b'HOLD')
+    def test_parent_ipc_disconnect(self):
+        l=self.link();l.start();l.p.stdin.close();l.until(b'HOLD');self.assertIsNone(l.p.poll())
+    def test_partial_ipc(self):
+        l=self.link();l.until(b'READY');l.p.stdin.write(b'M15IPC1 partial');l.p.stdin.flush();l.until(b'HOLD',5)
+    def test_unbind_failure_stops_before_collection(self):
+        l=self.link();ready=l.until(b'READY').split();l.command(0,b'M15PC1 '+ready[1]+b' '+ready[2]+b'\n')
+        l.until(b'ISOLATE');l.command(1,b'ISOLATED 1 0\n');l.until(b'HOLD');self.assertFalse(l.raw)
+    def test_collector_exec_failure_retains_evidence(self):
+        l=self.link(self.root/'absent');l.start();l.command(2,b'WALL 1 1\n');l.until(b'HOLD');self.assertFalse(l.raw)
+    def test_custodian_death_before_collection_is_not_success(self):
+        l=self.link();l.start();l.p.kill()
+        with self.assertRaises(RuntimeError):l.until(b'RECOVERED')
+    def test_custodian_death_after_freeze_loses_escrow(self):
+        l=self.link();l.freeze();l.p.kill()
+        with self.assertRaises(RuntimeError):l.until(b'RECOVERED')
+    def test_receiver_short_writes_exact(self):
+        r=self.receiver(write=lambda fd,b:os.write(fd,b[:3]));r.feed(self.wire)
+        self.assertTrue(r.finish(len(self.wire)).startswith(b'M15ACK1 '))
+    def test_receiver_zero_write(self):
+        r=self.receiver(write=lambda fd,b:0)
+        with self.assertRaises(OSError):r.feed(self.wire)
+        with self.assertRaises(ValueError):r.finish(len(self.wire))
+    def test_receiver_disk_full(self):
+        def full(fd,b):raise OSError(errno.ENOSPC,'fixture')
+        r=self.receiver(write=full)
+        with self.assertRaises(OSError):r.feed(self.wire)
+        self.assertTrue(r.failed)
+    def test_receiver_flush_failure_no_ack(self):
+        def fail(fd):raise OSError(errno.EIO,'fixture')
+        r=self.receiver(sync=fail);r.feed(self.wire)
+        with self.assertRaises(OSError):r.finish(len(self.wire))
+        self.assertTrue(r.failed)
+    def test_receiver_partial_capture_no_ack(self):
+        r=self.receiver();r.feed(self.wire[:-1])
+        with self.assertRaises(ValueError):r.finish(len(self.wire))
+    def test_receiver_corrupt_capture_no_ack(self):
+        r=self.receiver();r.feed(self.wire.replace(b'M15E1',b'M15E9',1))
+        with self.assertRaises(ValueError):r.finish(len(self.wire))
+    def test_receiver_reopen_corruption_no_ack(self):
+        def corrupt(fd):
+            os.fsync(fd)
+            with (self.root/'capture').open('r+b') as f:f.write(b'X')
+        r=self.receiver(sync=corrupt);r.feed(self.wire)
+        with self.assertRaises(ValueError):r.finish(len(self.wire))
+    def test_receiver_no_overwrite(self):
+        r=self.receiver();r.feed(b'original')
+        with self.assertRaises(FileExistsError):Receiver(self.root/'capture')
+    def test_receiver_abort_no_ack(self):
+        r=self.receiver();r.feed(self.wire);r.abort()
+        with self.assertRaises(ValueError):r.finish(len(self.wire))
+    def test_receiver_receipt_collision_no_ack(self):
+        r=self.receiver();r.feed(self.wire);(self.root/'capture.receipt.json').write_text('original')
+        with self.assertRaises(FileExistsError):r.finish(len(self.wire))
+    def test_receiver_chunk_boundaries_identical(self):
+        r=self.receiver()
+        for at in range(0,len(self.wire),511):r.feed(self.wire[at:at+511])
+        ack=r.finish(len(self.wire));self.assertEqual(ack,host.decode(self.wire)[2])
+    def test_receiver_budget(self):
+        r=self.receiver()
+        with self.assertRaises(ValueError):r.feed(b'x'*(16*1024*1024+1))
+
+if __name__=='__main__':unittest.main(argv=['test.py']+REST)
