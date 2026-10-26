@@ -2,6 +2,7 @@
 // COM operation lifecycle over an injected driver. No native handle is opened.
 using System;
 using System.IO;
+using System.Collections.Generic;
 namespace M15Offline {
  public enum IoState { Pending, Complete, Aborted, Failed }
  public struct IoResult {
@@ -10,6 +11,8 @@ namespace M15Offline {
  }
  public interface IComDriver {
   // Driver owns pinned buffer/OVERLAPPED until a terminal result and Release.
+  // Begin must either return the ownership token or throw BEFORE submission;
+  // it must never throw away the token for a submitted native operation.
   object Begin(bool write,byte[] buffer,int offset,int count);
   IoResult Wait(object operation,int milliseconds);
   int Cancel(object operation); // request only; even ERROR_NOT_FOUND is not completion
@@ -20,6 +23,10 @@ namespace M15Offline {
  public sealed class ComAdapter:ITransport,IDisposable {
   readonly IComDriver driver;readonly int timeout,cancelBudget;
   object active;bool failed,closed;
+  static readonly List<ComAdapter> quarantine=new List<ComAdapter>();
+  bool retained;
+  void Retain(){if(active!=null&&!retained){lock(quarantine){quarantine.Add(this);retained=true;}}}
+  public bool Retained {get{return retained;}}
   public int LastError {get;private set;}
   public int CancelError {get;private set;}
   public bool OwnershipUnresolved {get{return active!=null;}}
@@ -53,14 +60,14 @@ namespace M15Offline {
     if(expired)throw new TimeoutException("COM deadline exceeded even if cancellation raced completion");
     if(r.State!=IoState.Complete||r.Error!=0||r.Bytes<=0||r.Bytes>count)throw new IOException("COM completion error/count");
     CheckStatus(false);return r.Bytes;
-   }catch{failed=true;throw;}
+   }catch{failed=true;Retain();throw;}
   }
   public int Read(byte[] b){return Transfer(false,b,0,b.Length);}
   public int Write(byte[] b,int offset,int count){return Transfer(true,b,offset,count);}
   public void Reconcile(){Usable();try{CheckStatus(true);}catch{failed=true;throw;}}
   public void Dispose(){
    if(closed)return;
-   if(active!=null){failed=true;throw new IOException("COM retained: unresolved operation cannot be closed");}
+   if(active!=null){failed=true;Retain();throw new IOException("COM retained: unresolved operation cannot be closed");}
    try{driver.Close();closed=true;}catch{failed=true;throw;}
   }
  }
@@ -99,7 +106,7 @@ namespace M15Offline {
    foreach(int cancel in new[]{0,1168,5})foreach(var finish in new[]{IoState.Pending,IoState.Complete,IoState.Aborted}){
     var d=new ComFake{CancelResult=cancel,Results=new[]{new IoResult(IoState.Pending,0,997),new IoResult(finish,1,0)}};
     a=new ComAdapter(d,10,5);Reject(()=>a.Read(bytes));Must(a.Failed&&d.Cancels==1&&a.CancelError==cancel);
-    if(finish==IoState.Pending){Must(a.OwnershipUnresolved&&d.Releases==0);Reject(()=>a.Dispose());Must(d.Closes==0);}
+    if(finish==IoState.Pending){Must(a.OwnershipUnresolved&&a.Retained&&d.Releases==0);Reject(()=>a.Dispose());Must(d.Closes==0);}
     else{Must(!a.OwnershipUnresolved);a.Dispose();Must(d.Closes==1);}
     Reject(()=>a.Write(bytes,0,1));Must(d.Begins==1);tests++;
    }
@@ -111,7 +118,7 @@ namespace M15Offline {
     var d=new ComFake{ThrowBegin=fault=="begin",ThrowWait=fault=="wait",ThrowRelease=fault=="release",ThrowStatus=fault=="status",ThrowCancel=fault=="cancel"};
     if(fault=="cancel")d.Results=new[]{new IoResult(IoState.Pending,0,997)};
     a=new ComAdapter(d,10,5);Reject(()=>a.Read(bytes));Must(a.Failed);
-    if(fault=="wait"||fault=="release"||fault=="cancel"){Must(a.OwnershipUnresolved);Reject(()=>a.Dispose());Must(d.Closes==0);}
+    if(fault=="wait"||fault=="release"||fault=="cancel"){Must(a.OwnershipUnresolved&&a.Retained);Reject(()=>a.Dispose());Must(d.Closes==0);}
     else a.Dispose();tests++;
    }
    return tests;
