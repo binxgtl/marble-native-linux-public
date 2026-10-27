@@ -22,4 +22,17 @@ foreach($fault in @('','wrong-binding','zero-nonce','wrong-tag','trailing','part
  }elseif(!$failed -or $t.Ack.Length -ne 0){throw "Fault accepted: $fault"}
  $count++
 }
+$tmp=Join-Path ([IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString()+'.fixture')
+try {
+ [IO.File]::WriteAllText($tmp,"M15E1 $nonce $binding 6`n")
+ [M15Offline.PcSmoke]::VerifyBinding($tmp,$nonce,$binding);$count++
+ foreach($bad in @('nonce','binding')){
+  $failed=$false
+  try{
+   if($bad -eq 'nonce'){[M15Offline.PcSmoke]::VerifyBinding($tmp,('3'*32),$binding)}
+   else{[M15Offline.PcSmoke]::VerifyBinding($tmp,$nonce,('3'*64))}
+  }catch{$failed=$true}
+  if(!$failed){throw 'Cross-session capture accepted'};$count++
+ }
+} finally {Remove-Item -LiteralPath $tmp}
 @{cases=$count;pass=$true;hardware=$false;com_open=$false}|ConvertTo-Json|Set-Content $Out

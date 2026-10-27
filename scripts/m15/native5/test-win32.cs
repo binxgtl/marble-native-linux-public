@@ -44,7 +44,7 @@ namespace M15Offline {
     tests++;
    }
    foreach(string port in new[]{"","COM0","COM1/other","\\\\.\\COM1","com1"}){
-    try{WindowsIo.Open(port,10);throw new Exception("bad port accepted");}catch(ArgumentException){}tests++;
+    try{WindowsIo.Open(port,1001);throw new Exception("bad port accepted");}catch(ArgumentException){}tests++;
    }
    return tests;
   }

@@ -59,5 +59,9 @@ for mode in ('complete','wrong-admission','wrong-final','disconnect','display-ex
             os.killpg(p.pid,signal.SIGKILL);p.wait(timeout=5) # test-only namespace disposal
             log.close();os.close(slave)
             if not closed:os.close(master)
+            # Synthetic CI artifacts only: production Receiver still creates
+            # private 0600 files. Permit the non-root upload action to read them.
+            for artifact in out.iterdir():
+                if artifact.is_file():artifact.chmod(0o644)
         print('PASS',mode,flush=True)
 print('PASS 8 actual PID1/PTTY/Custodian/O3 integration cases; synthetic telemetry; no hardware')
