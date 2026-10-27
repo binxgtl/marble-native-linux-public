@@ -82,6 +82,8 @@ jobs:
         run: bash scripts/m15/native3/test.sh artifacts/m15/${{ runner.arch }}
       - name: Phase4 actual namespace PID1 ownership (offline)
         run: bash scripts/m15/native4/test.sh artifacts/m15/${{ runner.arch }}
+      - name: Native preparation color admissions and I/O errors (offline)
+        run: bash scripts/m15/native5/test.sh artifacts/m15/${{ runner.arch }}
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -107,6 +109,9 @@ jobs:
       - name: COM completion/cancellation ownership fault injection (no COM open)
         shell: pwsh
         run: ./scripts/m15/native4/test-com.ps1 -Out artifacts/m15/windows/com-tests.json
+      - name: Win32 binding over injected API (no COM open)
+        shell: pwsh
+        run: ./scripts/m15/native5/test-win32.ps1 -Out artifacts/m15/windows/win32-tests.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
