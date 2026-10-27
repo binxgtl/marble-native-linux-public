@@ -17,7 +17,7 @@
 #ifndef M15_STAGE_BUDGET
 #define M15_STAGE_BUDGET 300000
 #endif
-enum phase { START,HOST,HOST_ACK,BLUE_PENDING,BLUE_WAIT,UNBIND_WAIT,ISOLATE_WAIT,YELLOW_PENDING,WALL_WAIT,COLLECT,SEAL_WAIT,GREEN_PENDING,GREEN_WAIT,GREEN_REMOVED,REBIND_WAIT,RETURN_HOST,CYAN_PENDING,EXPORT,COMPLETE_PENDING,DONE };
+enum phase { START,HOST,HOST_ACK,BLUE_PENDING,PC_ONLY_WAIT,BLUE_WAIT,UNBIND_WAIT,ISOLATE_WAIT,YELLOW_PENDING,WALL_WAIT,COLLECT,SEAL_WAIT,GREEN_PENDING,GREEN_WAIT,GREEN_REMOVED,REBIND_WAIT,RETURN_HOST,CYAN_PENDING,EXPORT,COMPLETE_PENDING,DONE };
 static int journal=-1,failed,display_in=-1,tty=-1;static unsigned colors=1;
 static struct parent_ledger owners;
 static unsigned long long now(void){struct timespec t;if(clock_gettime(CLOCK_MONOTONIC,&t))return 0;return (unsigned long long)t.tv_sec*1000+t.tv_nsec/1000000;}
@@ -35,7 +35,8 @@ static int snapshot(const char *source,const char *target){int a=open(source,O_R
 int main(int argc,char **argv){
  if(getpid()!=1)return 64;
  signal(SIGPIPE,SIG_IGN);signal(SIGCHLD,SIG_DFL);
- if(argc!=2)goto hold;
+ if(argc!=3||(strcmp(argv[2],"pc-admission-only")&&strcmp(argv[2],"pc-wall-pc")))goto hold;
+ int pc_only=!strcmp(argv[2],"pc-admission-only");
  const char *run="/run/m15",*cust="/sbin/m15-custodian",*screen="/sbin/m15-display",*conn="/sbin/m15-connector",*obs="/sbin/m15-observe-o3",*port="/dev/ttyGS0",*kmsg="/dev/kmsg";
 #ifdef M15_RUNTIME_TEST
  run=getenv("M15_RUN");cust=getenv("M15_CUSTODIAN");screen=getenv("M15_DISPLAY");conn=getenv("M15_CONNECTOR");obs=getenv("M15_OBSERVER");port=getenv("M15_TTY");kmsg=getenv("M15_KMSG");
@@ -115,16 +116,16 @@ int main(int argc,char **argv){
    else if(phase==GREEN_REMOVED&&!strcmp(xb,"ATTACHED")){send_line(xi[1],"BIND\n");phase=REBIND_WAIT;}
    else if(phase==REBIND_WAIT&&!strcmp(xb,"BOUND")){
     tty=opentty(port);if(tty<0){failed=1;break;}
-    int n=snprintf((char *)pending,sizeof(pending),"M15RETURN1 %s %s\n",nonce,binding);used=(size_t)n;sent=0;phase=RETURN_HOST;
+    int n=snprintf((char *)pending,sizeof(pending),"M15RETURN1 %s %s %s\n",nonce,binding,argv[2]);used=(size_t)n;sent=0;phase=RETURN_HOST;
    }else if(phase!=DONE)failed=1;
   }
   if(phase==START&&cr&&xr){
    tty=opentty(port);if(tty<0){failed=1;break;}
-   int n=snprintf((char *)pending,sizeof(pending),"M15NATIVE1 %s %s\n",nonce,binding);used=(size_t)n;sent=0;phase=HOST;
+   int n=snprintf((char *)pending,sizeof(pending),"M15NATIVE1 %s %s %s\n",nonce,binding,argv[2]);used=(size_t)n;sent=0;phase=HOST;
   }
   if(p[2].revents&&line(ds[0],db,&dat,sizeof(db))){
    record(db);
-   if(phase==BLUE_PENDING&&!strcmp(db,"M15DISPLAY 0 BLUE committed")){phase=BLUE_WAIT;deadline=now()+M15_STAGE_BUDGET;}
+   if(phase==BLUE_PENDING&&!strcmp(db,"M15DISPLAY 0 BLUE committed")){phase=pc_only?PC_ONLY_WAIT:BLUE_WAIT;record(pc_only?"PC_ONLY retain_no_wall_admission":"WALL_SCOPE operator_declared");deadline=now()+M15_STAGE_BUDGET;}
    else if(phase==YELLOW_PENDING&&!strcmp(db,"M15DISPLAY 1 YELLOW mapped"))phase=WALL_WAIT;
    else if(phase==GREEN_PENDING&&!strcmp(db,"M15DISPLAY 2 GREEN mapped"))phase=GREEN_WAIT;
    else if(phase==CYAN_PENDING&&!strcmp(db,"M15DISPLAY 3 CYAN mapped")){snprintf(cmd,sizeof(cmd),"M15IPC1 %s 4 PC 1\n",nonce);send_line(ci[1],cmd);phase=EXPORT;}

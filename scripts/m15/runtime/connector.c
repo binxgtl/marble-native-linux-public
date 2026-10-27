@@ -24,6 +24,11 @@ int connector_event(struct connector *s,const void *data,size_t size,int kernel,
  char header[1024];int z=snprintf(header,sizeof(header),"%s@%s",action,path);
  if(z<0||(size_t)z!=first||memcmp(header,b,first))return fail(s);
  s->sequence=value;s->have=1;
+ /* Controller/port teardown can also remove a partner. Loss of any ancestor
+  * invalidates continuity; it must never count as a physical cable swap. */
+ size_t path_n=strlen(path),partner_n=strlen(s->partner);
+ if(path_n<partner_n&&!strncmp(path,s->partner,path_n)&&s->partner[path_n]=='/'&&
+    (!strcmp(action,"remove")||!strcmp(action,"unbind")||!strcmp(action,"add")))return fail(s);
  if(strcmp(sub,"typec")||strcmp(path,s->partner))return 0;
  if(!strcmp(action,"add")){if(s->attached)return fail(s);s->attached=1;return 1;}
  if(!strcmp(action,"remove")){if(!s->attached)return fail(s);s->attached=0;return 2;}

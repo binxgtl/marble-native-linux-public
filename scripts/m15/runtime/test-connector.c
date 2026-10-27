@@ -23,5 +23,6 @@ int main(void){
  struct connector x={0};strcpy(x.partner,p);
  const char duplicate[]="add@/x\0ACTION=add\0ACTION=remove\0DEVPATH=/x\0SUBSYSTEM=typec\0SEQNUM=1\0";
  assert(connector_event(&x,duplicate,sizeof(duplicate)-1,1,0)<0);
+ for(int i=0;i<3;i++){struct connector ancestor={.attached=1};strcpy(ancestor.partner,p);assert(feed(&ancestor,1,i==0?"remove":i==1?"unbind":"add","/devices/fixture/typec/port0",1,0)<0);}
  puts("PASS connector kernel-peer, strict sequence, add/remove, wrong path, loss, duplicate and truncation fixtures; physical runtime UNKNOWN");
 }

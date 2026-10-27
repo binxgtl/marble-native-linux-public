@@ -22,16 +22,24 @@ def decode(raw,*,allow_fixture=False):
     data=files['kernel.txt'];marker=b'M15_PARENT_JOURNAL\n'
     if data.count(marker)!=1:raise ValueError('native-kernel-boundary')
     kmsg,journal=data.split(marker)
-    previous=None
+    previous=None;first=None
     for row in kmsg.splitlines(keepends=True):
         m=host.re.fullmatch(rb'[0-9]+,([0-9]+),[0-9]+,[^;\n]+;[^\x00]*\n',row)
-        if not m:raise ValueError('native-kernel-record')
+        if not m:
+            # kmsg optional dictionary lines belong to the preceding record.
+            if previous is not None and host.re.fullmatch(rb' [A-Z0-9_]+=[^\x00\n]*\n',row):continue
+            raise ValueError('native-kernel-record')
         n=int(m[1])
         if previous is not None and n!=previous+1:raise ValueError('native-kernel-gap')
         previous=n
+        if first is None:first=n
     if previous is None or not journal.endswith(b'\n') or b'KERNEL_COVERAGE_END before_freeze' not in journal:raise ValueError('native-kernel-incomplete')
+    for event in (b'CONNECTOR_READY',b'REMOVED',b'UNBOUND',b'ATTACHED',b'COLLECT_RETURNED'):
+        if event not in journal:raise ValueError('native-parent-stage-missing')
+    metadata=json.loads(files['metadata.json'])
     report.update(schema='M15-native-runtime-host-verification-v1',native_runtime_proven=False,
-                  comparison_eligible=False,physical_connector_reported=True,
+                  comparison_eligible=False,physical_connector_reported=not metadata['synthetic_only'],
+                  kernel_first_sequence=first,kernel_last_sequence=previous,
                   charger_identity='operator-reported',runtime_kernel_identity_verified=False)
     return files,report,ack
 def verify(path,allow_fixture=False):

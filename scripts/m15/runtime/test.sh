@@ -5,7 +5,7 @@ out=$1
 mkdir -p "$out/runtime"
 sh -n scripts/m15/runtime/init
 sh -n scripts/m15/runtime/bootstrap
-python3 scripts/m15/runtime/test.py -v 2>&1 | tee "$out/runtime/python-tests.txt"
+M15_OLD_WIRE="$out/native1-normal/native1-synthetic.wire" python3 scripts/m15/runtime/test.py -v 2>&1 | tee "$out/runtime/python-tests.txt"
 chmod +x scripts/m15/runtime/fake-connector.py scripts/m15/native6/fake-display.py
 for variant in normal sanitize; do
  flags=(-std=c11 -O2 -Wall -Wextra -Werror)

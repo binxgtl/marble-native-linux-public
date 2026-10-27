@@ -33,6 +33,19 @@ static int put(const char *path,const char *v){
 }
 static void message(const char *text){if(dprintf(1,"%s\n",text)<0)_exit(70);}
 static int sink_role(void){char b[80];return !attr("/sys/class/typec/port0/power_role",b,sizeof(b))&&(!strcmp(b,"sink")||strstr(b,"[sink]"));}
+static int same_port(const char *expected){char real[PATH_MAX];return realpath("/sys/class/typec/port0",real)&&!strcmp(real,expected);}
+static int partner_snapshot(int present,const char *port){
+ unsigned long long end=now()+5000;
+ while(now()<end){
+  struct stat st;int rc=lstat(P,&st),error=errno;
+  if(rc&&error!=ENOENT)return -1;
+  if((rc==0)==present)return same_port(port)&&sink_role()?0:-1;
+  /* Device uevents can precede class-link removal/publication. A deadline
+   * merely bounds readback polling; it never supplies a missing predicate. */
+  (void)poll(NULL,0,10);
+ }
+ errno=ETIMEDOUT;return -1;
+}
 static int configured(void){char b[80];return !attr(U "/state",b,sizeof(b))&&!strcmp(b,"configured");}
 static int unbind(void){
  char b[128],f[128];
@@ -61,6 +74,7 @@ int main(void){
  signal(SIGPIPE,SIG_IGN);setvbuf(stdout,NULL,_IONBF,0);
  int fd=socket(AF_NETLINK,SOCK_DGRAM|SOCK_CLOEXEC|SOCK_NONBLOCK,NETLINK_KOBJECT_UEVENT),one=1,size=1048576;
  if(fd<0||setsockopt(fd,SOL_SOCKET,SO_PASSCRED,&one,sizeof(one))||setsockopt(fd,SOL_SOCKET,SO_RCVBUF,&size,sizeof(size)))goto fail;
+ {socklen_t n=sizeof(size);if(getsockopt(fd,SOL_SOCKET,SO_RCVBUF,&size,&n)||n!=sizeof(size)||size<262144)goto fail;dprintf(2,"M15 uevent receive buffer=%d\n",size);}
  struct sockaddr_nl local={.nl_family=AF_NETLINK,.nl_groups=1};
  if(bind(fd,(struct sockaddr *)&local,sizeof(local)))goto fail;
  char real[PATH_MAX];if(!realpath("/sys/class/typec/port0",real)||strncmp(real,"/sys/devices/",13))goto fail;
@@ -89,8 +103,8 @@ int main(void){
    for(struct cmsghdr *c=CMSG_FIRSTHDR(&msg);c;c=CMSG_NXTHDR(&msg,c))if(c->cmsg_level==SOL_SOCKET&&c->cmsg_type==SCM_CREDENTIALS&&c->cmsg_len==CMSG_LEN(sizeof(struct ucred))){struct ucred u;memcpy(&u,CMSG_DATA(c),sizeof(u));kernel=u.pid==0&&u.uid==0&&u.gid==0;}
    kernel=kernel&&msg.msg_namelen==sizeof(peer)&&peer.nl_family==AF_NETLINK&&peer.nl_pid==0;
    int event=connector_event(&s,bytes,(size_t)n,kernel,msg.msg_flags&(MSG_TRUNC|MSG_CTRUNC));if(event<0)goto fail;
-   if(event==2){if(!lstat(P,&st)||errno!=ENOENT)goto fail;message("REMOVED");}
-   if(event==1){if(lstat(P,&st)||!sink_role())goto fail;message("ATTACHED");}
+   if(event==2){if(partner_snapshot(0,real))goto fail;message("REMOVED");}
+   if(event==1){if(partner_snapshot(1,real))goto fail;message("ATTACHED");}
   }
   if(p[1].revents){
    char c;ssize_t n=read(0,&c,1);if(n<0&&errno==EINTR)continue;

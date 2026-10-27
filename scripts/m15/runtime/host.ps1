@@ -9,6 +9,8 @@ Add-Type -Path @("$PSScriptRoot/../native4/Receiver.cs","$PSScriptRoot/../native
 $python=(Get-Command python).Source
 & $python -c 'import sys,json;sys.path.insert(0,sys.argv[1]);from provenance import validate;validate(json.load(open(sys.argv[2],encoding="utf-8")))' $PSScriptRoot $Metadata
 if($LASTEXITCODE -ne 0){throw 'Native metadata invalid'}
+$metadataObject=Get-Content -LiteralPath $Metadata -Raw | ConvertFrom-Json
+if($Phase -eq 'export' -and $metadataObject.experiment -ne 'pc-wall-pc'){throw 'PC-only experiment cannot export a wall capture'}
 $binding=(Get-FileHash -LiteralPath $Metadata -Algorithm SHA256).Hash.ToLowerInvariant()
 $nonce='';$expectedAck='';$handle=$null
 if($Phase -eq 'export'){
@@ -19,11 +21,12 @@ if($Phase -eq 'export'){
 } elseif(Test-Path -LiteralPath $Admission){throw 'Admission already exists; no automatic retry'}
 try {
  $handle=[M15Offline.WindowsIo]::Open($Port,110000,100000)
- $nonce=[M15Offline.NativeHost]::Admit($handle,$binding,$nonce,($Phase -eq 'export'))
+ $nonce=[M15Offline.NativeHost]::Admit($handle,$binding,$nonce,($Phase -eq 'export'),$metadataObject.experiment)
  if($Phase -eq 'admit'){
   $receipt=@{schema='M15-native-admission-v1';nonce=$nonce;binding=$binding;charger_identity='operator-reported';control_permitted=$false}|ConvertTo-Json -Compress
   [M15Offline.NativeHost]::Save($Admission,[Text.Encoding]::UTF8.GetBytes($receipt+"`n"))
-  'Admission submitted. Disconnect PC only after continuous BLUE; follow separately approved runbook.'
+  if($metadataObject.experiment -eq 'pc-admission-only'){'PC-only admission submitted. Keep PC connected; no wall-source acquisition is admitted.'}
+  else{'Admission submitted. Disconnect PC only after continuous BLUE; follow separately approved runbook.'}
  } else {
   $verify=[Func[string,byte[]]]{
    param($path)

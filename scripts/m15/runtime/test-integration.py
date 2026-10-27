@@ -7,7 +7,7 @@ HERE=Path(__file__).resolve().parent
 sys.path.insert(0,str(HERE));import provenance,verify
 pid1,custodian,observer,wire,out=map(lambda x:Path(x).resolve(),sys.argv[1:]);out.mkdir(parents=True,exist_ok=True)
 files,_,_=verify.host.decode(wire.read_bytes())
-for mode in ('complete','green-retained','wrong-reconnect','wrong-ack','connector-failure','missing-ack'):
+for mode in ('complete','green-retained','wrong-reconnect','wrong-ack','connector-failure','missing-ack','pc-only'):
     with tempfile.TemporaryDirectory() as tmp:
         root=Path(tmp)
         for row in verify.host.contract.o3.legacy.load(files['capture.raw']):
@@ -16,13 +16,13 @@ for mode in ('complete','green-retained','wrong-reconnect','wrong-ack','connecto
         paths={}
         for role in provenance.ROLES:
             p=root/role;p.write_bytes(('fixture-'+role).encode());paths[role]=str(p)
-        meta=root/'metadata.json';meta.write_text(json.dumps(provenance.inventory(paths,True)),encoding='utf-8')
+        meta=root/'metadata.json';meta.write_text(json.dumps(provenance.inventory(paths,True,"pc-admission-only" if mode=="pc-only" else "pc-wall-pc")),encoding='utf-8')
         km=root/'kmsg';km.write_bytes(b'6,100,1000,-;fixture kernel\n')
         fifo=root/'events';os.mkfifo(fifo);events=os.open(fifo,os.O_RDWR|os.O_NONBLOCK)
         master,slave=pty.openpty();os.set_blocking(master,False)
         env=dict(os.environ,M15_RUN=str(root),M15_CUSTODIAN=str(custodian),M15_DISPLAY=str(HERE.parent/'native6/fake-display.py'),M15_CONNECTOR=str(HERE/'fake-connector.py'),M15_OBSERVER=str(observer),M15_TTY=os.ttyname(slave),M15_KMSG=str(km),M15_FIXTURE_ROOT=str(root/'fixture'),M15_EVENTS=str(fifo))
         log=(out/(mode+'.process')).open('wb')
-        process=subprocess.Popen(['unshare','--mount','--pid','--fork','--mount-proc',str(pid1),str(meta)],env=env,stdout=log,stderr=log,start_new_session=True)
+        process=subprocess.Popen(['unshare','--mount','--pid','--fork','--mount-proc',str(pid1),str(meta),'pc-admission-only' if mode=='pc-only' else 'pc-wall-pc'],env=env,stdout=log,stderr=log,start_new_session=True)
         journal=root/'pid1.journal';pending=bytearray()
         def text():return journal.read_text() if journal.exists() else ''
         def until(s,seconds=12):
@@ -40,11 +40,13 @@ for mode in ('complete','green-retained','wrong-reconnect','wrong-ack','connecto
                 if select.select([master],[],[],.02)[0]:pending.extend(os.read(master,65536))
             answer,rest=bytes(pending).split(b'\n',1);pending[:]=rest;return answer
         try:
-            header=line().split();assert header[0]==b'M15NATIVE1';nonce,binding=header[1:]
+            header=line().split();assert header[0]==b'M15NATIVE1';nonce,binding=header[1:3];experiment=b'pc-admission-only' if mode=='pc-only' else b'pc-wall-pc';assert header[3]==experiment
             assert binding.decode()==verify.host.sha(meta.read_bytes())
             os.write(master,b'M15PC1 '+nonce+b' '+binding+b'\n');until('M15DISPLAY 0 BLUE committed')
             assert 'COLLECT_BEGIN' not in text()
-            if mode=='connector-failure':
+            if mode=='pc-only':
+                time.sleep(.2);assert 'PC_ONLY retain_no_wall_admission' in text();os.write(events,b'REMOVED\n');until('RED_HOLD');assert 'COLLECT_BEGIN' not in text()
+            elif mode=='connector-failure':
                 os.write(events,b'CONNECTOR_FAILED\n');until('RED_HOLD')
             else:
                 os.write(events,b'REMOVED\n');until('M15DISPLAY 1 YELLOW mapped')
@@ -52,7 +54,7 @@ for mode in ('complete','green-retained','wrong-reconnect','wrong-ack','connecto
                 time.sleep(.3);assert 'CYAN' not in text(),'GREEN advanced without PC'
                 if mode!='green-retained':
                     os.write(events,b'REMOVED\n');time.sleep(.1);assert 'CYAN' not in text()
-                    os.write(events,b'ATTACHED\n');header=line().split();assert header==[b'M15RETURN1',nonce,binding]
+                    os.write(events,b'ATTACHED\n');header=line().split();assert header==[b'M15RETURN1',nonce,binding,experiment]
                     answer=b'M15PC2 '+nonce+b' '+binding+b'\n'
                     if mode=='wrong-reconnect':
                         os.write(master,answer.replace(nonce,b'0'*32));until('RED_HOLD');assert 'CYAN' not in text()
@@ -84,4 +86,4 @@ for mode in ('complete','green-retained','wrong-reconnect','wrong-ack','connecto
             for p in out.iterdir():
                 if p.is_file():p.chmod(0o644)
         print('PASS',mode,flush=True)
-print('PASS 6 native-loop cases; real connector/display NOT executed; fixture only')
+print('PASS 7 native-loop cases; real connector/display NOT executed; fixture only')

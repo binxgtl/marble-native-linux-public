@@ -1,6 +1,8 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 #define _GNU_SOURCE
 #include <errno.h>
+#include <fcntl.h>
+#include <string.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdio.h>
@@ -39,7 +41,17 @@ int main(void){
    errno=0;
    if(waitpid(-1,&status,WNOHANG)!=-1||errno!=ECHILD)goto hold;
    dprintf(2,"M15 bootstrap census_closed=1\n");
-   execl(runtime,runtime,meta,(char *)NULL);goto hold;
+   char mode[32]={0};
+#ifdef M15_RUNTIME_TEST
+   strcpy(mode,"pc-wall-pc");
+#else
+   int fd=open("/m15/experiment",O_RDONLY|O_CLOEXEC|O_NOFOLLOW);if(fd<0)goto hold;
+   ssize_t n=read(fd,mode,sizeof(mode)-1);int closed=close(fd);
+   if(n<=0||n==(ssize_t)sizeof(mode)-1||closed||mode[n-1]!='\n')goto hold;
+   mode[n-1]=0;
+   if(strcmp(mode,"pc-admission-only")&&strcmp(mode,"pc-wall-pc"))goto hold;
+#endif
+   execl(runtime,runtime,meta,mode,(char *)NULL);goto hold;
   }
   if(p>0||(p<0&&errno!=EINTR))goto hold;
   (void)poll(NULL,0,10);

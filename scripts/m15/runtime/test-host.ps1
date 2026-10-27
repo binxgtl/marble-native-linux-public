@@ -3,14 +3,15 @@ $ErrorActionPreference='Stop'
 Add-Type -Path @("$PSScriptRoot/../native4/Receiver.cs","$PSScriptRoot/NativeHost.cs")
 $nonce='1'*32;$binding='2'*64;$count=0
 foreach($tag in @('M15NATIVE1','M15RETURN1')){
- foreach($fault in @('','binding','nonce','partial','overrun','ack')){
-  $line="$tag $nonce $binding`n";$f=''
+ foreach($fault in @('','binding','nonce','partial','overrun','ack','experiment')){
+  $line="$tag $nonce $binding pc-wall-pc`n";$f=''
+  if($fault -eq 'experiment'){$line=$line.Replace('pc-wall-pc','pc-admission-only')}
   if($fault -eq 'binding'){$line=$line.Replace($binding,('3'*64))}
   if($fault -eq 'nonce'){$line=$line.Replace($nonce,('0'*32))}
   if($fault -eq 'partial'){$line=$line.TrimEnd("`n")}
   if($fault -in @('overrun','ack')){$f=$fault}
   $t=[M15Offline.FakeTransport]::new([Text.Encoding]::ASCII.GetBytes($line),1,$f);$bad=$false
-  try{[M15Offline.NativeHost]::Admit($t,$binding,$nonce,($tag -eq 'M15RETURN1'))|Out-Null}catch{$bad=$true}
+  try{[M15Offline.NativeHost]::Admit($t,$binding,$nonce,($tag -eq 'M15RETURN1'),'pc-wall-pc')|Out-Null}catch{$bad=$true}
   if($bad -ne ($fault -ne '') -or ($bad -and $t.Ack.Length -ne 0)){throw "Admission $tag $fault"};$count++
  }
 }
