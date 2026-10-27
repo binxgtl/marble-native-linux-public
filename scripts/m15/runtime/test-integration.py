@@ -77,6 +77,7 @@ for mode in ('complete','green-retained','wrong-reconnect','wrong-ack','connecto
                             if mode=='wrong-ack':until('RED_HOLD')
                             else:
                                 terminal=line();assert terminal==b'M15DONE1 '+ack[8:].rstrip(b'\n')
+                                (out/(mode+'.terminal')).write_bytes(terminal+b'\n')
                                 until('COMPLETE retain_RAM_ADSP_USB_display')
             assert process.poll() is None
             (out/(mode+'.journal')).write_bytes(journal.read_bytes())

@@ -116,6 +116,9 @@ jobs:
       - name: Native two-session admission and terminal receipt (no COM open)
         shell: pwsh
         run: ./scripts/m15/runtime/test-host.ps1 -Out artifacts/m15/windows/native-host-tests.json
+      - name: Actual native C sender to Windows saved-file receiver (synthetic only)
+        shell: pwsh
+        run: ./scripts/m15/runtime/test-receiver.ps1 -Wire fixture/runtime/normal/complete.raw -Terminal fixture/runtime/normal/complete.terminal -Out artifacts/m15/windows/native
       - name: PC-smoke admission (no COM open)
         shell: pwsh
         run: ./scripts/m15/native6/test-host.ps1 -Out artifacts/m15/windows/pc-smoke-tests.json
