@@ -84,6 +84,8 @@ jobs:
         run: bash scripts/m15/native4/test.sh artifacts/m15/${{ runner.arch }}
       - name: Native preparation color admissions and I/O errors (offline)
         run: bash scripts/m15/native5/test.sh artifacts/m15/${{ runner.arch }}
+      - name: Integrated PC-only PID1 and persistent display (no devices)
+        run: bash scripts/m15/native6/test.sh artifacts/m15/${{ runner.arch }}
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -109,6 +111,9 @@ jobs:
       - name: COM completion/cancellation ownership fault injection (no COM open)
         shell: pwsh
         run: ./scripts/m15/native4/test-com.ps1 -Out artifacts/m15/windows/com-tests.json
+      - name: PC-smoke admission (no COM open)
+        shell: pwsh
+        run: ./scripts/m15/native6/test-host.ps1 -Out artifacts/m15/windows/pc-smoke-tests.json
       - name: Win32 binding over injected API (no COM open)
         shell: pwsh
         run: ./scripts/m15/native5/test-win32.ps1 -Out artifacts/m15/windows/win32-tests.json

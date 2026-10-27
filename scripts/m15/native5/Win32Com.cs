@@ -43,7 +43,9 @@ namespace M15Offline {
   public bool Result(IntPtr h,IntPtr ov,out uint n){return GetOverlappedResult(h,ov,out n,false);}
   public bool Cancel(IntPtr h,IntPtr ov){return CancelIoEx(h,ov);}
   public bool Status(IntPtr h,out uint e,out CommStatus s){return ClearCommError(h,out e,out s);}
-  public static ComAdapter Open(string port,int timeoutMs) {
+  public static ComAdapter Open(string port,int timeoutMs) {return Open(port,timeoutMs,1000);}
+  public static ComAdapter Open(string port,int timeoutMs,int idleTimeoutMs) {
+   if(idleTimeoutMs<1||idleTimeoutMs>300000||timeoutMs<=idleTimeoutMs)throw new ArgumentException("bounded idle/operation deadlines required");
    if(!Regex.IsMatch(port,@"\ACOM[1-9][0-9]{0,3}\z"))throw new ArgumentException("explicit COM name required");
    // Overlapped, exclusive existing device. Never PURGE_RX or discard input.
    IntPtr h=CreateFileW(@"\\.\"+port,0xc0000000,0,IntPtr.Zero,3,0x40000000,IntPtr.Zero);
@@ -53,9 +55,9 @@ namespace M15Offline {
     if(!GetCommState(h,ref d))throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
     // Binary 8N1, no software/hardware flow control, DTR enabled for ACM.
     d.Baud=115200;d.Flags=1u|(1u<<4)|(1u<<14);d.ByteSize=8;d.Parity=0;d.StopBits=0;
-    // Return available data or wait for first byte up to 1s. Zero is failure,
+    // Return available data or wait for first byte up to the bounded idle budget. Zero is failure,
     // not EOF success. Outer deadlines and CancelIoEx remain authoritative.
-    CommTimeouts t=new CommTimeouts{Interval=uint.MaxValue,ReadMultiplier=uint.MaxValue,ReadConstant=1000};
+    CommTimeouts t=new CommTimeouts{Interval=uint.MaxValue,ReadMultiplier=uint.MaxValue,ReadConstant=(uint)idleTimeoutMs};
     if(!SetCommState(h,ref d)||!SetupComm(h,1048576,65536)||!SetCommTimeouts(h,ref t))
      throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
     return new ComAdapter(new OverlappedDriver(new WindowsIo(),h),timeoutMs,2000);
