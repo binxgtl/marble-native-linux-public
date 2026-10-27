@@ -2,8 +2,8 @@
 #include "coordinator.h"
 #include <string.h>
 static int hold(struct coordinator *s){s->stage=RED;return -1;}
-const char *coord_name(enum stage s){static const char *n[]={"START","BLUE_PC_READY","YELLOW_CONNECT_UGREEN","YELLOW_CAPTURING","GREEN_FROZEN","CYAN_EXPORT","COMPLETE_EVIDENCE_ONLY","RED_HOLD"};return s<=RED?n[s]:"RED_HOLD";}
-void coord_init(struct coordinator *s,uint64_t now){memset(s,0,sizeof(*s));s->last=now;s->deadline=now+300000;}
+const char *coord_name(enum stage s){static const char *n[]={"START","BLUE_PC_READY","YELLOW_CONNECT_UGREEN","YELLOW_CAPTURING","GREEN_FROZEN","CYAN_EXPORT","COMPLETE_EVIDENCE_ONLY","RED_HOLD"};return s>=START&&s<=RED?n[s]:"RED_HOLD";}
+void coord_init(struct coordinator *s,uint64_t now){memset(s,0,sizeof(*s));s->last=now;if(now>UINT64_MAX-300000){s->stage=RED;return;}s->deadline=now+300000;}
 int coord_tick(struct coordinator *s,uint64_t now){if(now<s->last)return hold(s);s->last=now;if(s->stage==RED)return -1;if(s->stage!=COMPLETE&&now>=s->deadline)return hold(s);return 0;}
 int coord_fact(struct coordinator *s,enum fact f,unsigned seq,uint64_t now){
  if(coord_tick(s,now)||seq!=s->sequence)return hold(s);
@@ -35,5 +35,7 @@ int coord_fact(struct coordinator *s,enum fact f,unsigned seq,uint64_t now){
   s->parent_receipt=1;return 0;
  default:return hold(s);
  }
- s->deadline=now+(s->stage==YELLOW_CAPTURE?100000:300000);return 0;
+ uint64_t budget=s->stage==YELLOW_CAPTURE?100000:300000;
+ if(now>UINT64_MAX-budget)return hold(s);
+ s->deadline=now+budget;return 0;
 }

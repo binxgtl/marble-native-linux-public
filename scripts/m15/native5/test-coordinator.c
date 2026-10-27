@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 #include "coordinator.h"
+#include "ownership.h"
 #include <assert.h>
 #include <stdio.h>
 static void next(struct coordinator *s,enum fact f){assert(!coord_fact(s,f,s->sequence,s->last+1));}
@@ -11,6 +12,11 @@ static void reach(struct coordinator *s,enum stage stop){
 }
 int main(void){
  struct coordinator s;reach(&s,COMPLETE);next(&s,PARENT_RECEIPT);assert(s.parent_receipt&&s.custodian_owned&&!s.custodian_reaped);int n=1;
+ struct parent_ledger l={0};assert(!parent_custodian_live(&l));
+ assert(!parent_add(&l,12,CUSTODIAN));assert(!parent_add(&l,13,DISPLAY));assert(parent_custodian_live(&l));
+ assert(!parent_wait(&l,13,0));assert(parent_custodian_live(&l));
+ assert(parent_wait(&l,12,0)<0&&l.escrow_lost&&!parent_custodian_live(&l));n++;
+ assert(parent_wait(&l,14,0)<0);n++;
  for(enum stage st=START;st<=CYAN;st++){
   reach(&s,st);assert(coord_tick(&s,s.deadline)<0&&s.stage==RED);n++;
   reach(&s,st);assert(coord_fact(&s,CUSTODIAN_EXIT,s.sequence,s.last+1)<0&&s.escrow_lost);n++;
