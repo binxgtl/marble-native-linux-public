@@ -40,3 +40,6 @@ foreach($name in $mutants.Keys){
 & $python "$PSScriptRoot/verify.py" $Wire
 if($LASTEXITCODE -eq 0){throw 'Synthetic runtime capture promoted to native'};$count++
 @{cases=$count;pass=$true;actual_c_stream=$true;com_open=$false;hardware=$false}|ConvertTo-Json|Set-Content (Join-Path $Out 'native-receiver-tests.json')
+# The deliberately rejected production replay left LASTEXITCODE=1. All assertions
+# above must pass before clearing that expected native-process status for CI.
+exit 0
