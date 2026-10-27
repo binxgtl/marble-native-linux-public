@@ -1,0 +1,64 @@
+#!/bin/busybox sh
+# SPDX-License-Identifier: GPL-2.0-only
+set -eu
+BB=/bin/busybox
+hold() { printf "M15 bootstrap failed: %s\n" "$*" >&2 || :; exit 1; }
+# The inventory covers every staged binary, module and firmware. No real inputs
+# enter CI. Runtime metadata and expected inventory digest are separately bound.
+(cd / && $BB sha256sum -c /m15/files.sha256) || hold staged-hashes
+/sbin/m10-load-phase0 || hold phase0
+[ "$($BB wc -l </proc/modules)" -eq 95 ] || hold prefix-count
+/sbin/m15-load-m8-tail || hold m8-tail
+[ "$($BB wc -l </proc/modules)" -eq 100 ] || hold closure-count
+read_value() { $BB cat "$1"; }
+poll_value() {
+ i=0
+ while [ "$i" -lt 300 ]; do
+  value=$(read_value "$1") || return 1
+  [ "$value" != "$2" ] || return 0
+  $BB sleep 0.1 || return 1; i=$((i+1))
+ done
+ return 1
+}
+adsp=
+for node in /sys/class/remoteproc/remoteproc*; do
+ target=$($BB readlink -f "$node/device") || hold remoteproc-link
+ case "$target" in */3000000.remoteproc-adsp) [ -z "$adsp" ] || hold duplicate-adsp; adsp=$node;; esac
+done
+[ -n "$adsp" ] || hold missing-adsp
+[ "$(read_value "$adsp/state")" = offline ] || hold inherited-adsp
+read_value "$adsp/firmware" >/run/m15/adsp.original-firmware || hold firmware-read
+read_value /sys/module/firmware_class/parameters/path >/run/m15/firmware.original-path || hold path-read
+[ -r /m6/modem/image/adsp2.mdt ] || hold adsp-firmware
+printf '%s' /m6/modem/image >/sys/module/firmware_class/parameters/path || hold firmware-path
+[ "$(read_value /sys/module/firmware_class/parameters/path)" = /m6/modem/image ] || hold path-readback
+printf '%s' adsp2.mdt >"$adsp/firmware" || hold firmware-name
+[ "$(read_value "$adsp/firmware")" = adsp2.mdt ] || hold firmware-readback
+printf '%s' start >"$adsp/state" || hold adsp-start
+poll_value "$adsp/state" running || hold adsp-running
+printf '%s\n' "$adsp" >/run/m15/adsp.owner || hold owner-record
+# Readiness is existence/binding, not fresh telemetry or charging safety.
+for pair in 'soc:qcom,pmic_glink pmic_glink' 'soc:qcom,pmic_glink:qcom,battery_charger qti_battery_charger'; do
+ set -- $pair
+ node=/sys/bus/platform/devices/$1
+ i=0
+ while [ "$($BB basename "$($BB readlink -f "$node/driver" || :)" )" != "$2" ]; do
+  [ "$i" -lt 300 ] || hold supplier-timeout
+  $BB sleep 0.1; i=$((i+1))
+ done
+done
+link=
+i=0
+while [ "$i" -lt 300 ]; do
+ link=$($BB readlink -f /sys/class/drm/card0/device || :)
+ case "$link" in */ae00000.qcom,mdss_mdp) break;; esac
+ $BB sleep 0.1; i=$((i+1))
+done
+[ "$i" -lt 300 ] || hold mdss-card
+devno=$(read_value /sys/class/drm/card0/dev) || hold card-dev
+major=${devno%%:*}; minor=${devno#*:}
+case "$major:$minor" in *[!0-9:]*|:*|*:) hold card-dev-format;; esac
+$BB mknod -m 600 /dev/dri/card0 c "$major" "$minor" || hold card-node
+# Dedicated connector owns configfs/ACM. PID1 retains ADSP/closure and never
+# executes old M8 restore/reboot or old M10 switch_root/systemd reboot path.
+exit 0

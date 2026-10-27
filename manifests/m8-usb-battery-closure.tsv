@@ -1,0 +1,101 @@
+load	module	stock_index	size	sha256	reason	deps	stock_stage
+0	qcom_ipcc.ko	6	25552	d76bc0e75fd00f6edc38366684887d6345d17ffefb050a7a29026637f8e69421	runtime-supplier	-	1
+1	qcom-cpufreq-hw.ko	12	48184	1893321a10cfb46a25acb7d6e89a10dd2ebaf233b926bd39ea4c2f90b38f4737	dep of sched-walt.ko	-	1
+2	cmd-db.ko	19	20648	81f2401f0b8ec7f08d638f10f3f8e34dcc78ea2a6959fdabaf19ab94058180cc	dep of msm_drm.ko	-	1
+3	debug-regulator.ko	24	53824	9382ae597daef272f2734233eba02459bae6bf4e2c396ce2deed4d84765e5f70	dep of qti-fixed-regulator.ko	-	1
+4	gh_arm_drv.ko	29	15608	85e0350dd929034701c5fea50e2a5272949d9f0fb8def5e8da3161168f13130f	dep of msm_drm.ko	-	1
+5	gh_dbl.ko	31	28536	1cab5b333054c7d1a0797078071ad2e22357625e095f41f9df5cd274c4ffdb92	dep of msm_drm.ko	-	1
+6	gh_msgq.ko	32	30280	a449ddf7ec5c92ba0760d532a523d71cb5496e0ddf6d89839271cb4fc0717e28	dep of msm_drm.ko	-	1
+7	gh_rm_drv.ko	33	108640	ffe04b8cb2f21ee40ae3520a8907e1634eee0fc81da0d0f029cd01110cda16f2	dep of msm_drm.ko	gh_dbl.ko,gh_msgq.ko,gh_arm_drv.ko	1
+8	icc-debug.ko	37	20104	ae3ba572675d93bd2ba1a9188ea8731f5d547eae724767ef093d55552c7fa8a0	dep of qnoc-waipio.ko	-	1
+9	iommu-logger.ko	38	13264	5d84175bd7b2981f5210b7a55e64aeb9532b611b0bcf5e90a33185bb77a857a0	dep of arm_smmu.ko	-	1
+10	llcc-qcom.ko	40	58928	e0350b80866837bb413f11d346c47b4d5eb7999fa9b07150a7e28f6eb1fd1d7a	dep of msm_drm.ko	-	1
+11	miev.ko	47	38992	a864a31355cc536fa3eecbc07290e20cfb51d56853a1036be1e866f7b05c24bd	dep of qti_battery_charger_main.ko	-	1
+12	msm_dma_iommu_mapping.ko	48	27648	fd230f07d41e4fdadbd0ce6ac5d9c7536cd09f56d822e0b5015b8c483d8465e3	dep of msm_drm.ko	-	1
+13	phy-generic.ko	55	24488	b3ecb131b2e7f14a5ca4ad35cd2f36c9d926831577a9809172d4447c1fcb7fb7	softdep pre of dwc3-msm.ko	-	1
+14	phy-qcom-ufs.ko	56	40120	36dc124427e4a5df14d0afddf65bd246fc76f6422be10416272a1c16c49d5330	dep of phy-qcom-ufs-qmp-v4-cape.ko	-	1
+15	phy-qcom-ufs-qmp-v4-cape.ko	59	27144	787268e4214a62ce7bb09d953a65ea2834c2afc0c08ae08377894f5b3243e5ec	runtime-supplier	phy-qcom-ufs.ko	1
+16	proxy-consumer.ko	63	22472	1c5398246227bdc96c6abddc0f9e833b6ed73cc83bf34e2de040b6ede02304d2	dep of qti-fixed-regulator.ko	-	1
+17	gdsc-regulator.ko	28	35384	d86b9087a185e7c13fdcdd8d260a27e183eaf8f5c8786a626c5b26e364246b00	runtime-supplier	proxy-consumer.ko,debug-regulator.ko	1
+18	clk-qcom.ko	18	368144	2ee0aca646c4696d4f56da9580ab1b58ca469b677515f923dc1eb175e5b4c805	dep of msm_drm.ko	gdsc-regulator.ko,proxy-consumer.ko,debug-regulator.ko	1
+19	clk-dummy.ko	17	17112	cdd8776667293f82a708ed7e978cb2b81a78d6b4893ffa04aab3b293e59aaee2	dep of gcc-waipio.ko	clk-qcom.ko,gdsc-regulator.ko,proxy-consumer.ko,debug-regulator.ko	1
+20	gcc-waipio.ko	4	191608	2610b7de8467265b088088b4ae983334c23def8eba35728097267938d6a78507	runtime-supplier	clk-dummy.ko,clk-qcom.ko,gdsc-regulator.ko,proxy-consumer.ko,debug-regulator.ko	1
+21	dispcc-waipio.ko	26	115448	fc44f2fa8108905a69ab42ec01b00e510ee020293ea5684476e346a06514653b	runtime-supplier	clk-qcom.ko,gdsc-regulator.ko,proxy-consumer.ko,debug-regulator.ko	1
+22	qti-fixed-regulator.ko	51	17920	499c22583f196b9d432b460bc12d523d6073abd59e2a12630502aa03e4194460	runtime-supplier	proxy-consumer.ko,debug-regulator.ko	1
+23	qcom_hwspinlock.ko	68	15880	09926def15b6d041caf04004344786ba0aa42c5a22beb25cc4e31abb91c38c58	softdep pre of smem.ko	-	1
+24	qcom_iommu_util.ko	69	116544	5c50090280e82bd1fe76e01923cfe93e734973eb426fc974c1ff6143794cdfcb	dep of msm_drm.ko	-	1
+25	spmi-pmic-arb.ko	75	79136	13c0bc5ccfd139cf385de738acd991e0d5e8e31e4476d81a40308e5147012e4b	dep of msm_drm.ko	-	1
+26	qcom-reboot-reason.ko	76	16208	2e601c06f6defe108beea65d825484e69dd69d83b3a209ad9b5a247171727e44	dep of ufs_qcom.ko	-	1
+27	qcom-scm.ko	78	210440	56d20fc07864dd1350be3796b4334c81e71db9e3c4db14fdc86918dda3c7a836	dep of msm_drm.ko	-	1
+28	qnoc-qos.ko	81	10528	344cf9c3616f18c08820813d4e2f19c778671b274d30c452d38fab5638ab2a12	dep of qnoc-waipio.ko	-	1
+29	qti-regmap-debugfs.ko	83	33472	cc6fa70c8bc2a917d6babc7d68d85e29d52061e3ebba80788e8561a2db4cda42	dep of qcom-spmi-pmic.ko	-	1
+30	regmap-spmi.ko	84	17296	72ccc942d3cbb7f429239fc19d929fabeaef9408f994d4b53857249ba9efd8d7	runtime-supplier	-	1
+31	qcom-spmi-pmic.ko	74	20112	9ffe1cc07b44eb1e6c5482e236126ff780cc3e5369da7489db931f0be5966531	runtime-supplier	regmap-spmi.ko,qti-regmap-debugfs.ko	1
+32	secure_buffer.ko	86	56928	4cdc7b5180cef0c15abf6096272daaaa82a3f42ecf0230c649684c97363619e7	dep of msm_drm.ko	qcom-scm.ko	1
+33	mem_buf_dev.ko	42	160784	4c3d0247c9be0cb2e48e5830dcc98dc74be7e33221f67d7859e7045deaca1bf2	dep of msm_drm.ko	secure_buffer.ko,qcom-scm.ko,gh_rm_drv.ko,gh_dbl.ko,gh_msgq.ko,gh_arm_drv.ko	1
+34	smem.ko	87	25264	4ddf05aeb9016a32e61819dc309d08d93a929aefb8e9c02d8bfdf7ac2378d84f	dep of i2c-msm-geni.ko	-	1
+35	minidump.ko	46	151064	df4ded2ef4fbb860b332da2f2e80b9501a5bea6b9b98f1ff230a8da30bca0c4e	dep of i2c-msm-geni.ko	smem.ko	1
+36	qcom_ipc_logging.ko	7	55296	5351a24627ea0ace864ac06dc88c6b78ccd99e677b6059217d8a9e23fb560765	dep of i2c-msm-geni.ko	minidump.ko,smem.ko	1
+37	qcom-pdc.ko	8	32752	bf33dae83a93715c615c40f87f137c25cef087150ead863e4b39a09238499515	runtime-supplier	qcom-scm.ko,qcom_ipc_logging.ko,minidump.ko,smem.ko	1
+38	pinctrl-msm.ko	62	85392	e13d69558c6a9e39e4c559d37c5acf50dc31ec2566b26d8573b748656f46f16f	dep of msm_drm.ko	qcom-scm.ko	1
+39	pinctrl-cape.ko	60	172664	37e9aa8894d8de03da545aeb39a7c2e9af0d2231c5715a7a5bb45c00c9c2fcaa	runtime-supplier	pinctrl-msm.ko,qcom-scm.ko	1
+40	qcom_rpmh.ko	77	93616	d8a63ac3240fb2367429894c44626eca9c73390d9011e10b180ab74bfa4f2ecf	dep of msm_drm.ko	cmd-db.ko,qcom_ipc_logging.ko,minidump.ko,smem.ko	1
+41	clk-rpmh.ko	3	109728	a94987f005738a3317f1fd498b07d13c3187fde725d04a29d74178501ac8cd51	runtime-supplier	qcom_rpmh.ko,cmd-db.ko,qcom_ipc_logging.ko,minidump.ko,smem.ko	1
+42	rpmh-regulator.ko	10	48208	370423431877e953602ff615a59fde941405bb0df51c5b212ac67855e07c2ace	runtime-supplier	qcom_rpmh.ko,cmd-db.ko,qcom_ipc_logging.ko,minidump.ko,smem.ko,proxy-consumer.ko,debug-regulator.ko	1
+43	icc-bcm-voter.ko	36	22624	1b42e9570473a693af4bc17e3cc44f945f9f12a6ebbd99e4ca1bb2e5a95acfc4	dep of qnoc-waipio.ko	qcom_rpmh.ko,cmd-db.ko,qcom_ipc_logging.ko,minidump.ko,smem.ko	1
+44	icc-rpmh.ko	5	27424	db434b6b1a209c63ac6e27ace1a15023249ebf2b53784aa290741e669c9107da	dep of qnoc-waipio.ko	icc-debug.ko,icc-bcm-voter.ko,qcom_rpmh.ko,cmd-db.ko,qcom_ipc_logging.ko,minidump.ko,smem.ko	1
+45	qnoc-waipio.ko	50	196584	29be07aa7902c7eb107b16689875972895cfb0d6b9188257c94b7343e5dc6a39	runtime-supplier	qnoc-qos.ko,icc-rpmh.ko,icc-debug.ko,icc-bcm-voter.ko,qcom_rpmh.ko,cmd-db.ko,qcom_ipc_logging.ko,minidump.ko,smem.ko	1
+46	qrtr.ko	82	151000	439b1f0f0060bfdbf968f8ea6ccb7e7d3982926d97875aba6b61a6d6d74a9b2b	softdep pre of qmi_helpers.ko	qcom_ipc_logging.ko,minidump.ko,smem.ko	1
+47	tmecom-intf.ko	90	35600	327807a08798028ab60077e604d0ab0b38c909fc6112e748f7721cd483003bca	dep of ufs_qcom.ko	-	1
+48	hwkm.ko	35	24376	20d65c7e44cfd75b9028f1a807de087936e0068f9c5daeb0e51f067cb68e651a	dep of ufs_qcom.ko	tmecom-intf.ko	1
+49	crypto-qti-hwkm.ko	22	17696	05373ec9032d8477f891af921033b3efcf3724ca902afca2c853c14238336bf2	dep of ufs_qcom.ko	hwkm.ko,tmecom-intf.ko,qcom-scm.ko	1
+50	crypto-qti-common.ko	21	54768	505cfc5164e66a02b7eaa3060788ff0862a333094ca45918fd960537089164cb	dep of ufs_qcom.ko	crypto-qti-hwkm.ko,hwkm.ko,tmecom-intf.ko,qcom-scm.ko	1
+51	ufshcd-crypto-qti.ko	91	18136	6c3bd675be9983137621f0fbdcf14aacd30eb8867728c89f4ad5ccaf690fb781	dep of ufs_qcom.ko	crypto-qti-common.ko,crypto-qti-hwkm.ko,hwkm.ko,tmecom-intf.ko,qcom-scm.ko	1
+52	ufs_qcom.ko	92	16658368	24695d623129ec99c7694574e6452cabce980ed1b8c8cd7852979e52c4aab5a6	runtime-supplier	qcom-reboot-reason.ko,ufshcd-crypto-qti.ko,crypto-qti-common.ko,crypto-qti-hwkm.ko,hwkm.ko,tmecom-intf.ko,miev.ko,qcom-scm.ko,qcom_ipc_logging.ko,minidump.ko,smem.ko,clk-qcom.ko,gdsc-regulator.ko,proxy-consumer.ko,phy-qcom-ufs.ko,debug-regulator.ko	1
+53	arm_smmu.ko	93	379328	4b04724667c609d96a4fe31192f08da7977ba2b5112a3ec77fddf35dca4c5022	runtime-supplier	iommu-logger.ko,secure_buffer.ko,qcom_iommu_util.ko,qcom-scm.ko	1
+54	msm-geni-se.ko	94	86024	c06bd4f4cf5251e0800389f25da5e9a5eba4587cc1cc036ca13c541f83a4ea4f	dep of i2c-msm-geni.ko	qcom_ipc_logging.ko,minidump.ko,smem.ko	1
+55	mi_schedule.ko	97	83952	eb0a8f835b08373cc21ffd82305ff20d1ed42fd10e42197ef5038ac406253b97	dep of sched-walt.ko	-	1
+56	metis.ko	98	221384	436248820777c5112c8caac96a71b6fde083f70d8aaa5edbfec3fd96b8952d44	dep of sched-walt.ko	mi_schedule.ko	1
+57	sched-walt.ko	13	695776	4a58dbd012c049164963456fcc2452124ede426d0c44c8bf5c8d5219fc7907b2	dep of goodix_core.ko	qcom-cpufreq-hw.ko,metis.ko,mi_schedule.ko	1
+58	qcom_aoss.ko	99	52544	5f5bd78a717e53deb1cdf7acc2e40512da229bcad25e296aab4b7fea358521ea	dep of qcom_q6v5_pas.ko	qcom_ipc_logging.ko,minidump.ko,smem.ko	1
+59	pinctrl-spmi-gpio.ko	127	54096	c9ae05ae94d825d17b98c4431ed573f8a6677f7977ea2039a291d2f2d3859dd0	runtime-supplier	-	2
+60	gpi.ko	140	119368	e23f8e25faef0639a157bf38b7da57aaf6b65b49b37add5595102369af3f403c	runtime-supplier	qcom_ipc_logging.ko,minidump.ko,smem.ko	2
+61	mdt_loader.ko	143	19648	ac049d64458f0dd5a0f59376ebaab281bd0abe3972f829342bf6c6f552992669	dep of qcom_q6v5_pas.ko	qcom-scm.ko	2
+62	qcom_ramdump.ko	145	24576	342f15bcce3ebec48c85d4315fdfd801808cb04c96bf6439d188e61f038d86e9	dep of qcom_q6v5_pas.ko	-	2
+63	qmi_helpers.ko	147	39480	6d6bf0111a4c829f00f739e2891b1ebffdda3bedb9db37393e11bb88e4223cab	dep of qti_battery_charger_main.ko	-	2
+64	pdr_interface.ko	146	30144	bb3efa881da28d0cc84dab4f378ecd5756a5ba2dc2f1515bb235a7156031ddfd	dep of qti_battery_charger_main.ko	qmi_helpers.ko	2
+65	smp2p.ko	151	33368	4f88ce489942136f38d45e1b8ecc7a69adc7849d0cb3566c413b694cc3fe4495	runtime-supplier	qcom_ipc_logging.ko,minidump.ko,smem.ko	2
+66	eud.ko	177	44488	c56c34d19c12789a82eddcbd7b00a7e9e9e8e1bf65a3b5db7a1f16e78bc03bfe	softdep pre of dwc3-msm.ko	qcom-scm.ko	2
+67	msm_ext_display.ko	183	26144	5819509d977acd55f4c56836822c11053ffcac811487551a8ba002b02b3c761f	dep of msm_drm.ko	-	2
+68	panel_event_notifier.ko	192	14488	744314425df0670eec0d00e311534eb3df71f50b4f205e57fe170dd1c2286312	dep of qti_battery_charger_main.ko	-	2
+69	qseecom-mod.ko	208	735088	1e863dee51fb69fcea86f62119cec0089ef7922b1ccd5c69da1a0f041f621acc	dep of msm_drm.ko	mem_buf_dev.ko,secure_buffer.ko,qcom-scm.ko,gh_rm_drv.ko,gh_dbl.ko,gh_msgq.ko,gh_arm_drv.ko	2
+70	hdcp_qseecom.ko	207	51320	35d98e46e6fd916fc352d23f0f288b8b1f80c33d0336b093edff16ee270a27c6	dep of msm_drm.ko	qseecom-mod.ko,mem_buf_dev.ko,secure_buffer.ko,qcom-scm.ko,gh_rm_drv.ko,gh_dbl.ko,gh_msgq.ko,gh_arm_drv.ko	2
+71	spi-msm-geni.ko	212	98264	8766e9038c69aad97106bd364d0e67a7a3834a1e4170b1ee39865c1cf104b82b	runtime-supplier	msm-geni-se.ko,qcom_ipc_logging.ko,minidump.ko,smem.ko	2
+72	phy-msm-ssusb-qmp.ko	224	53504	4213b315369fe6b564d0e750b71b91c25302f32c7661eb656e33813c00e03432	softdep pre of dwc3-msm.ko	-	2
+73	phy-msm-snps-hs.ko	225	54112	8657a91f3639bad6f852ac6dae769bd5e6fb238c451b3c25243bbb6555884535	softdep pre of dwc3-msm.ko	qcom-scm.ko	2
+74	repeater.ko	237	16504	9989d2fd64c5e4c8e812147e4ccd0006f37fb993d35877e1f590780864925b72	dep of phy-msm-snps-eusb2.ko	-	2
+75	repeater-i2c-eusb2.ko	238	21272	67a519c54fbab3ec6322edecdfc24999d6e19028e289a5a2dd5648f34b00d2d7	softdep pre of phy-msm-snps-eusb2.ko	qti-regmap-debugfs.ko,repeater.ko	2
+76	phy-msm-snps-eusb2.ko	226	44632	ab549c921d48e099343c402329426ffcd3d5533f7fc409163167096c118fe92a	softdep pre of dwc3-msm.ko	repeater.ko,qcom-scm.ko	2
+77	redriver.ko	239	19600	00b893813c467e60c339fff5523bb1a7bc00d7b73fed5e2a62d918cdfd775631	dep of msm_drm.ko	-	2
+78	dwc3-msm.ko	227	280920	e7e603d3a2a1b56211b35ea27a734bedd5bbcce092692c30b79be76a248a8b6e	dep of msm_drm.ko	redriver.ko,qcom_ipc_logging.ko,minidump.ko,smem.ko,clk-qcom.ko,gdsc-regulator.ko,proxy-consumer.ko,debug-regulator.ko	2
+79	pm8941-pwrkey.ko	247	29376	81d090f8c827b8219e067994cdffa68dbdf0b3f6a90637ba7219668c08d0f1a3	dep of msm_drm.ko	-	2
+80	i2c-msm-geni.ko	252	111960	60bba23d2a8f2be12f03b3c14021d6eb960a12fde4626e816bcb31e5ca566454	runtime-supplier	gpi.ko,msm-geni-se.ko,qcom_ipc_logging.ko,minidump.ko,smem.ko	2
+81	qcom_pil_info.ko	296	18408	4e332155149e58c1da8af6c1b06960c562b77df12c0ac07237d4ab938c141cff	dep of qcom_q6v5_pas.ko	-	2
+82	qcom_glink.ko	302	88576	03196dc94717922fc1c09b1ef9a6c90425fc9c2dcd7cf581d3959317aa727f0c	dep of qti_battery_charger_main.ko	qcom_ipc_logging.ko,minidump.ko,smem.ko	2
+83	qcom_glink_smem.ko	303	20184	4113c35607f9ae018a5667298f3ae80d5ea09dd29380069b0308fca37a2670d4	dep of qti_battery_charger_main.ko	qcom_glink.ko,qcom_ipc_logging.ko,minidump.ko,smem.ko	2
+84	qcom_smd.ko	304	44760	899e74f2624315890d6dc6eab25a3a73a734f2c40f8eb35b93045412b0639b53	dep of qti_battery_charger_main.ko	smem.ko	2
+85	rproc_qcom_common.ko	297	67968	773935189be9ab23325d38ff6dde2575310802b5c5dd2bd513af4564190c7647	dep of qti_battery_charger_main.ko	qcom_smd.ko,qcom_glink_smem.ko,qcom_glink.ko,qcom_ipc_logging.ko,minidump.ko,smem.ko	2
+86	pmic_glink.ko	167	40488	605da7bc207d94a6fea778deef552b0cb95ee402da60f4a88d20bd81b99bacf7	dep of qti_battery_charger_main.ko	pdr_interface.ko,qmi_helpers.ko,rproc_qcom_common.ko,qcom_smd.ko,qcom_glink_smem.ko,qcom_glink.ko,qcom_ipc_logging.ko,minidump.ko,smem.ko	2
+87	altmode-glink.ko	170	33832	ffb502351a1e662da6da312283973b68b67a501036b805810c040bfeeee8e5d5	dep of msm_drm.ko	pmic_glink.ko,pdr_interface.ko,qmi_helpers.ko,rproc_qcom_common.ko,qcom_smd.ko,qcom_glink_smem.ko,qcom_glink.ko,qcom_ipc_logging.ko,minidump.ko,smem.ko	2
+88	ucsi_glink.ko	236	34208	57207fafe4d79bb335306284e47239875cd49818adc58b5c54f78c9dbdd1e66d	dep of msm_drm.ko	pmic_glink.ko,pdr_interface.ko,qmi_helpers.ko,rproc_qcom_common.ko,qcom_smd.ko,qcom_glink_smem.ko,qcom_glink.ko,qcom_ipc_logging.ko,minidump.ko,smem.ko	2
+89	fsa4480-i2c.ko	175	23752	a375957542574ea7ed47bb84eaba02a708b988762c19bda5bc2a2cf944d9a6a9	dep of msm_drm.ko	ucsi_glink.ko,qti-regmap-debugfs.ko,pmic_glink.ko,pdr_interface.ko,qmi_helpers.ko,rproc_qcom_common.ko,qcom_smd.ko,qcom_glink_smem.ko,qcom_glink.ko,qcom_ipc_logging.ko,minidump.ko,smem.ko	2
+90	qti_battery_charger_main.ko	259	250952	f8c8890c6a26ca529ab0b6e546aa22dbb1161d4491b9db50c9ca5c9cda0f4d70	runtime-supplier	pmic_glink.ko,pdr_interface.ko,qmi_helpers.ko,miev.ko,rproc_qcom_common.ko,qcom_smd.ko,qcom_glink_smem.ko,qcom_glink.ko,qcom_ipc_logging.ko,minidump.ko,smem.ko,panel_event_notifier.ko	2
+91	qcom_sysmon.ko	301	43488	e3b484a21406f62e88199e71fa5c4d12f08d87a1b94ca56e78f738ef60647d3b	dep of qcom_q6v5_pas.ko	qmi_helpers.ko,rproc_qcom_common.ko,qcom_smd.ko,qcom_glink_smem.ko,qcom_glink.ko,qcom_ipc_logging.ko,minidump.ko,smem.ko	2
+92	qcom_q6v5.ko	298	100496	73575255fd36414682e51c5f408d0a8e6bd62ae8b7b0d06a4fbe82433c626880	dep of qcom_q6v5_pas.ko	qcom_sysmon.ko,qmi_helpers.ko,rproc_qcom_common.ko,qcom_smd.ko,qcom_glink_smem.ko,qcom_glink.ko,qcom_ipc_logging.ko,minidump.ko,smem.ko	2
+93	qcom_q6v5_pas.ko	299	79128	3311d6086fa207d3683073340ed3d07416c9c1d15ac74470f5e42949c1569ae8	runtime-supplier	qcom_ramdump.ko,qcom_pil_info.ko,qcom_q6v5.ko,qcom_sysmon.ko,qcom_aoss.ko,qmi_helpers.ko,mdt_loader.ko,qcom-scm.ko,rproc_qcom_common.ko,qcom_smd.ko,qcom_glink_smem.ko,qcom_glink.ko,qcom_ipc_logging.ko,minidump.ko,smem.ko	2
+94	gh_irq_lend.ko	305	26432	d154b3305e135c8d18c4b5728e6a4867a30f4d952bf387d5e5d7386b3858a5a0	dep of msm_drm.ko	gh_rm_drv.ko,gh_dbl.ko,gh_msgq.ko,gh_arm_drv.ko	2
+95	gh_mem_notifier.ko	306	14544	f3bfff2bcdec77a203c5f0b761daa56dff6460a20bb1aa44f918360291583640	dep of msm_drm.ko	gh_rm_drv.ko,gh_dbl.ko,gh_msgq.ko,gh_arm_drv.ko	2
+96	xiaomi_touch.ko	363	79752	2fc2215d272ca8af85b6d6ac90de4680a8da5468dcfe69a865ff199da3b404a5	dep of goodix_core.ko	-	2
+97	goodix_core.ko	246	553856	6d13edd73fe7fd0d4ef6c47e31166e8ac6fdc0a5a11b4af34877a1447b48d0c3	runtime-supplier	xiaomi_touch.ko,panel_event_notifier.ko,sched-walt.ko	2
+98	msm-mmrm.ko	423	95296	ad085462226f6cfab44610cf2eea538747bb5caa922c6a7f062ac23c43a58beb	dep of msm_drm.ko	clk-qcom.ko,gdsc-regulator.ko,proxy-consumer.ko,debug-regulator.ko	2
+99	msm_drm.ko	420	5451264	ddfc9e55e8dd8a7931fbd7067ea95bb76445f8b81011d8eb1e4e0b22f68fb735	runtime-supplier	msm-mmrm.ko,spmi-pmic-arb.ko,hdcp_qseecom.ko,msm_ext_display.ko,fsa4480-i2c.ko,ucsi_glink.ko,qti-regmap-debugfs.ko,altmode-glink.ko,qseecom-mod.ko,msm_dma_iommu_mapping.ko,pm8941-pwrkey.ko,gh_mem_notifier.ko,gh_irq_lend.ko,llcc-qcom.ko,mem_buf_dev.ko,secure_buffer.ko,qcom_rpmh.ko,cmd-db.ko,pinctrl-msm.ko,qcom_iommu_util.ko,pmic_glink.ko,pdr_interface.ko,qmi_helpers.ko,miev.ko,dwc3-msm.ko,redriver.ko,qcom-scm.ko,rproc_qcom_common.ko,qcom_smd.ko,qcom_glink_smem.ko,qcom_glink.ko,qcom_ipc_logging.ko,minidump.ko,smem.ko,clk-qcom.ko,gdsc-regulator.ko,proxy-consumer.ko,gh_rm_drv.ko,gh_dbl.ko,gh_msgq.ko,gh_arm_drv.ko,panel_event_notifier.ko,debug-regulator.ko	2

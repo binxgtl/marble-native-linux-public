@@ -86,6 +86,8 @@ jobs:
         run: bash scripts/m15/native5/test.sh artifacts/m15/${{ runner.arch }}
       - name: Integrated PC-only PID1 and persistent display (no devices)
         run: bash scripts/m15/native6/test.sh artifacts/m15/${{ runner.arch }}
+      - name: Native bootstrap and physical-lifecycle adapter (offline fixtures only)
+        run: bash scripts/m15/runtime/test.sh artifacts/m15/${{ runner.arch }}
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -111,6 +113,9 @@ jobs:
       - name: COM completion/cancellation ownership fault injection (no COM open)
         shell: pwsh
         run: ./scripts/m15/native4/test-com.ps1 -Out artifacts/m15/windows/com-tests.json
+      - name: Native two-session admission and terminal receipt (no COM open)
+        shell: pwsh
+        run: ./scripts/m15/runtime/test-host.ps1 -Out artifacts/m15/windows/native-host-tests.json
       - name: PC-smoke admission (no COM open)
         shell: pwsh
         run: ./scripts/m15/native6/test-host.ps1 -Out artifacts/m15/windows/pc-smoke-tests.json
