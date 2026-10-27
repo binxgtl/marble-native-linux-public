@@ -3,13 +3,13 @@
 set -eu
 BB=/bin/busybox
 hold() { printf "M15 bootstrap failed: %s\n" "$*" >&2 || :; exit 1; }
-# Local candidate packaging may carry exact ADSP files in the same deterministic
-# tar.xz format already exercised by M10's pinned BusyBox. Unpack only into this
-# boot's RAM root, before the full per-file inventory check. No block mount/write.
-if [ -e /m15/adsp.tar.xz ]; then
- (cd / && $BB sha256sum -c /m15/adsp.tar.xz.sha256) || hold firmware-archive-hash
- [ ! -e /m6 ] || hold firmware-destination-exists
- $BB tar -xJpf /m15/adsp.tar.xz -C / || hold firmware-archive-extract
+# Local candidate packaging uses M10's exact BusyBox tar.xz RAM-root mechanism.
+# The pinned archive contains helpers/ADSP and only module overrides; unchanged
+# stock modules remain inherited from vendor_boot. No block mount/write.
+if [ -e /m15/payload.tar.xz ]; then
+ (cd / && $BB sha256sum -c /m15/payload.tar.xz.sha256) || hold payload-archive-hash
+ [ ! -e /sbin/m15-runtime ] && [ ! -e /m6 ] || hold payload-destination-exists
+ $BB tar -xJpf /m15/payload.tar.xz -C / || hold payload-archive-extract
 fi
 # The inventory covers every staged binary, module and firmware. No real inputs
 # enter CI. Runtime metadata and expected inventory digest are separately bound.
