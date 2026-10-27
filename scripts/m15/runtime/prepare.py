@@ -11,11 +11,17 @@ LAYOUT={'observer':'sbin/m15-observe-o3','pid1':'sbin/m15-runtime','custodian':'
         'busybox':'bin/busybox','phase0_loader':'sbin/m10-load-phase0','tail_loader':'sbin/m15-load-m8-tail',
         'closure':'m15/closure.tsv','firmware_inventory':'m15/firmware-inventory.json',
         'topology':'m15/topology.json','source_lock':'m15/sources.lock'}
+# M10 frozen carrier/tool identities, not the installed Android recovery kernel.
+PINNED={'kernel':'17ca7970f2cccccc537fc6ea2bfb1cbd5a5e05d2512e7f8315343b66f89febc1',
+        'phase0_loader':'1ebcc6bb2a16c325fd2cbd7120590ccb5b9d22bb13a875d5fc77e006aac1698f',
+        'busybox':'7d93682be37cf6ed46699f6fff546b80bf133cf8ec342c2d04bc23387f78bc34'}
 def sha(b):return hashlib.sha256(b).hexdigest()
 def qualify(root,kernel,experiment="pc-admission-only"):
     root=root.resolve();paths={k:root/v for k,v in LAYOUT.items()};paths['kernel']=kernel
     for role,p in paths.items():
         if p.is_symlink() or not p.is_file() or (role!='kernel' and not p.resolve().is_relative_to(root)):raise ValueError('missing/nonregular '+role)
+    for role,digest in PINNED.items():
+        if sha(paths[role].read_bytes())!=digest:raise ValueError('frozen carrier/tool '+role)
     for role in ('bootstrap','bootstrap_worker'):
         b=paths[role].read_bytes()
         if not b.startswith(b'#!/bin/busybox sh\n') or b'\r' in b:raise ValueError('bootstrap LF/shebang '+role)
