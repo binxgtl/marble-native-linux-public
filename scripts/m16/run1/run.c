@@ -60,10 +60,11 @@ static pid_t spawn(char *const argv[],int in,int out) {
  execv(argv[0],argv);
  _exit(127);
 }
-static pid_t spawn_quiet(char *const argv[]) {
- int null=open("/dev/null",O_RDWR|O_CLOEXEC);
+/* stderr is the boot log: a single attempt needs every line a child prints. */
+static pid_t spawn_logged(char *const argv[]) {
+ int null=open("/dev/null",O_RDONLY|O_CLOEXEC);
  if(null<0)return -1;
- pid_t p=spawn(argv,null,null);
+ pid_t p=spawn(argv,null,2);
  close(null);
  return p;
 }
@@ -81,7 +82,7 @@ static pid_t paint(const struct m16_run *r,uint32_t color,unsigned hold_ms) {
  char c[16],h[16];
  snprintf(c,sizeof(c),"%08x",color);snprintf(h,sizeof(h),"%u",hold_ms);
  char *a[]={(char *)r->display,c,h,NULL};
- return spawn_quiet(a);
+ return spawn_logged(a);
 }
 /* Before the cycle: a failure here is reported through the journal, never by suspending
  * with the panel in an unknown state. A child stuck in the driver is left alone. */
@@ -175,7 +176,9 @@ static int open_tty(const struct m16_run *r) {
 static int start_connector(struct m16_run *r) {
  int in[2],out[2];
  if(pipe2(in,O_CLOEXEC))return -1;
- if(pipe2(out,O_CLOEXEC|O_NONBLOCK)){close(in[0]);close(in[1]);return -1;}
+ if(pipe2(out,O_CLOEXEC)){close(in[0]);close(in[1]);return -1;}
+ /* Only this end: the connector keeps the blocking stdout it had in M15. */
+ if(fcntl(out[0],F_SETFL,O_NONBLOCK)){close(in[0]);close(in[1]);close(out[0]);close(out[1]);return -1;}
  char *a[]={(char *)r->connector,NULL};
  pid_t p=spawn(a,in[0],out[1]);
  close(in[0]);close(out[1]);
@@ -234,7 +237,7 @@ static int run_channel_start(void *a) {
  struct m16_run *r=a;
  write_mark(r);
  char *argv[]={(char *)r->adsp,NULL};
- pid_t p=spawn_quiet(argv);
+ pid_t p=spawn_logged(argv);
  if(p<0)return -1;
  r->adsp_pid=(long)p;r->link=M16_LINK_ADSP;
  return 0;
@@ -313,7 +316,7 @@ enum m16_run_end m16_run_main(struct m16_run *r) {
  diag(r,"start tag=%02x",r->tag);
  int status=-1;
  char *argv[]={(char *)r->bootstrap,NULL};
- pid_t p=spawn_quiet(argv);
+ pid_t p=spawn_logged(argv);
  int rc=p<0?-1:wait_child(p,r->bootstrap_ms,&status);
  diag(r,"bootstrap rc=%d status=%d",rc,status);
  if(rc||status)return M16_END_BOOTSTRAP;

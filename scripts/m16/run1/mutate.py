@@ -25,8 +25,8 @@ MUTANTS = (
     ('resend keeps the old offset', ' m16_journal_rewind(&journal);\n', ''),
     ('bootstrap failure ignored', ' if(rc||status)return M16_END_BOOTSTRAP;\n', ''),
     ('a failed run marked as its verdict', 'm->failure!=M16_F_NONE', '0'),
-    ('USB started before the mark', ' write_mark(r);\n char *argv[]={(char *)r->adsp,NULL};\n pid_t p=spawn_quiet(argv);\n if(p<0)return -1;\n',
-     ' char *argv[]={(char *)r->adsp,NULL};\n pid_t p=spawn_quiet(argv);\n if(p<0)return -1;\n (void)poll(NULL,0,500);\n write_mark(r);\n'),
+    ('USB started before the mark', ' write_mark(r);\n char *argv[]={(char *)r->adsp,NULL};\n pid_t p=spawn_logged(argv);\n if(p<0)return -1;\n',
+     ' char *argv[]={(char *)r->adsp,NULL};\n pid_t p=spawn_logged(argv);\n if(p<0)return -1;\n (void)poll(NULL,0,500);\n write_mark(r);\n'),
     ('connector failure ignored', 'if(strcmp(r->line,"CONNECTOR_READY"))return -1;\n', 'if(strcmp(r->line,"CONNECTOR_READY"))return 0;\n'),
 )
 
