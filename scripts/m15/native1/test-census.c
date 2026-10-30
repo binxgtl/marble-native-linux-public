@@ -75,5 +75,6 @@ int main(void){
  assert(m15_supervise(s,quiet,NULL,1000,0,&r)==-1&&!strcmp(m15_error(s),"nonexclusive-process-scope"));
  clear();assert(!kill(child,SIGKILL));int status;assert(waitpid(child,&status,0)==child);
  assert(run()==0&&exclusive());
+ m15_destroy(s);
  puts("PASS census skips only ENOENT and ESRCH; other errors and malformed stat fail closed");
 }
