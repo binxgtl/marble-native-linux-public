@@ -7,7 +7,7 @@ HERE=Path(__file__).resolve().parent
 sys.path.insert(0,str(HERE));import provenance,verify
 pid1,custodian,observer,wire,out=map(lambda x:Path(x).resolve(),sys.argv[1:]);out.mkdir(parents=True,exist_ok=True)
 files,_,_=verify.host.decode(wire.read_bytes())
-for mode in ('complete','green-retained','wrong-reconnect','wrong-ack','connector-failure','missing-ack','pc-only'):
+for mode in ('complete','green-retained','wrong-reconnect','wrong-ack','connector-failure','missing-ack','pc-only','connector-start-failure','display-error'):
     with tempfile.TemporaryDirectory() as tmp:
         root=Path(tmp)
         for row in verify.host.contract.o3.legacy.load(files['capture.raw']):
@@ -21,6 +21,8 @@ for mode in ('complete','green-retained','wrong-reconnect','wrong-ack','connecto
         fifo=root/'events';os.mkfifo(fifo);events=os.open(fifo,os.O_RDWR|os.O_NONBLOCK)
         master,slave=pty.openpty();os.set_blocking(master,False)
         env=dict(os.environ,M15_RUN=str(root),M15_CUSTODIAN=str(custodian),M15_DISPLAY=str(HERE.parent/'native6/fake-display.py'),M15_CONNECTOR=str(HERE/'fake-connector.py'),M15_OBSERVER=str(observer),M15_TTY=os.ttyname(slave),M15_KMSG=str(km),M15_FIXTURE_ROOT=str(root/'fixture'),M15_EVENTS=str(fifo))
+        if mode=='connector-start-failure':env['M15_FAKE_CONNECTOR_START']='CONNECTOR_FAILED'
+        if mode=='display-error':env['M15_FAKE_DISPLAY_ERROR']='1'
         log=(out/(mode+'.process')).open('wb')
         process=subprocess.Popen(['unshare','--mount','--pid','--fork','--mount-proc',str(pid1),str(meta),'pc-admission-only' if mode=='pc-only' else 'pc-wall-pc'],env=env,stdout=log,stderr=log,start_new_session=True)
         journal=root/'pid1.journal';pending=bytearray()
@@ -40,17 +42,28 @@ for mode in ('complete','green-retained','wrong-reconnect','wrong-ack','connecto
                 if select.select([master],[],[],.02)[0]:pending.extend(os.read(master,65536))
             answer,rest=bytes(pending).split(b'\n',1);pending[:]=rest;return answer
         try:
+            if mode=='connector-start-failure':
+                # Run2's path: no USB, no host. RED must now reach the screen before any admission.
+                until('RED_HOLD');assert re.search(r'^\d+ RED$',text(),re.M) and 'M15NATIVE1' not in text()
+                assert process.poll() is None
+                (out/(mode+'.journal')).write_bytes(journal.read_bytes())
+                print('PASS',mode,flush=True);continue
             header=line().split();assert header[0]==b'M15NATIVE1';nonce,binding=header[1:3];experiment=b'pc-admission-only' if mode=='pc-only' else b'pc-wall-pc';assert header[3]==experiment
             assert binding.decode()==verify.host.sha(meta.read_bytes())
-            os.write(master,b'M15PC1 '+nonce+b' '+binding+b'\n');until('M15DISPLAY 0 BLUE committed')
+            os.write(master,b'M15PC1 '+nonce+b' '+binding+b'\n')
+            if mode=='display-error':
+                until('RED_HOLD');assert 'M15DISPLAY ERROR' in text() and 'BLUE mapped' not in text()
+                (out/(mode+'.journal')).write_bytes(journal.read_bytes())
+                print('PASS',mode,flush=True);continue
+            until('M15DISPLAY 0 WAIT committed');until('M15DISPLAY 1 BLUE mapped')
             assert 'COLLECT_BEGIN' not in text()
             if mode=='pc-only':
                 time.sleep(.2);assert 'PC_ONLY retain_no_wall_admission' in text();os.write(events,b'REMOVED\n');until('RED_HOLD');assert 'COLLECT_BEGIN' not in text()
             elif mode=='connector-failure':
                 os.write(events,b'CONNECTOR_FAILED\n');until('RED_HOLD')
             else:
-                os.write(events,b'REMOVED\n');until('M15DISPLAY 1 YELLOW mapped')
-                os.write(events,b'ATTACHED\n');until('M15DISPLAY 2 GREEN mapped')
+                os.write(events,b'REMOVED\n');until('M15DISPLAY 2 YELLOW mapped')
+                os.write(events,b'ATTACHED\n');until('M15DISPLAY 3 GREEN mapped')
                 time.sleep(.3);assert 'CYAN' not in text(),'GREEN advanced without PC'
                 if mode!='green-retained':
                     os.write(events,b'REMOVED\n');time.sleep(.1);assert 'CYAN' not in text()
@@ -87,4 +100,4 @@ for mode in ('complete','green-retained','wrong-reconnect','wrong-ack','connecto
             for p in out.iterdir():
                 if p.is_file():p.chmod(0o644)
         print('PASS',mode,flush=True)
-print('PASS 7 native-loop cases; real connector/display NOT executed; fixture only')
+print('PASS 9 native-loop cases; real display NOT executed; fixture only')

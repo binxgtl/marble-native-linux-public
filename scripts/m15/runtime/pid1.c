@@ -57,11 +57,13 @@ int main(int argc,char **argv){
  int nullfd=open("/dev/null",O_RDWR|O_CLOEXEC);if(nullfd<0)goto hold;
  char *ca[]={ (char *)cust,argv[1],(char *)obs,kp,fp,NULL};pid_t cp=launch(ca,ci[0],co[1],ce[1],-1);if(cp<0||parent_add(&owners,cp,CUSTODIAN))goto hold;
  char *xa[]={ (char *)conn,NULL};pid_t xp=launch(xa,xi[0],xo[1],journal,-1);if(xp<0||parent_add(&owners,xp,CONNECTOR))goto hold;
- close(ci[0]);close(co[1]);close(ce[1]);close(xi[0]);close(xo[1]);
+ /* MAGENTA before any USB or host step: a black screen then means this PID1 never ran. */
+ char *da[]={ (char *)screen,(char *)"wait",NULL};pid_t dp=launch(da,di[0],nullfd,journal,ds[1]);if(dp<0||parent_add(&owners,dp,DISPLAY))goto hold;
+ close(ci[0]);close(co[1]);close(ce[1]);close(xi[0]);close(xo[1]);close(di[0]);close(ds[1]);display_in=di[1];
  if(nonblock(ci[1])||nonblock(co[0])||nonblock(ce[0])||nonblock(xi[1])||nonblock(xo[0])||nonblock(ds[0])||nonblock(di[1]))goto hold;
  char cb[512],hb[512],db[128],xb[128],nonce[33]={0},binding[65]={0},cmd[512],ack[201]={0};
  size_t cat=0,hat=0,dat=0,xat=0,used=0,sent=0;unsigned char pending[65536];
- enum phase phase=START;int cr=0,xr=0,display=0,collected=0,wait_ack=0,ack_received=0,ack_forwarded=0,sealing=0;
+ enum phase phase=START;int cr=0,xr=0,display_bad=0,collected=0,wait_ack=0,ack_received=0,ack_forwarded=0,sealing=0;
  unsigned long long deadline=now()+M15_STAGE_BUDGET;
 #ifdef M15_RUNTIME_TEST
  const char *budget=getenv("M15_TEST_BUDGET");if(budget)deadline=now()+strtoul(budget,NULL,10);
@@ -87,14 +89,14 @@ int main(int argc,char **argv){
    record("KERNEL_COVERAGE_END before_freeze");if(fsync(journal)||snapshot(jp,fp)){failed=1;break;}
    snprintf(cmd,sizeof(cmd),"M15IPC1 %s 3 SEAL\n",nonce);send_line(ci[1],cmd);sealing=0;phase=SEAL_WAIT;
   }
-  struct pollfd p[5]={{ce[0],POLLIN,0},{xo[0],POLLIN,0},{ds[0],display?POLLIN:0,0},{co[0],sent==used?POLLIN:0,0},{tty,(short)(tty>=0?(POLLIN|(sent<used?POLLOUT:0)):0),0}};
+  struct pollfd p[5]={{ce[0],POLLIN,0},{xo[0],POLLIN,0},{ds[0],POLLIN,0},{co[0],sent==used?POLLIN:0,0},{tty,(short)(tty>=0?(POLLIN|(sent<used?POLLOUT:0)):0),0}};
   if(poll(p,5,50)<0){if(errno==EINTR)continue;record("poll_failure");break;}
   if(p[0].revents&&line(ce[0],cb,&cat,sizeof(cb))){
    record(cb);
    if(phase==START&&!cr&&strlen(cb)==103&&sscanf(cb,"READY %32s %64s",nonce,binding)==2&&hex(nonce,32)&&hex(binding,64))cr=1;
    else if(phase==HOST_ACK&&!strcmp(cb,"ISOLATE_BEGIN")){
-    char *da[]={ (char *)screen,NULL};pid_t dp=launch(da,di[0],nullfd,journal,ds[1]);if(dp<0||parent_add(&owners,dp,DISPLAY)){failed=1;break;}
-    close(di[0]);close(ds[1]);display_in=di[1];display=1;phase=BLUE_PENDING;
+    if(display_bad){failed=1;break;}
+    color("BLUE");phase=BLUE_PENDING;
    }else if(phase==ISOLATE_WAIT&&!strcmp(cb,"WALL_WAIT")){color("YELLOW");phase=YELLOW_PENDING;}
    else if(phase==COLLECT&&!collected&&!strcmp(cb,"COLLECT_BEGIN"))collected=1;
    else if(phase==COLLECT&&collected==1&&!strcmp(cb,"COLLECT_RETURNED")){collected=2;sealing=1;}
@@ -125,11 +127,14 @@ int main(int argc,char **argv){
   }
   if(p[2].revents&&line(ds[0],db,&dat,sizeof(db))){
    record(db);
-   if(phase==BLUE_PENDING&&!strcmp(db,"M15DISPLAY 0 BLUE committed")){phase=pc_only?PC_ONLY_WAIT:BLUE_WAIT;record(pc_only?"PC_ONLY retain_no_wall_admission":"WALL_SCOPE operator_declared");deadline=now()+M15_STAGE_BUDGET;}
-   else if(phase==YELLOW_PENDING&&!strcmp(db,"M15DISPLAY 1 YELLOW mapped"))phase=WALL_WAIT;
-   else if(phase==GREEN_PENDING&&!strcmp(db,"M15DISPLAY 2 GREEN mapped"))phase=GREEN_WAIT;
-   else if(phase==CYAN_PENDING&&!strcmp(db,"M15DISPLAY 3 CYAN mapped")){snprintf(cmd,sizeof(cmd),"M15IPC1 %s 4 PC 1\n",nonce);send_line(ci[1],cmd);phase=EXPORT;}
-   else if(phase==COMPLETE_PENDING&&!strcmp(db,"M15DISPLAY 4 COMPLETE mapped")){record("COMPLETE retain_RAM_ADSP_USB_display");phase=DONE;}
+   /* A dead screen must not hide USB: the host still sees COM and the run still ends at BLUE. */
+   if(phase<BLUE_PENDING&&!strcmp(db,"M15DISPLAY ERROR"))display_bad=1;
+   else if(phase<=BLUE_PENDING&&!strcmp(db,"M15DISPLAY 0 WAIT committed"))record("WAIT_SCREEN no_admission");
+   else if(phase==BLUE_PENDING&&!strcmp(db,"M15DISPLAY 1 BLUE mapped")){phase=pc_only?PC_ONLY_WAIT:BLUE_WAIT;record(pc_only?"PC_ONLY retain_no_wall_admission":"WALL_SCOPE operator_declared");deadline=now()+M15_STAGE_BUDGET;}
+   else if(phase==YELLOW_PENDING&&!strcmp(db,"M15DISPLAY 2 YELLOW mapped"))phase=WALL_WAIT;
+   else if(phase==GREEN_PENDING&&!strcmp(db,"M15DISPLAY 3 GREEN mapped"))phase=GREEN_WAIT;
+   else if(phase==CYAN_PENDING&&!strcmp(db,"M15DISPLAY 4 CYAN mapped")){snprintf(cmd,sizeof(cmd),"M15IPC1 %s 4 PC 1\n",nonce);send_line(ci[1],cmd);phase=EXPORT;}
+   else if(phase==COMPLETE_PENDING&&!strcmp(db,"M15DISPLAY 5 COMPLETE mapped")){record("COMPLETE retain_RAM_ADSP_USB_display");phase=DONE;}
    else failed=1;
   }
   if(p[3].revents&&sent==used){ssize_t n=read(co[0],pending,sizeof(pending));if(n>0&&phase==EXPORT){used=(size_t)n;sent=0;}else if(!n||(n<0&&errno!=EAGAIN&&errno!=EINTR)||n>0)failed=1;}

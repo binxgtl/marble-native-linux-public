@@ -3,7 +3,7 @@
 import os,selectors,sys
 fd=os.open(os.environ['M15_EVENTS'],os.O_RDWR|os.O_NONBLOCK)
 s=selectors.DefaultSelector();s.register(0,selectors.EVENT_READ);s.register(fd,selectors.EVENT_READ)
-print('CONNECTOR_READY',flush=True)
+print(os.environ.get('M15_FAKE_CONNECTOR_START','CONNECTOR_READY'),flush=True)
 pending={0:b'',fd:b''}
 while True:
     for key,_ in s.select():

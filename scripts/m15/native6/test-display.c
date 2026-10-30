@@ -14,8 +14,8 @@ int main(void){
  if(!p){assert(dup2(in[0],0)==0);assert(dup2(out[1],3)==3);m15_display_loop(map,4320);}
  close(in[0]);close(out[1]);FILE *f=fdopen(out[0],"r");assert(f);char b[128];
  assert(fgets(b,sizeof(b),f)&&!strcmp(b,"M15DISPLAY 0 BLUE committed\n"));
- const char *names[]={"YELLOW","GREEN","CYAN","COMPLETE"};uint32_t colors[]={0xffff00,0xff00,0xffff,0xffffff};
- for(unsigned i=0;i<4;i++){
+ const char *names[]={"BLUE","YELLOW","GREEN","CYAN","COMPLETE"};uint32_t colors[]={0xff,0xffff00,0xff00,0xffff,0xffffff};
+ for(unsigned i=0;i<5;i++){
   int n=snprintf(b,sizeof(b),"M15COLOR %u %s\n",i+1,names[i]);assert(write(in[1],b,(size_t)n)==n);
   assert(fgets(b,sizeof(b),f));assert(strstr(b," mapped\n"));
   assert(map[0]==colors[i]&&map[1080*2400-1]==colors[i]);
