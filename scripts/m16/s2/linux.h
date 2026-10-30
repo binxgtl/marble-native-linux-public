@@ -19,4 +19,6 @@ int m16_parse_interrupts(const char *text,const char *name,uint64_t *total);
 int m16_parse_cpu_mask(const char *text,uint64_t *mask);
 int m16_parse_mem_sleep(const char *text,uint32_t *selected);
 int m16_has_token(const char *text,const char *token);
+/* True only for dummy_udc.N, the emulator the carrier builds in. Everything else is real USB. */
+int m16_udc_is_emulated(const char *name);
 #endif

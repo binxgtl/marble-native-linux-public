@@ -303,7 +303,8 @@ class Fixture:
         }
         for name, text in files.items():
             self.write(name, text)
-        (self.root / 'sys/class/udc').mkdir(parents=True)
+        # Present on the carrier with no hardware behind it, as Run1 and M8 U1 run 3 recorded.
+        (self.root / 'sys/class/udc/dummy_udc.0').mkdir(parents=True)
         for cpu in range(8):
             self.write(f'sys/devices/system/cpu/cpu{cpu}/cpuidle/state1/s2idle/usage', '0\n')
         self.interrupts(0)

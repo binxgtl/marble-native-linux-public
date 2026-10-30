@@ -50,6 +50,9 @@ MUTANTS = (
     ('two matching IRQ lines accepted', 'linux.c', 'if(found++)return -EEXIST;', 'found++;', 'linux'),
     ('name suffix matches a longer IRQ', 'linux.c', "&&line[n-name_n-1]==' '", '', 'linux'),
     ('CPU outside the known set accepted', 'linux.c', 'if(a>b||b>=M16_CPUS)return -EINVAL;', 'if(a>b)return -EINVAL;', 'linux'),
+    ('every UDC treated as the emulator', 'linux.c', "if(e->d_name[0]!='.'&&!m16_udc_is_emulated(e->d_name))++*out;", '', 'integration'),
+    ('the emulator counted as real USB', 'linux.c', "if(e->d_name[0]!='.'&&!m16_udc_is_emulated(e->d_name))++*out;", "if(e->d_name[0]!='.')++*out;", 'integration'),
+    ('any name after the emulator prefix', 'linux.c', 'if(!isdigit((unsigned char)*p))return 0;', '', 'linux'),
     ('mark drops the run tag', 'mark.c', '*alarm=base|(uint64_t)tag<<4|(uint64_t)code;', '*alarm=base|(uint64_t)code;', 'mark'),
     ('mark accepts tag zero', 'mark.c', 'if(!alarm||!tag||code', 'if(!alarm||code', 'mark'),
     ('mark may overflow the register', 'mark.c', 'if(rtc_now>M16_MARK_MAX_RTC-M16_MARK_HORIZON_S)return -ERANGE;', '', 'mark'),
@@ -77,7 +80,8 @@ def fails(test, source, work):
         build(source, ('mark.c', 'test-mark.c'), work / 't')
         return subprocess.run([str(work / 't')], capture_output=True).returncode != 0
     build(source, CORE + ('linux.c', 'driver.c'), work / 'driver')
-    return subprocess.run([sys.executable, str(HERE / 'test.py'), '--driver', str(work / 'driver'), '--out', str(work), 'Oracle'],
+    group = 'Integration' if test == 'integration' else 'Oracle'
+    return subprocess.run([sys.executable, str(HERE / 'test.py'), '--driver', str(work / 'driver'), '--out', str(work), '-f', group],
                           capture_output=True).returncode != 0
 
 

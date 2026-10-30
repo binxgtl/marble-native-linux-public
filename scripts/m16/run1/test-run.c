@@ -70,7 +70,7 @@ int main(int argc,char **argv) {
  r.root=h.root;r.tty=argv[2];
  r.bootstrap=under(0,h.root,"test/bootstrap");r.adsp=under(1,h.root,"test/adsp");r.connector=under(2,h.root,"test/connector");
  r.display=under(3,h.root,"test/display");r.kmsg=under(4,h.root,"test/kmsg");r.boot_log=under(5,h.root,"test/boot.log");
- r.tag=0x31;memcpy(r.nonce,"M16RUN1-FIXTURE!",16);
+ r.tag=0x32;memcpy(r.nonce,"M16RUN1-FIXTURE!",16);
  r.bootstrap_ms=5000;r.settle_ms=800;r.display_ms=2000;r.blue_ms=1;r.final_ms=1;r.step_ms=1;r.pace_ms=1;r.log_ms=20000;
  enum m16_run_end end=m16_run_main(&r);
  const struct m16_machine *m=m16_run_machine();

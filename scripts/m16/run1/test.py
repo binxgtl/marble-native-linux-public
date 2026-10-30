@@ -24,7 +24,7 @@ import host  # noqa: E402
 ARGS = None
 SCALE = 20
 RTC_NOW = 80_076_948
-TAG = 0x31
+TAG = 0x32
 GOOD = '#!/bin/sh\nexit 0\n'
 DISPLAY = '#!/bin/sh\necho "$1 $2" >> "$(dirname "$0")/colours"\nexit 0\n'
 READY = '#!/bin/sh\necho CONNECTOR_READY\nexec cat >/dev/null\n'
@@ -49,7 +49,7 @@ class Bench:
         }
         for name, text in files.items():
             self.write(name, text)
-        (self.root / 'sys/class/udc').mkdir(parents=True)
+        (self.root / 'sys/class/udc/dummy_udc.0').mkdir(parents=True)  # as the carrier has it
         for cpu in range(8):
             self.write(f'sys/devices/system/cpu/cpu{cpu}/cpuidle/state1/s2idle/usage', '0\n')
         self.interrupts(0)
@@ -249,6 +249,18 @@ class Run(unittest.TestCase):
         time.sleep(0.2)
         self.assertEqual(self.colours()[-1], '00ffff00 1', 'YELLOW: evidence is home, the cycle did not pass')
 
+    def test_a_real_udc_refuses_suspend(self):
+        (self.bench.root / 'sys/class/udc/a600000.dwc3').mkdir()
+        process = self.bench.start()
+        report = self.export()
+        self.assertEqual(report['failure']['reason'], 'USB_PRESENT')
+        self.bench.ack(report)
+        self.bench.read_log()
+        self.finish(process)
+        self.assertFalse((self.bench.test / 'writer_started').exists())
+        self.assertIn('dir /sys/class/udc: dummy_udc.0', self.bench.text('test/kmsg'))
+        self.assertIn('dir /sys/class/udc: a600000.dwc3', self.bench.text('test/kmsg'))
+
     def test_a_failed_colour_never_suspends(self):
         self.bench.script('display', '#!/bin/sh\necho "$1 $2" >> "$(dirname "$0")/colours"\nexit 2\n')
         process = self.bench.start()
@@ -350,7 +362,9 @@ class Scope(unittest.TestCase):
 
     def test_only_the_named_kernel_writes(self):
         code = (HERE / 'run.c').read_text(encoding='utf-8')
-        self.assertEqual(set(re.findall(r'"(/sys[^"]+)"', code)), {'/sys/class/rtc/rtc0/since_epoch', '/sys/class/rtc/rtc0/wakealarm'})
+        self.assertEqual(set(re.findall(r'"(/sys[^"]+)"', code)), {'/sys/class/rtc/rtc0/since_epoch', '/sys/class/rtc/rtc0/wakealarm',
+                                                                  '/sys/class/udc', '/sys/devices/system/cpu/cpu0/cpuidle'})
+        self.assertEqual(code.count('O_WRONLY'), 2, 'only kmsg and the alarm are written')
 
     def test_adsp_keeps_the_m15_order(self):
         old = (HERE.parent.parent / 'm15/runtime/bootstrap').read_text(encoding='utf-8')

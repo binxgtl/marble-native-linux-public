@@ -48,8 +48,13 @@ static void test_tokens(void) {
  CHECK(m16_has_token("freeze mem","freeze")&&m16_has_token("freeze mem","mem"));
  CHECK(!m16_has_token("freezer mem","freeze")&&!m16_has_token("","freeze"));
 }
+static void test_udc_names(void) {
+ CHECK(m16_udc_is_emulated("dummy_udc.0")&&m16_udc_is_emulated("dummy_udc.12"));
+ const char *real[]={"a600000.dwc3","dummy_udc","dummy_udc.","dummy_udc.x","dummy_udc.0x","dummy_udc0","xdummy_udc.0",""};
+ for(unsigned i=0;i<sizeof(real)/sizeof(*real);i++)CHECK(!m16_udc_is_emulated(real[i]));
+}
 int main(void) {
- test_interrupts();test_cpu_mask();test_mem_sleep();test_tokens();
+ test_interrupts();test_cpu_mask();test_mem_sleep();test_tokens();test_udc_names();
  printf("linux parsers: %u checks passed\n",checks);
  return 0;
 }

@@ -8,7 +8,7 @@
 #include <unistd.h>
 
 #define NONBLOCKING_RANDOM 0x0004u /* GRND_INSECURE: early boot must not wait for entropy */
-#define TAG 0x31u /* Run1; a different value from every earlier test alarm */
+#define TAG 0x32u /* Run2; a different value from every earlier run and test alarm */
 
 static struct m16_linux adapter;
 static struct m16_run run={

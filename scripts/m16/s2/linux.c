@@ -168,14 +168,23 @@ static int active_sources(const struct m16_linux *l,uint32_t *active) {
  *active=count;
  return 0;
 }
-static int count_entries(const struct m16_linux *l,const char *rel,uint32_t *out) {
+int m16_udc_is_emulated(const char *name) {
+ static const char prefix[]="dummy_udc.";
+ size_t n=sizeof(prefix)-1;
+ if(strncmp(name,prefix,n)||!name[n])return 0;
+ for(const char *p=name+n;*p;p++)if(!isdigit((unsigned char)*p))return 0;
+ return 1;
+}
+/* CONFIG_USB_DUMMY_HCD=y registers dummy_udc.0 with no hardware behind it, which is what
+ * Run1 refused on. Only that name is skipped, so the gate still sees every real controller. */
+static int real_udcs(const struct m16_linux *l,uint32_t *out) {
  char path[PATH_MAX];
- int rc=full_path(l,rel,path,sizeof(path));
+ int rc=full_path(l,"/sys/class/udc",path,sizeof(path));
  if(rc)return rc;
  DIR *d=opendir(path);
  *out=0;
  if(!d)return errno==ENOENT?0:-errno;
- for(struct dirent *e;(e=readdir(d));)if(e->d_name[0]!='.')++*out;
+ for(struct dirent *e;(e=readdir(d));)if(e->d_name[0]!='.'&&!m16_udc_is_emulated(e->d_name))++*out;
  closedir(d);
  return 0;
 }
@@ -228,7 +237,7 @@ static int linux_preflight(void *arg,struct m16_preflight *p) {
  rc=full_path(l,"/sys/class/rtc/rtc0/wakealarm",path,sizeof(path));
  if(rc)return rc;
  p->wakealarm_present=!access(path,R_OK|W_OK);
- rc=count_entries(l,"/sys/class/udc",&p->udc_count);
+ rc=real_udcs(l,&p->udc_count);
  if(rc)return rc;
  rc=remoteprocs_offline(l,&p->adsp_offline);
  if(rc)return rc;

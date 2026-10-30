@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 #define _GNU_SOURCE
 #include "run.h"
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -138,6 +139,15 @@ static int write_alarm(const struct m16_run *r,uint64_t value) {
  int error=errno;
  close(fd);
  return put==n?0:-error;
+}
+/* Names, not a count: Run1 could only show that one UDC was there. */
+static void log_dir(const struct m16_run *r,const char *rel) {
+ char path[PATH_MAX];
+ if(file_path(r,rel,path,sizeof(path)))return;
+ DIR *d=opendir(path);
+ if(!d){diag(r,"dir %s errno=%d",rel,errno);return;}
+ for(struct dirent *e;(e=readdir(d));)if(e->d_name[0]!='.')diag(r,"dir %s: %.64s",rel,e->d_name);
+ closedir(d);
 }
 /* After the seal and before ADSP, so it survives a failed channel and any later reset. */
 static void write_mark(struct m16_run *r) {
@@ -322,6 +332,8 @@ enum m16_run_end m16_run_main(struct m16_run *r) {
  if(rc||status)return M16_END_BOOTSTRAP;
  show_blue(r);
  settle(r);
+ log_dir(r,"/sys/class/udc");
+ log_dir(r,"/sys/devices/system/cpu/cpu0/cpuidle");
  const struct m16_ops ops={.arg=r,.clock=run_clock,.preflight=run_preflight,.counters=run_counters,
   .alarm_arm=run_arm,.alarm_enabled=run_enabled,.alarm_clear=run_clear,.wake_count_read=run_count_read,
   .wake_count_write=run_count_write,.writer_start=run_writer_start,.writer_poll=run_writer_poll,
