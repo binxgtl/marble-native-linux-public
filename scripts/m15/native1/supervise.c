@@ -16,25 +16,33 @@
 struct seen { pid_t pid; int reaped; };
 /* Children of this process from /proc/<pid>/stat. The device kernel has no
  * CONFIG_PROC_CHILDREN, so the task children file does not exist there.
- * Returns the count, up to cap pids, or -1 if /proc cannot be listed. */
+ * Returns the count, up to cap pids. Only a process that exited between the
+ * listing and its read is skipped: any other error returns -1, because a
+ * census that cannot see a task must not report it absent. */
 static int child_pids(pid_t self,long *pids,int cap) {
  DIR *d=opendir("/proc");if(!d)return -1;
- int found=0;struct dirent *entry;errno=0;
- while((entry=readdir(d))) {
+ int found=0,failed=0;
+ for(;;) {
+  errno=0;
+  struct dirent *entry=readdir(d);
+  if(!entry){failed=errno!=0;break;}
   if(entry->d_name[0]<'0' || entry->d_name[0]>'9')continue;
   char path[288],line[512];snprintf(path,sizeof(path),"/proc/%s/stat",entry->d_name);
-  int fd=open(path,O_RDONLY|O_CLOEXEC);if(fd<0){errno=0;continue;} /* already gone */
-  ssize_t n=read(fd,line,sizeof(line)-1);close(fd);if(n<=0){errno=0;continue;}
+  int fd=open(path,O_RDONLY|O_CLOEXEC);
+  if(fd<0){if(errno==ENOENT || errno==ESRCH)continue;failed=1;break;}
+  ssize_t n=read(fd,line,sizeof(line)-1);int error=errno;close(fd);
+  if(n<0 && (error==ENOENT || error==ESRCH))continue;
+  if(n<=0){failed=1;break;}
   line[n]=0;
   /* "pid (comm) state ppid": comm may hold spaces and parentheses. */
   char *end=strrchr(line,')'),state;long ppid;
-  if(end && sscanf(end+1," %c %ld",&state,&ppid)==2 && ppid==(long)self) {
+  if(!end || sscanf(end+1," %c %ld",&state,&ppid)!=2){failed=1;break;}
+  if(ppid==(long)self) {
    if(found<cap)pids[found]=atol(entry->d_name);
    found++;
   }
-  errno=0;
  }
- int error=errno;closedir(d);return error?-1:found;
+ closedir(d);return failed?-1:found;
 }
 static uint64_t ms(void) { struct timespec t;if(clock_gettime(CLOCK_MONOTONIC,&t))return 0;return (uint64_t)t.tv_sec*1000+(unsigned long)t.tv_nsec/1000000; }
 static int exclusive(void) {
