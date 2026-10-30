@@ -79,8 +79,7 @@ for mode in ('complete','green-retained','wrong-reconnect','wrong-ack','connecto
                             if pending:raw.extend(pending);pending.clear()
                             elif select.select([master],[],[],.02)[0]:raw.extend(os.read(master,65536))
                         # Paced by Custodian: unpaced, Run4 lost runs of 1536 bytes.
-                        frames=int(re.search(rb'
-F ([0-9]+) ',raw).group(1))
+                        frames=int(re.search(rb'\nF ([0-9]+) ',raw).group(1))
                         assert time.monotonic()-sent>=frames*2*.04*.9,'export not paced'
                         data,report,ack=verify.decode(bytes(raw),allow_fixture=True)
                         assert report['synthetic_only'] and not report['native_runtime_proven']
