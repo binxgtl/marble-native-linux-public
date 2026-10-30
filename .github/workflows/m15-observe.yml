@@ -70,11 +70,13 @@ jobs:
         run: |
           set -euo pipefail
           sh -n scripts/m15/termux/capture.sh
+          sh -n scripts/m15/termux/long.sh
           findmnt -n -o OPTIONS /dev | tee artifacts/m15/${{ runner.arch }}/termux-host-dev-mount.txt
           for variant in normal sanitize; do
             binary=artifacts/m15/${{ runner.arch }}/m15-observe-o3-a
             if [ "$variant" = sanitize ]; then binary=artifacts/m15/${{ runner.arch }}/observe-o3-sanitize; fi
             sudo -E python3 scripts/m15/termux/test.py --binary "$binary" -v 2>&1 | tee artifacts/m15/${{ runner.arch }}/termux-$variant.txt
+            sudo -E python3 scripts/m15/termux/test_long.py --binary "$binary" -v 2>&1 | tee artifacts/m15/${{ runner.arch }}/termux-long-$variant.txt
           done
       - name: Native Phase1 RAM escrow, real subreaper, independent host (offline)
         run: bash scripts/m15/native1/test.sh artifacts/m15/${{ runner.arch }}
