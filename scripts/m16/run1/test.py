@@ -287,7 +287,8 @@ class Run(unittest.TestCase):
         self.assertEqual(self.colours()[-1], '00ff0000 1', 'RED: resumed, evidence not exported')
 
     def test_connector_failure_holds_with_the_mark_kept(self):
-        self.bench.script('connector', '#!/bin/sh\necho CONNECTOR_FAILED\nexec cat >/dev/null\n')
+        # Stdout stays open, as on the real binary: it reports the failure, then pauses.
+        self.bench.script('connector', '#!/bin/sh\necho CONNECTOR_FAILED\nexec cat\n')
         began = time.monotonic()
         result = self.finish(self.cycle())
         self.assertEqual(result['end'], 2)
