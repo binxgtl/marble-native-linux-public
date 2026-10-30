@@ -1,0 +1,33 @@
+#!/bin/busybox sh
+# SPDX-License-Identifier: GPL-2.0-only
+# Modules and the display node only. ADSP stays offline until after the cycle.
+set -eu
+BB=/bin/busybox
+hold() { printf "M16 bootstrap failed: %s\n" "$*" >&2 || :; exit 1; }
+if [ -e /m16/payload.tar.xz ]; then
+ (cd / && $BB sha256sum -c /m16/payload.tar.xz.sha256) || hold payload-archive-hash
+ [ ! -e /sbin/m16-display ] && [ ! -e /m6 ] || hold payload-destination-exists
+ $BB tar -xJpf /m16/payload.tar.xz -C / || hold payload-archive-extract
+fi
+(cd / && $BB sha256sum -c /m16/files.sha256) || hold staged-hashes
+/sbin/m10-load-phase0 || hold phase0
+[ "$($BB wc -l </proc/modules)" -eq 95 ] || hold prefix-count
+/sbin/m15-load-m8-tail || hold m8-tail
+[ "$($BB wc -l </proc/modules)" -eq 100 ] || hold closure-count
+# A missing RTC is not a hold: the machine refuses to suspend and the reason is exported.
+/sbin/m16-load-rtc || printf 'M16 rtc module load failed\n' >&2
+i=0
+while [ "$i" -lt 30 ] && [ ! -e /sys/class/rtc/rtc0/name ]; do $BB sleep 0.1; i=$((i+1)); done
+link=
+i=0
+while [ "$i" -lt 300 ]; do
+ link=$($BB readlink -f /sys/class/drm/card0/device || :)
+ case "$link" in */ae00000.qcom,mdss_mdp) break;; esac
+ $BB sleep 0.1; i=$((i+1))
+done
+[ "$i" -lt 300 ] || hold mdss-card
+devno=$($BB cat /sys/class/drm/card0/dev) || hold card-dev
+major=${devno%%:*}; minor=${devno#*:}
+case "$major:$minor" in *[!0-9:]*|:*|*:) hold card-dev-format;; esac
+$BB mknod -m 600 /dev/dri/card0 c "$major" "$minor" || hold card-node
+exit 0

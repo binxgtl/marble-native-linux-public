@@ -1,0 +1,43 @@
+#!/bin/busybox sh
+# SPDX-License-Identifier: GPL-2.0-only
+# The M15 ADSP start, unchanged in order, moved to after the cycle. First start after a suspend.
+set -eu
+BB=/bin/busybox
+hold() { printf "M16 adsp failed: %s\n" "$*" >&2 || :; exit 1; }
+read_value() { $BB cat "$1"; }
+poll_value() {
+ i=0
+ while [ "$i" -lt 300 ]; do
+  value=$(read_value "$1") || return 1
+  [ "$value" != "$2" ] || return 0
+  $BB sleep 0.1 || return 1; i=$((i+1))
+ done
+ return 1
+}
+adsp=
+for node in /sys/class/remoteproc/remoteproc*; do
+ target=$($BB readlink -f "$node/device") || hold remoteproc-link
+ case "$target" in */3000000.remoteproc-adsp) [ -z "$adsp" ] || hold duplicate-adsp; adsp=$node;; esac
+done
+[ -n "$adsp" ] || hold missing-adsp
+[ "$(read_value "$adsp/state")" = offline ] || hold inherited-adsp
+read_value "$adsp/firmware" >/run/m16/adsp.original-firmware || hold firmware-read
+read_value /sys/module/firmware_class/parameters/path >/run/m16/firmware.original-path || hold path-read
+[ -r /m6/modem/image/adsp2.mdt ] || hold adsp-firmware
+printf '%s' /m6/modem/image >/sys/module/firmware_class/parameters/path || hold firmware-path
+[ "$(read_value /sys/module/firmware_class/parameters/path)" = /m6/modem/image ] || hold path-readback
+printf '%s' adsp2.mdt >"$adsp/firmware" || hold firmware-name
+[ "$(read_value "$adsp/firmware")" = adsp2.mdt ] || hold firmware-readback
+printf '%s' start >"$adsp/state" || hold adsp-start
+poll_value "$adsp/state" running || hold adsp-running
+printf '%s\n' "$adsp" >/run/m16/adsp.owner || hold owner-record
+for pair in 'soc:qcom,pmic_glink pmic_glink' 'soc:qcom,pmic_glink:qcom,battery_charger qti_battery_charger'; do
+ set -- $pair
+ node=/sys/bus/platform/devices/$1
+ i=0
+ while [ "$($BB basename "$($BB readlink -f "$node/driver" || :)" )" != "$2" ]; do
+  [ "$i" -lt 300 ] || hold supplier-timeout
+  $BB sleep 0.1; i=$((i+1))
+ done
+done
+exit 0

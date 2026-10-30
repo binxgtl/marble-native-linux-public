@@ -13,11 +13,13 @@ jobs:
       matrix:
         runner: [ubuntu-24.04, ubuntu-24.04-arm]
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 10
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - name: Journal, oracle, state machine and real-fork fixture, normal and ASan/UBSan (no device)
         run: bash scripts/m16/s2/test.sh artifacts/m16/${{ runner.arch }}
+      - name: Run1 runtime on a synthetic tree, mutants and reviewable static binaries (no device)
+        run: bash scripts/m16/run1/test.sh artifacts/m16/${{ runner.arch }}/run1
       - uses: actions/upload-artifact@v4
         if: always()
         with:

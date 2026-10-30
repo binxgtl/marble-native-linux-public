@@ -508,8 +508,8 @@ class Scope(unittest.TestCase):
         for forbidden in ('open(', 'read(', 'fopen', 'printf', 'malloc'):
             self.assertNotIn(forbidden, code.replace('sha_', ''))
 
-    def test_the_mark_is_not_wired_into_a_run(self):
-        """Encoding only until the read path is validated: no run can write one yet."""
+    def test_the_mark_stays_out_of_the_machine(self):
+        """Marks are written by the run around it, after the seal, never by the cycle itself."""
         for name in ('machine.c', 'machine.h', 'linux.c', 'linux.h'):
             self.assertNotIn('mark', (HERE / name).read_text(encoding='utf-8'))
 
