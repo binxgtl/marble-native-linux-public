@@ -12,6 +12,9 @@
 #include <sys/random.h>
 #include <time.h>
 #include <unistd.h>
+#ifndef M15_EXPORT_STEP_MS
+#define M15_EXPORT_STEP_MS 40
+#endif
 static char nonce[33];
 static uint64_t now(void){struct timespec t;if(clock_gettime(CLOCK_MONOTONIC,&t))_exit(125);return (uint64_t)t.tv_sec*1000+t.tv_nsec/1000000;}
 static _Noreturn void hold(struct m15 *s){
@@ -79,7 +82,9 @@ int main(int argc,char **argv){
  if(m15_finish(s,result.raw_wait,result.census_closed,now()))hold(s);
  notify(s,"FROZEN\n");
  command(s,4,cmd);if(strcmp(cmd,"PC 1\n")||m15_reconnect(s,1,now()))hold(s);
- while(m15_state(s)==M15_EXPORT){if(m15_export_step(s,sink,NULL,now())<0)hold(s);struct pollfd p={1,POLLOUT,0};if(poll(&p,1,2)<0&&errno!=EINTR)hold(s);}
+ /* A header, then its payload: about 13 KB/s, what M12 held for 5 s without loss.
+  * Unpaced, Run4 lost runs of 1536 bytes. */
+ while(m15_state(s)==M15_EXPORT){if(m15_export_step(s,sink,NULL,now())<0)hold(s);if(poll(NULL,0,M15_EXPORT_STEP_MS)<0&&errno!=EINTR)hold(s);}
  snprintf(message,sizeof(message),"WAIT_ACK %llu\n",(unsigned long long)m15_accepted_bytes(s));notify(s,message);
  size=command(s,5,cmd);if(m15_host_ack(s,cmd,size,now()))hold(s);
  notify(s,"RECOVERED evidence_only\n");for(;;)pause();

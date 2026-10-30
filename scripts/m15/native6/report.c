@@ -16,7 +16,7 @@
 #define HEIGHT 2400
 #define SCALE 7
 #define QUIET 4
-#define DWELL_MS 5000
+#define DWELL_MS 10000
 #define GLYPH 5
 #define TEXT_X 30
 #define TEXT_Y 170
@@ -170,6 +170,6 @@ _Noreturn void m15_report_loop(void *map,uint32_t pitch,const char *dir){
  for(unsigned i=0;;i=(i+1)%pages){
   size_t k=m15_report_page(text,start,i,pages,page,sizeof(page));
   if(!m15_qr_encode(page,k,modules))m15_report_show(map,pitch,error,modules,i,pages);
-  (void)poll(NULL,0,DWELL_MS);
+  (void)poll(NULL,0,i?DWELL_MS:2*DWELL_MS); /* the first page holds the error */
  }
 }

@@ -72,12 +72,16 @@ for mode in ('complete','green-retained','wrong-reconnect','wrong-ack','connecto
                     if mode=='wrong-reconnect':
                         os.write(master,answer.replace(nonce,b'0'*32));until('RED_HOLD');assert 'CYAN' not in text()
                     else:
-                        os.write(master,answer);raw=bytearray()
+                        os.write(master,answer);raw=bytearray();sent=time.monotonic()
                         end=time.monotonic()+10
                         while not re.search(rb'\nF [0-9]+ [0-9]+ [0-9a-f]{64} [0-9a-f]{64}\n$',raw):
                             assert time.monotonic()<end,text()
                             if pending:raw.extend(pending);pending.clear()
                             elif select.select([master],[],[],.02)[0]:raw.extend(os.read(master,65536))
+                        # Paced by Custodian: unpaced, Run4 lost runs of 1536 bytes.
+                        frames=int(re.search(rb'
+F ([0-9]+) ',raw).group(1))
+                        assert time.monotonic()-sent>=frames*2*.04*.9,'export not paced'
                         data,report,ack=verify.decode(bytes(raw),allow_fixture=True)
                         assert report['synthetic_only'] and not report['native_runtime_proven']
                         try:verify.decode(bytes(raw))
