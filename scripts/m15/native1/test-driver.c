@@ -80,7 +80,7 @@ int main(int argc,char **argv) {
   if(m15_append(s,M15_RAW,raw.p,raw.n))goto resolve;
   if(!strcmp(mode,"stderr")){m15_append(s,M15_STDERR,"error\n",6);}
   if(!strcmp(mode,"orphan-owner")){m15_owner_add(s,1002,now++);m15_owner_reaped(s,1001,0,now++);m15_finish(s,0,0,now++);goto resolve;}
-  if(!strcmp(mode,"blocked-owner")){m15_tick(s,100004);goto resolve;}
+  if(!strcmp(mode,"blocked-owner")){m15_tick(s,130004);goto resolve;}
   if(!strcmp(mode,"nonterminal-wait")){m15_owner_reaped(s,1001,0x137f,now++);goto resolve;}
   if(m15_owner_reaped(s,1001,!strcmp(mode,"exit-error")?256:0,now++))goto resolve;
   if(!strcmp(mode,"double-reap")){m15_owner_reaped(s,1001,0,now++);goto output;}
