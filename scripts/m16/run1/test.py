@@ -288,8 +288,10 @@ class Run(unittest.TestCase):
 
     def test_connector_failure_holds_with_the_mark_kept(self):
         self.bench.script('connector', '#!/bin/sh\necho CONNECTOR_FAILED\nexec cat >/dev/null\n')
+        began = time.monotonic()
         result = self.finish(self.cycle())
         self.assertEqual(result['end'], 2)
+        self.assertLess(time.monotonic() - began, 8, 'held at once, not by running out the channel deadline')
         self.assertEqual(self.mark_read()['state'], 'PRESENT')
 
     def test_no_host_runs_out_the_channel_deadline(self):
@@ -303,6 +305,7 @@ class Run(unittest.TestCase):
         result = self.finish(process)
         self.assertEqual((result['end'], result['failure'], result['writer_active']), (2, 'WRITER_TIMEOUT', 1))
         self.assertEqual(self.bench.text('sys/class/rtc/rtc0/wakealarm'), '+45\n', 'the RTC is left alone')
+        time.sleep(0.5)  # a colour child, if any, gets time to record itself
         self.assertEqual(len(self.colours()), 1, 'no colour while the transition is unresolved')
 
     def test_a_wrong_ack_changes_nothing(self):
