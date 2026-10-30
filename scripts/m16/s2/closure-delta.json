@@ -1,0 +1,33 @@
+{
+ "schema": "m16-closure-delta-v1",
+ "status": "OFFLINE RECOMMENDATION, NOT A CANDIDATE. No closure was frozen or staged.",
+ "base_closure": {"name": "M8", "modules": 100, "frozen_manifests_changed": false},
+ "add": [
+  {
+   "module": "rtc-pm8xxx.ko",
+   "size": 25064,
+   "sha256": "6b857adc9cbeac774625882708f2d65a602f65bc26942007ae6760cf699f4911",
+   "source": "canonical ROM vendor_boot ramdisk, lib/modules",
+   "load_after": "M8 closure tail",
+   "reason": "Only timed wake source. Binds qcom,pmk8350-rtc, the runtime DT node rtc@6100.",
+   "modules_dep_entries": 0,
+   "kmi": {"undefined_symbols": 24, "resolved_in_vmlinux": 24, "unresolved": 0, "crc_mismatch": 0, "versions": 25, "reference": "M1 Module.symvers"},
+   "suppliers": [
+    {"role": "parent regmap", "node": "qcom,pmk8350@0", "provider": "qcom-spmi-pmic.ko", "in_base_closure": true},
+    {"role": "interrupt parent", "node": "qcom,spmi@c42d000", "provider": "spmi-pmic-arb.ko", "in_base_closure": true},
+    {"role": "wake parent", "node": "interrupt-controller@b220000", "provider": "qcom-pdc.ko", "in_base_closure": true}
+   ],
+   "dt_properties_seen": ["compatible", "reg", "reg-names", "interrupts", "phandle"],
+   "dt_supplier_properties_seen": []
+  }
+ ],
+ "not_added": [
+  {"module": "qcom-pon.ko", "reason": "Needed for Power and Volume Down, not for RTC wake. Registers reboot-mode, so it changes the proven reboot path. Separate gate."},
+  {"module": "soc_sleep_stats.ko", "reason": "The clock gap proves sleep. SoC residency is not needed for a first cycle."},
+  {"module": "qcom_lpm.ko", "reason": "A cpuidle governor. No evidence a first cycle needs it, and native runs the menu governor today."},
+  {"module": "smp2p_sleepstate.ko", "reason": "No evidence names it as a supplier of RTC wake. Add only if S3 evidence does."},
+  {"module": "qcom_wdt_core.ko", "reason": "M9 rejected watchdog behaviour as unproven. Not a recovery path."}
+ ],
+ "proven_on_carrier": "U1r3: rtc-pm8xxx registered rtc0 on rtc@6100 on the carrier kernel, after same-kernel handoff.",
+ "not_proven": ["Load inside a native closure", "RTC wake on native", "Sufficiency without the stock modules loaded before it in U1r3"]
+}

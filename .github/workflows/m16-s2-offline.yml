@@ -1,0 +1,25 @@
+name: M16 S2 suspend evidence offline
+on:
+  push:
+    branches: [m16/suspend-resume]
+    paths: ['scripts/m16/**', '.github/workflows/m16-s2-offline.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  regression:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Journal, oracle, state machine and real-fork fixture, normal and ASan/UBSan (no device)
+        run: bash scripts/m16/s2/test.sh artifacts/m16/${{ runner.arch }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: m16-s2-${{ runner.arch }}-${{ github.sha }}
+          path: artifacts/m16/${{ runner.arch }}/
