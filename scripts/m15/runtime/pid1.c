@@ -63,7 +63,7 @@ int main(int argc,char **argv){
  if(nonblock(ci[1])||nonblock(co[0])||nonblock(ce[0])||nonblock(xi[1])||nonblock(xo[0])||nonblock(ds[0])||nonblock(di[1]))goto hold;
  char cb[512],hb[512],db[128],xb[128],nonce[33]={0},binding[65]={0},cmd[512],ack[201]={0};
  size_t cat=0,hat=0,dat=0,xat=0,used=0,sent=0;unsigned char pending[65536];
- enum phase phase=START;int cr=0,xr=0,display_bad=0,collected=0,wait_ack=0,ack_received=0,ack_forwarded=0,sealing=0;
+ enum phase phase=START;int cr=0,xr=0,display_bad=0,wall=0,collected=0,wait_ack=0,ack_received=0,ack_forwarded=0,sealing=0;
  unsigned long long deadline=now()+M15_STAGE_BUDGET;
 #ifdef M15_RUNTIME_TEST
  const char *budget=getenv("M15_TEST_BUDGET");if(budget)deadline=now()+strtoul(budget,NULL,10);
@@ -113,8 +113,12 @@ int main(int argc,char **argv){
    else if(phase==BLUE_WAIT&&!strcmp(xb,"REMOVED")){send_line(xi[1],"UNBIND\n");phase=UNBIND_WAIT;}
    else if(phase==UNBIND_WAIT&&!strcmp(xb,"UNBOUND")){snprintf(cmd,sizeof(cmd),"M15IPC1 %s 1 ISOLATED 1 1\n",nonce);send_line(ci[1],cmd);phase=ISOLATE_WAIT;}
    else if(phase==WALL_WAIT&&!strcmp(xb,"ATTACHED")){
-    record("wall_attachment kernel_reported; identity_and_PC_absence operator_declared");snprintf(cmd,sizeof(cmd),"M15IPC1 %s 2 WALL 1 1\n",nonce);send_line(ci[1],cmd);phase=COLLECT;deadline=now()+100000;
-   }else if(phase==GREEN_WAIT&&!strcmp(xb,"REMOVED"))phase=GREEN_REMOVED;
+    record("wall_attachment kernel_reported; identity_and_PC_absence operator_declared");snprintf(cmd,sizeof(cmd),"M15IPC1 %s 2 WALL 1 1\n",nonce);send_line(ci[1],cmd);phase=COLLECT;wall=1;deadline=now()+135000;
+   /* The window now spans a minute and a half. A partner that leaves or returns inside it is
+    * recorded, and the collection finishes: losing RAM evidence helps nobody. */
+   }else if((phase==COLLECT||phase==SEAL_WAIT||phase==GREEN_PENDING)&&!strcmp(xb,"REMOVED")){wall=0;record("wall_removed_before_green evidence_retained");}
+   else if((phase==COLLECT||phase==SEAL_WAIT||phase==GREEN_PENDING)&&!strcmp(xb,"ATTACHED")){wall=1;record("source_attached_before_green operator_declared");}
+   else if(phase==GREEN_WAIT&&!strcmp(xb,"REMOVED"))phase=GREEN_REMOVED;
    else if(phase==GREEN_REMOVED&&!strcmp(xb,"ATTACHED")){send_line(xi[1],"BIND\n");phase=REBIND_WAIT;}
    else if(phase==REBIND_WAIT&&!strcmp(xb,"BOUND")){
     tty=opentty(port);if(tty<0){failed=1;break;}
@@ -132,7 +136,7 @@ int main(int argc,char **argv){
    else if(phase<=BLUE_PENDING&&!strcmp(db,"M15DISPLAY 0 WAIT committed"))record("WAIT_SCREEN no_admission");
    else if(phase==BLUE_PENDING&&!strcmp(db,"M15DISPLAY 1 BLUE mapped")){phase=pc_only?PC_ONLY_WAIT:BLUE_WAIT;record(pc_only?"PC_ONLY retain_no_wall_admission":"WALL_SCOPE operator_declared");deadline=now()+M15_STAGE_BUDGET;}
    else if(phase==YELLOW_PENDING&&!strcmp(db,"M15DISPLAY 2 YELLOW mapped"))phase=WALL_WAIT;
-   else if(phase==GREEN_PENDING&&!strcmp(db,"M15DISPLAY 3 GREEN mapped"))phase=GREEN_WAIT;
+   else if(phase==GREEN_PENDING&&!strcmp(db,"M15DISPLAY 3 GREEN mapped"))phase=wall?GREEN_WAIT:GREEN_REMOVED;
    else if(phase==CYAN_PENDING&&!strcmp(db,"M15DISPLAY 4 CYAN mapped")){snprintf(cmd,sizeof(cmd),"M15IPC1 %s 4 PC 1\n",nonce);send_line(ci[1],cmd);phase=EXPORT;}
    else if(phase==COMPLETE_PENDING&&!strcmp(db,"M15DISPLAY 5 COMPLETE mapped")){record("COMPLETE retain_RAM_ADSP_USB_display");phase=DONE;}
    else failed=1;

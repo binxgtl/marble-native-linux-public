@@ -16,7 +16,7 @@ for variant in normal sanitize; do
  fixture=/tmp/m15-connector-fixture
  cc "${flags[@]}" -DM15_RUNTIME_TEST "-DM15_CONNECTOR_ROOT=\"$fixture\"" -DM15_CONNECTOR_WAIT_MS=3000 scripts/m15/runtime/connector.c scripts/m15/runtime/connector-worker.c -o "$out/runtime/connector-fixture-$variant"
  sudo env ASAN_OPTIONS=detect_leaks=0 python3 scripts/m15/runtime/test-connector-worker.py "$out/runtime/connector-fixture-$variant" "$fixture" | tee "$out/runtime/connector-worker-$variant.txt"
- cc "${flags[@]}" -DM15_RUNTIME_TEST -DM15_STAGE_BUDGET=8000 scripts/m15/runtime/pid1.c scripts/m15/native5/ownership.c scripts/m15/native5/io.c -o "$out/runtime/pid1-fixture-$variant"
+ cc "${flags[@]}" -DM15_RUNTIME_TEST -DM15_STAGE_BUDGET=30000 scripts/m15/runtime/pid1.c scripts/m15/native5/ownership.c scripts/m15/native5/io.c -o "$out/runtime/pid1-fixture-$variant"
  cc "${flags[@]}" -DM15_RUNTIME_TEST scripts/m15/runtime/custodian.c scripts/m15/native1/escrow.c scripts/m15/native1/supervise.c -o "$out/runtime/custodian-fixture-$variant"
  cc "${flags[@]}" -DM15_RUNTIME_TEST scripts/m15/runtime/bootstrap-supervisor.c -o "$out/runtime/bootstrap-fixture-$variant"
  sudo env ASAN_OPTIONS=detect_leaks=0 python3 scripts/m15/runtime/test-bootstrap.py "$out/runtime/bootstrap-fixture-$variant" | tee "$out/runtime/bootstrap-$variant.txt"

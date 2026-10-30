@@ -41,9 +41,10 @@ static void collect(void *unused){
  (void)unused;
 #ifdef M15_RUNTIME_TEST
  const char *root=getenv("M15_FIXTURE_ROOT");
- if(root){execl(observer,"observer","--fixture-root",root,"--samples","3","--interval-ms","1000","--deadline-ms","90000",(char *)NULL);_exit(127);}
+ if(root){execl(observer,"observer","--fixture-root",root,"--samples","10","--interval-ms","100","--deadline-ms","120000",(char *)NULL);_exit(127);}
 #endif
- execl(observer,"observer","--sysfs","--samples","3","--interval-ms","1000","--deadline-ms","90000",(char *)NULL);_exit(127);
+ /* The frozen O3's widest window: 10 samples, 10 s apart, about 91 s. Android used this binary. */
+ execl(observer,"observer","--sysfs","--samples","10","--interval-ms","10000","--deadline-ms","120000",(char *)NULL);_exit(127);
 }
 static ssize_t sink(void *unused,const void *p,size_t n){(void)unused;return write(1,p,n);}
 static int append_file(struct m15 *s,const char *path){
@@ -71,7 +72,7 @@ int main(int argc,char **argv){
  memcpy(admission,cmd,size+1);notify(s,"ISOLATE_BEGIN\n");
  command(s,1,cmd);if(strcmp(cmd,"ISOLATED 1 1\n")||m15_pc_receipt(s,admission,size,now())||m15_isolated(s,1,1,now()))hold(s);notify(s,"WALL_WAIT\n");
  command(s,2,cmd);if(strcmp(cmd,"WALL 1 1\n")||m15_wall(s,1,1,now()))hold(s);notify(s,"COLLECT_BEGIN\n");
- struct m15_process_result result;if(m15_supervise(s,collect,NULL,100000,now(),&result))hold(s);
+ struct m15_process_result result;if(m15_supervise(s,collect,NULL,125000,now(),&result))hold(s);
  notify(s,"COLLECT_RETURNED\n");
  command(s,3,cmd);if(strcmp(cmd,"SEAL\n"))hold(s);
  /* PID1 has closed its writer at this barrier. File paths are boot-inventory

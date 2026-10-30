@@ -13,6 +13,10 @@ old='''    if set(metadata)!=FIELDS or metadata['schema']!='M15-native-phase1-me
         raise ValueError('phase1-synthetic-metadata-only')
     if metadata['launcher']!='offline-subreaper' or metadata['evidence_path']!='ram-escrow-deferred-export':raise ValueError('instrumentation-mismatch')'''
 if source.count(old)!=1:raise ValueError('frozen-decoder-contract-drift')
+# Run1 to Run5 took 3 samples and Run6 takes 10. Custodian fixes the count; metadata binds its hash.
+samples="if contract.o3.legacy.load(data['capture.raw'])[0]['samples']!=3:raise ValueError('three-sample-contract')"
+if source.count(samples)!=1:raise ValueError('frozen-decoder-contract-drift')
+source=source.replace(samples,"if contract.o3.legacy.load(data['capture.raw'])[0]['samples'] not in (3,10):raise ValueError('sample-count-contract')")
 source=source.replace('def decode(raw):','def decode(raw,*,allow_fixture=False):',1).replace(old,'    validate(metadata,allow_fixture)')
 source=source.replace("'synthetic_only':True,","'synthetic_only':metadata['synthetic_only'],")
 scope=dict(vars(host),validate=validate);exec(compile(source,'<M15 native metadata adapter>','exec'),scope)

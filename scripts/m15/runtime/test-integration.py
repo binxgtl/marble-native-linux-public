@@ -7,7 +7,7 @@ HERE=Path(__file__).resolve().parent
 sys.path.insert(0,str(HERE));import provenance,verify
 pid1,custodian,observer,wire,out=map(lambda x:Path(x).resolve(),sys.argv[1:]);out.mkdir(parents=True,exist_ok=True)
 files,_,_=verify.host.decode(wire.read_bytes())
-for mode in ('complete','green-retained','wrong-reconnect','wrong-ack','connector-failure','missing-ack','pc-only','connector-start-failure','display-error'):
+for mode in ('complete','green-retained','wrong-reconnect','wrong-ack','connector-failure','missing-ack','pc-only','connector-start-failure','display-error','wall-left-early','wall-flap'):
     with tempfile.TemporaryDirectory() as tmp:
         root=Path(tmp)
         for row in verify.host.contract.o3.legacy.load(files['capture.raw']):
@@ -63,17 +63,21 @@ for mode in ('complete','green-retained','wrong-reconnect','wrong-ack','connecto
                 os.write(events,b'CONNECTOR_FAILED\n');until('RED_HOLD')
             else:
                 os.write(events,b'REMOVED\n');until('M15DISPLAY 2 YELLOW mapped')
-                os.write(events,b'ATTACHED\n');until('M15DISPLAY 3 GREEN mapped')
+                os.write(events,b'ATTACHED\n')
+                if mode in ('wall-left-early','wall-flap'):os.write(events,b'REMOVED\n');until('wall_removed_before_green evidence_retained')
+                if mode=='wall-flap':os.write(events,b'ATTACHED\n');until('source_attached_before_green operator_declared')
+                until('M15DISPLAY 3 GREEN mapped')
                 time.sleep(.3);assert 'CYAN' not in text(),'GREEN advanced without PC'
                 if mode!='green-retained':
-                    os.write(events,b'REMOVED\n');time.sleep(.1);assert 'CYAN' not in text()
+                    if mode!='wall-left-early':os.write(events,b'REMOVED\n')
+                    time.sleep(.1);assert 'CYAN' not in text()
                     os.write(events,b'ATTACHED\n');header=line().split();assert header==[b'M15RETURN1',nonce,binding,experiment]
                     answer=b'M15PC2 '+nonce+b' '+binding+b'\n'
                     if mode=='wrong-reconnect':
                         os.write(master,answer.replace(nonce,b'0'*32));until('RED_HOLD');assert 'CYAN' not in text()
                     else:
                         os.write(master,answer);raw=bytearray();sent=time.monotonic()
-                        end=time.monotonic()+10
+                        end=time.monotonic()+30
                         while not re.search(rb'\nF [0-9]+ [0-9]+ [0-9a-f]{64} [0-9a-f]{64}\n$',raw):
                             assert time.monotonic()<end,text()
                             if pending:raw.extend(pending);pending.clear()
@@ -87,9 +91,9 @@ for mode in ('complete','green-retained','wrong-reconnect','wrong-ack','connecto
                         except ValueError:pass
                         else:raise AssertionError('fixture accepted as native')
                         (out/(mode+'.raw')).write_bytes(raw)
-                        if mode=='missing-ack':until('RED_HOLD',15)
+                        if mode=='missing-ack':until('RED_HOLD',40)
                         else:
-                            os.write(master,ack if mode=='complete' else ack[:-2]+b'g\n')
+                            os.write(master,ack[:-2]+b'g\n' if mode=='wrong-ack' else ack)
                             if mode=='wrong-ack':until('RED_HOLD')
                             else:
                                 terminal=line();assert terminal==b'M15DONE1 '+ack[8:].rstrip(b'\n')
@@ -103,4 +107,4 @@ for mode in ('complete','green-retained','wrong-reconnect','wrong-ack','connecto
             for p in out.iterdir():
                 if p.is_file():p.chmod(0o644)
         print('PASS',mode,flush=True)
-print('PASS 9 native-loop cases; real display NOT executed; fixture only')
+print('PASS 11 native-loop cases; real display NOT executed; fixture only')

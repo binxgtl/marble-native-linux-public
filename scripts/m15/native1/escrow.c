@@ -105,7 +105,7 @@ int m15_wall(struct m15 *s,int absent,int wall,uint64_t now) {
  if(state_ok(s,M15_WALL,now))return -1;
  if(absent!=1 || wall!=1)return fail(s,"connector-contract");
  if(event(s,"COLLECT",0,0,now))return -1;
- return set_state(s,M15_COLLECT,now,100000);
+ return set_state(s,M15_COLLECT,now,130000);
 }
 int m15_owner_add(struct m15 *s,uint64_t id,uint64_t now) {
  if(state_ok(s,M15_COLLECT,now))return -1;

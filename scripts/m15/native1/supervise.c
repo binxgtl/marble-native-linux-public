@@ -73,7 +73,7 @@ int m15_supervise(struct m15 *s,m15_child_fn fn,void *arg,unsigned deadline,
                   uint64_t logical,struct m15_process_result *r) {
  memset(r,0,sizeof(*r));
  int status=0;errno=0;
- if(!fn || !deadline || deadline>100000 || !exclusive() || waitpid(-1,&status,WNOHANG)!=-1 || errno!=ECHILD)
+ if(!fn || !deadline || deadline>125000 || !exclusive() || waitpid(-1,&status,WNOHANG)!=-1 || errno!=ECHILD)
   {m15_poison(s,"nonexclusive-process-scope");return -1;}
  int previous=0;
  if(prctl(PR_GET_CHILD_SUBREAPER,&previous) || prctl(PR_SET_CHILD_SUBREAPER,1) || m15_census_begin(s))
