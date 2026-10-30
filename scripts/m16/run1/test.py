@@ -34,7 +34,7 @@ class Bench:
     """Sysfs in the shape S1 and the M15 runs recorded, plus scripts for each child."""
 
     def __init__(self, root):
-        import pty  # POSIX only, and Scope must also run on the Windows host
+        import pty, tty  # POSIX only, and Scope must also run on the Windows host
         self.root = Path(root)
         self.test = self.root / 'test'
         self.test.mkdir(parents=True)
@@ -66,6 +66,7 @@ class Bench:
         except BlockingIOError:
             pass
         self.master, self.slave = pty.openpty()
+        tty.setraw(self.slave)  # a default pty echoes the hello into the wire
         self.pending = bytearray()
 
     def write(self, name, text):
