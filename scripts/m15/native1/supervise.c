@@ -7,17 +7,38 @@
 #include <poll.h>
 #include <signal.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/prctl.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 struct seen { pid_t pid; int reaped; };
+/* Children of this process from /proc/<pid>/stat. The device kernel has no
+ * CONFIG_PROC_CHILDREN, so the task children file does not exist there.
+ * Returns the count, up to cap pids, or -1 if /proc cannot be listed. */
+static int child_pids(pid_t self,long *pids,int cap) {
+ DIR *d=opendir("/proc");if(!d)return -1;
+ int found=0;struct dirent *entry;errno=0;
+ while((entry=readdir(d))) {
+  if(entry->d_name[0]<'0' || entry->d_name[0]>'9')continue;
+  char path[288],line[512];snprintf(path,sizeof(path),"/proc/%s/stat",entry->d_name);
+  int fd=open(path,O_RDONLY|O_CLOEXEC);if(fd<0){errno=0;continue;} /* already gone */
+  ssize_t n=read(fd,line,sizeof(line)-1);close(fd);if(n<=0){errno=0;continue;}
+  line[n]=0;
+  /* "pid (comm) state ppid": comm may hold spaces and parentheses. */
+  char *end=strrchr(line,')'),state;long ppid;
+  if(end && sscanf(end+1," %c %ld",&state,&ppid)==2 && ppid==(long)self) {
+   if(found<cap)pids[found]=atol(entry->d_name);
+   found++;
+  }
+  errno=0;
+ }
+ int error=errno;closedir(d);return error?-1:found;
+}
 static uint64_t ms(void) { struct timespec t;if(clock_gettime(CLOCK_MONOTONIC,&t))return 0;return (uint64_t)t.tv_sec*1000+(unsigned long)t.tv_nsec/1000000; }
 static int exclusive(void) {
- char path[100];snprintf(path,sizeof(path),"/proc/self/task/%ld/children",(long)getpid());
- FILE *f=fopen(path,"r");if(!f)return 0;
- int empty=fgetc(f)==EOF && !ferror(f);fclose(f);if(!empty)return 0;
+ long none[1];if(child_pids(getpid(),none,1)!=0)return 0;
  DIR *d=opendir("/proc/self/task");if(!d)return 0;
  unsigned tasks=0;struct dirent *entry;errno=0;
  while((entry=readdir(d)))if(entry->d_name[0]>='0' && entry->d_name[0]<='9')tasks++;
@@ -29,17 +50,16 @@ static int remember(struct m15 *s,struct seen seen[16],unsigned *count,pid_t pid
  unsigned i=(*count)++;seen[i]=(struct seen){pid,0};return (int)i;
 }
 static int children(struct m15 *s,struct seen seen[16],unsigned *count,pid_t root,uint64_t now,int terminate) {
- char path[100];snprintf(path,sizeof(path),"/proc/self/task/%ld/children",(long)getpid());
- FILE *f=fopen(path,"r");if(!f)return -1;
- long pid;unsigned visits=0;int ok=0;
- while(fscanf(f,"%ld",&pid)==1) {
-  if(++visits>16 || pid<=1){ok=-1;break;}
+ long pids[16];int found=child_pids(getpid(),pids,16),ok=0;
+ if(found<0 || found>16)return -1;
+ for(int i=0;i<found;i++) {
+  long pid=pids[i];
+  if(pid<=1){ok=-1;break;}
   if(remember(s,seen,count,(pid_t)pid,now)<0)ok=-1;
   if(pid!=root){m15_poison(s,"unexpected-adopted-worker");ok=-1;}
   if(terminate && kill((pid_t)pid,SIGKILL) && errno!=ESRCH)ok=-1;
  }
- if(ferror(f))ok=-1;
- fclose(f);return ok;
+ return ok;
 }
 int m15_supervise(struct m15 *s,m15_child_fn fn,void *arg,unsigned deadline,
                   uint64_t logical,struct m15_process_result *r) {
@@ -85,10 +105,11 @@ int m15_supervise(struct m15 *s,m15_child_fn fn,void *arg,unsigned deadline,
    broken=1;close(pipes[i][0]);pipes[i][0]=-1;eof[i]=1;
   }
  }
- uint64_t start=ms(),stop=0;int closed=0;
+ uint64_t start=ms(),stop=0,scanned=0;int closed=0;
  while(1) {
   uint64_t elapsed=ms()-start,now=logical+elapsed;
-  if(children(s,seen,&count,child,now,stop!=0))broken=1;
+  /* /proc holds hundreds of kernel threads on the device: pace the census. */
+  if(stop || !scanned || ms()-scanned>=25){scanned=ms();if(children(s,seen,&count,child,now,stop!=0))broken=1;}
   if(m15_state(s)==M15_HOLD)broken=1;
   if((broken || elapsed>=deadline) && !stop) {
    r->timeout=elapsed>=deadline;stop=ms();m15_poison(s,r->timeout?"collector-timeout":"collector-supervision");

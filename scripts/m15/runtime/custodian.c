@@ -14,7 +14,12 @@
 #include <unistd.h>
 static char nonce[33];
 static uint64_t now(void){struct timespec t;if(clock_gettime(CLOCK_MONOTONIC,&t))_exit(125);return (uint64_t)t.tv_sec*1000+t.tv_nsec/1000000;}
-static _Noreturn void hold(struct m15 *s){m15_poison(s,"native-runtime-hold");ssize_t n=write(2,"HOLD retained\n",14);(void)n;for(;;)pause();}
+static _Noreturn void hold(struct m15 *s){
+ /* First failure, before this poison. PID1 journals it, and the RED QR shows it. */
+ char b[128];int z=snprintf(b,sizeof(b),"HOLD retained %s\n",m15_state(s)==M15_HOLD?m15_error(s):"runtime");
+ m15_poison(s,"native-runtime-hold");
+ ssize_t n=write(2,b,z>0&&(size_t)z<sizeof(b)?(size_t)z:0);(void)n;for(;;)pause();
+}
 static void notify(struct m15 *s,const char *v){size_t n=strlen(v);if(write(2,v,n)!=(ssize_t)n)hold(s);}
 static size_t command(struct m15 *s,unsigned sequence,char out[512]){
  char prefix[80],b[640];size_t at=0;uint64_t until=now()+300000;

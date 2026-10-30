@@ -4,6 +4,7 @@ set -euo pipefail
 out=$1
 mkdir -p "$out/native6"
 python3 scripts/m15/native6/derive.py "$out/native6"
+command -v zbarimg >/dev/null || { sudo apt-get update -q && sudo apt-get install -y -q zbar-tools; }
 chmod +x scripts/m15/native6/fake-display.py
 for variant in normal sanitize; do
  flags=(-std=c11 -O2 -Wall -Wextra -Werror)
@@ -11,9 +12,11 @@ for variant in normal sanitize; do
  cc "${flags[@]}" scripts/m15/native6/pid1.c scripts/m15/native5/ownership.c -o "$out/native6/pid1-$variant"
  cc "${flags[@]}" -DM15_SMOKE_DEADLINE=10000 scripts/m15/native6/pid1.c scripts/m15/native5/ownership.c -o "$out/native6/pid1-fixture-$variant"
  cc "${flags[@]}" -I scripts/m15/native1 "$out/native6/custodian.c" scripts/m15/native1/escrow.c scripts/m15/native1/supervise.c -o "$out/native6/custodian-$variant"
- cc "${flags[@]}" -I scripts -I scripts/m15/native6 "$out/native6/display-kms.c" scripts/m15/native6/display-main.c scripts/m15/native6/display-loop.c -o "$out/native6/display-$variant"
- cc "${flags[@]}" scripts/m15/native6/test-display.c scripts/m15/native6/display-loop.c -o "$out/native6/test-display-$variant"
+ cc "${flags[@]}" -I scripts -I scripts/m15/native6 "$out/native6/display-kms.c" scripts/m15/native6/display-main.c scripts/m15/native6/display-loop.c scripts/m15/native6/report.c scripts/m15/native6/qr.c -o "$out/native6/display-$variant"
+ cc "${flags[@]}" scripts/m15/native6/test-display.c scripts/m15/native6/display-loop.c scripts/m15/native6/report.c scripts/m15/native6/qr.c -o "$out/native6/test-display-$variant"
  "$out/native6/test-display-$variant" | tee "$out/native6/display-$variant.txt"
+ cc "${flags[@]}" scripts/m15/native6/test-report.c scripts/m15/native6/report.c scripts/m15/native6/qr.c -o "$out/native6/test-report-$variant"
+ python3 scripts/m15/native6/test-report.py "$out/native6/test-report-$variant" "$out/native6/report-frames-$variant" | tee "$out/native6/report-$variant.txt"
  sudo env ASAN_OPTIONS=detect_leaks=0 python3 scripts/m15/native6/test-integration.py "$out/native6/pid1-fixture-$variant" "$out/native6/custodian-$variant" "$out/m15-observe-o3-a" "$out/native1-normal/native1-synthetic.wire" "$out/native6/$variant" | tee "$out/native6/integration-$variant.txt"
 done
 # Reviewable binaries only, not a boot image. Independent output names must match.
@@ -21,7 +24,7 @@ for copy in a b; do
  flags=(-std=c11 -O2 -Wall -Wextra -Werror -static -Wl,--build-id=none)
  cc "${flags[@]}" scripts/m15/native6/pid1.c scripts/m15/native5/ownership.c -o "$out/native6/pid1-$copy"
  cc "${flags[@]}" -I scripts/m15/native1 "$out/native6/custodian.c" scripts/m15/native1/escrow.c scripts/m15/native1/supervise.c -o "$out/native6/custodian-$copy"
- cc "${flags[@]}" -I scripts -I scripts/m15/native6 "$out/native6/display-kms.c" scripts/m15/native6/display-main.c scripts/m15/native6/display-loop.c -o "$out/native6/display-$copy"
+ cc "${flags[@]}" -I scripts -I scripts/m15/native6 "$out/native6/display-kms.c" scripts/m15/native6/display-main.c scripts/m15/native6/display-loop.c scripts/m15/native6/report.c scripts/m15/native6/qr.c -o "$out/native6/display-$copy"
 done
 for name in pid1 custodian display; do
  cmp "$out/native6/$name-a" "$out/native6/$name-b"

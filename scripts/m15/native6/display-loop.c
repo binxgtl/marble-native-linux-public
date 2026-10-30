@@ -1,12 +1,16 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 #define _GNU_SOURCE
 #include "display-loop.h"
+#include "report.h"
 #include <errno.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
+#ifndef M15_REPORT_DIR
+#define M15_REPORT_DIR "/run/m15"
+#endif
 const char *m15_display_ready="M15DISPLAY 0 BLUE committed\n";
 static void paint(void *map,uint32_t pitch,uint32_t color){
  for(unsigned y=0;y<2400;y++){
@@ -38,9 +42,10 @@ _Noreturn void m15_display_loop(void *map,uint32_t pitch){
   paint(map,pitch,rgb[found]);
   int z=snprintf(ack,sizeof(ack),"M15DISPLAY %u %s mapped\n",seq++,colors[found]);
   n=write(3,ack,(size_t)z);if(n!=z)goto hold;
+  if(!strcmp(colors[found],"RED"))m15_report_loop(map,pitch,M15_REPORT_DIR);
  }
 hold:
  paint(map,pitch,0x00ff0000);
  /* No close, disable, free, retry or reboot on IPC/renderer failure. */
- for(;;)pause();
+ m15_report_loop(map,pitch,M15_REPORT_DIR);
 }
