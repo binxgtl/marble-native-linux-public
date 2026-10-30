@@ -15,7 +15,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
 SHA = Path('scripts/m11/anchor-native/p4/sha256.h')
-CORE = ('journal.c', 'oracle.c', 'machine.c')
+CORE = ('journal.c', 'oracle.c', 'machine.c', 'mark.c')
 # name, file, exact text, replacement, test that must then fail
 MUTANTS = (
     ('post clock read before the writer returned', 'machine.c', 'int read_rc=m->ops.clock(m->ops.arg,&post);', 'post=*c;int read_rc=0;', 'machine'),
@@ -50,6 +50,11 @@ MUTANTS = (
     ('two matching IRQ lines accepted', 'linux.c', 'if(found++)return -EEXIST;', 'found++;', 'linux'),
     ('name suffix matches a longer IRQ', 'linux.c', "&&line[n-name_n-1]==' '", '', 'linux'),
     ('CPU outside the known set accepted', 'linux.c', 'if(a>b||b>=M16_CPUS)return -EINVAL;', 'if(a>b)return -EINVAL;', 'linux'),
+    ('mark drops the run tag', 'mark.c', '*alarm=base|(uint64_t)tag<<4|(uint64_t)code;', '*alarm=base|(uint64_t)code;', 'mark'),
+    ('mark accepts tag zero', 'mark.c', 'if(!alarm||!tag||code', 'if(!alarm||code', 'mark'),
+    ('mark may overflow the register', 'mark.c', 'if(rtc_now>M16_MARK_MAX_RTC-M16_MARK_HORIZON_S)return -ERANGE;', '', 'mark'),
+    ('a failure can read as a pass', 'mark.c', 'if(failed)return reached_suspend?M16_M_FAILED_AFTER_RESUME:M16_M_FAILED_BEFORE_SUSPEND;', '(void)failed;(void)reached_suspend;', 'mark'),
+    ('unknown verdict reads as a pass', 'mark.c', 'default: return M16_M_INVALID;', 'default: return M16_M_PASS;', 'mark'),
 )
 FLAGS = ('-std=c11', '-O1', '-Wall', '-Wextra')
 
@@ -67,6 +72,9 @@ def fails(test, source, work):
         return subprocess.run([str(work / 't'), str(work)], capture_output=True).returncode != 0
     if test == 'linux':
         build(source, ('linux.c', 'test-linux.c'), work / 't')
+        return subprocess.run([str(work / 't')], capture_output=True).returncode != 0
+    if test == 'mark':
+        build(source, ('mark.c', 'test-mark.c'), work / 't')
         return subprocess.run([str(work / 't')], capture_output=True).returncode != 0
     build(source, CORE + ('linux.c', 'driver.c'), work / 'driver')
     return subprocess.run([sys.executable, str(HERE / 'test.py'), '--driver', str(work / 'driver'), '--out', str(work), 'Oracle'],

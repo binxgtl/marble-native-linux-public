@@ -234,6 +234,55 @@ class Oracle(unittest.TestCase):
         self.assertEqual(host.judge(case, tuple(case['expect']))[0], 'NO_SLEEP')
 
 
+class Mark(unittest.TestCase):
+    """The real C encoder against the separate Python reader."""
+    NOW = 80_076_948
+
+    def encode(self, now, tag, code):
+        done = subprocess.run([str(ARGS.driver), 'mark', str(now), str(tag), str(code)], capture_output=True, text=True)
+        return int(done.stdout) if done.returncode == 0 else None
+
+    def test_every_outcome_round_trips(self):
+        for code in range(1, len(host.MARKS)):
+            alarm = self.encode(self.NOW, 0xa5, code)
+            read = host.read_mark(alarm, self.NOW + 300, 0xa5)
+            self.assertEqual(read, {'state': 'PRESENT', 'outcome': host.MARKS[code]})
+
+    def test_reserved_values_are_not_encoded(self):
+        self.assertIsNone(self.encode(self.NOW, 0xa5, 0))
+        self.assertIsNone(self.encode(self.NOW, 0xa5, len(host.MARKS)))
+        self.assertIsNone(self.encode(self.NOW, 0, 1))
+        self.assertIsNone(self.encode(2**32 - 1, 0xa5, 1))
+
+    def test_absence_is_never_a_verdict(self):
+        self.assertEqual(host.read_mark(None, self.NOW, 0xa5), {'state': 'ABSENT', 'outcome': None})
+
+    def test_another_runs_mark_is_foreign(self):
+        alarm = self.encode(self.NOW, 0xa5, 1)
+        self.assertEqual(host.read_mark(alarm, self.NOW, 0x5a)['state'], 'FOREIGN')
+
+    def test_unrelated_alarm_values_are_foreign(self):
+        alarm = self.encode(self.NOW, 0xa5, 1)
+        cases = (self.NOW - 1, self.NOW, self.NOW + 7201, 2**32 + alarm, alarm & ~15, alarm | 15)
+        for value in cases:
+            with self.subTest(value):
+                self.assertEqual(host.read_mark(value, self.NOW, 0xa5)['state'], 'FOREIGN')
+
+    def test_tag_zero_never_matches(self):
+        self.assertEqual(host.read_mark(self.NOW + 4097, self.NOW, 0)['state'], 'FOREIGN')
+
+    def test_a_mark_read_too_late_cannot_be_read_as_present(self):
+        alarm = self.encode(self.NOW, 0xa5, 1)
+        self.assertEqual(host.read_mark(alarm, alarm, 0xa5)['state'], 'FOREIGN')
+
+    def test_the_widest_lead_is_read_and_nothing_past_it(self):
+        now = 0x10000000 - 7200
+        alarm = self.encode(now, 0xff, 9)
+        self.assertEqual(alarm - now, 7200 + 0xff9)
+        self.assertEqual(host.read_mark(alarm, now, 0xff)['state'], 'PRESENT')
+        self.assertEqual(host.read_mark(alarm + 4096, now, 0xff)['state'], 'FOREIGN')
+
+
 class Fixture:
     """Synthetic sysfs in the shape S1 recorded. Writes to state go to a pipe kept full,
     so the real writer child blocks in write() until this test says the kernel returned."""
@@ -430,7 +479,7 @@ class Integration(unittest.TestCase):
 
 class Scope(unittest.TestCase):
     """The offline code cannot grow a path the milestone forbids."""
-    SOURCES = ('journal', 'oracle', 'machine', 'linux')
+    SOURCES = ('journal', 'oracle', 'machine', 'linux', 'mark')
 
     def text(self):
         return '\n'.join((HERE / f'{name}.{ext}').read_text(encoding='utf-8')
@@ -458,6 +507,11 @@ class Scope(unittest.TestCase):
         code = (HERE / 'journal.c').read_text(encoding='utf-8')
         for forbidden in ('open(', 'read(', 'fopen', 'printf', 'malloc'):
             self.assertNotIn(forbidden, code.replace('sha_', ''))
+
+    def test_the_mark_is_not_wired_into_a_run(self):
+        """Encoding only until the read path is validated: no run can write one yet."""
+        for name in ('machine.c', 'machine.h', 'linux.c', 'linux.h'):
+            self.assertNotIn('mark', (HERE / name).read_text(encoding='utf-8'))
 
 
 def main():

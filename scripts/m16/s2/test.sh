@@ -3,7 +3,7 @@
 set -euo pipefail
 out=${1:?output}; mkdir -p "$out"
 src=scripts/m16/s2
-core=("$src/journal.c" "$src/oracle.c" "$src/machine.c")
+core=("$src/journal.c" "$src/oracle.c" "$src/machine.c" "$src/mark.c")
 for variant in normal sanitize; do
   flags=(-std=c11 -O2 -Wall -Wextra -Werror)
   if [[ $variant == sanitize ]]; then
@@ -12,10 +12,12 @@ for variant in normal sanitize; do
   dir="$out/$variant"; mkdir -p "$dir"
   gcc "${flags[@]}" "${core[@]}" "$src/test-journal.c" -o "$dir/test-journal"
   gcc "${flags[@]}" "$src/linux.c" "$src/test-linux.c" -o "$dir/test-linux"
+  gcc "${flags[@]}" "$src/mark.c" "$src/test-mark.c" -o "$dir/test-mark"
   gcc "${flags[@]}" "${core[@]}" "$src/test-machine.c" -o "$dir/test-machine"
   gcc "${flags[@]}" "${core[@]}" "$src/linux.c" "$src/driver.c" -o "$dir/driver"
   "$dir/test-journal" | tee "$dir/journal.txt"
   "$dir/test-linux" | tee "$dir/linux.txt"
+  "$dir/test-mark" | tee "$dir/mark.txt"
   "$dir/test-machine" "$dir" | tee "$dir/machine.txt"
   python3 "$src/test.py" --driver "$dir/driver" --out "$dir" 2>&1 | tee "$dir/host.txt"
 done

@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 #define _GNU_SOURCE
 #include "linux.h"
+#include "mark.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -139,9 +140,18 @@ static int oracle(void) {
  }
  return 0;
 }
+/* Prints the encoded alarm so the host decoder can be tested against the real encoder. */
+static int mark(char **argv) {
+ uint64_t alarm=0;
+ int rc=m16_mark_encode(strtoull(argv[2],NULL,10),(uint8_t)strtoul(argv[3],NULL,10),(enum m16_mark_code)strtoul(argv[4],NULL,10),&alarm);
+ if(rc)return 1;
+ printf("%llu\n",(unsigned long long)alarm);
+ return 0;
+}
 int main(int argc,char **argv) {
  setvbuf(stdout,NULL,_IOLBF,0);
  if(argc>=2&&!strcmp(argv[1],"run"))return run(argc,argv);
  if(argc==2&&!strcmp(argv[1],"oracle"))return oracle();
+ if(argc==5&&!strcmp(argv[1],"mark"))return mark(argv);
  return 64;
 }

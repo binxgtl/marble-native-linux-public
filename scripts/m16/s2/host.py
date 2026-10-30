@@ -30,6 +30,10 @@ VERDICTS = ('INVALID', 'PASS', 'ABORTED', 'NO_SLEEP', 'EARLY_WAKE', 'LATE_WAKE',
 FAILS = ('NONE', 'CLOCK', 'JOURNAL', 'PREFLIGHT_READ', 'NO_FREEZE', 'RTC_IDENTITY', 'NO_WAKEALARM', 'USB_PRESENT',
          'ADSP_RUNNING', 'WAKE_ACTIVE', 'ALARM_STALE', 'COUNTERS', 'ALARM_ARM', 'ALARM_READBACK', 'WAKE_COUNT_READ',
          'WAKE_COUNT_WRITE', 'ENTRY_LATE', 'WRITER_START', 'WRITER_POLL', 'WRITER_TIMEOUT')
+MARKS = (None, 'PASS', 'ABORTED', 'NO_SLEEP', 'EARLY_WAKE', 'LATE_WAKE', 'WRONG_WAKE', 'INVALID',
+         'FAILED_BEFORE_SUSPEND', 'FAILED_AFTER_RESUME')
+MARK_HORIZON = 7200
+MARK_SLOT = 4096
 COUNTERS = ('success', 'fail', 'failed_errno', 'rtc_irq', 'alarm_enabled', 'wake_active', 'cycle_mode', 'cpu_mask')
 # Allowed successors; anything else is a reordered, dropped or forged record.
 GRAMMAR = {
@@ -210,6 +214,21 @@ def decode(data):
         report.update(verdict=verdict, slept_ns=slept)
         report['pass'] = verdict == 'PASS' and 'FAIL' not in seen and report['alarm_left_enabled'] == 0
     return report
+
+
+def read_mark(alarm, now, tag):
+    """Reads the wakealarm value seen on Android after recovery. Separate from the encoder.
+
+    Only PRESENT says anything about the cycle. ABSENT and FOREIGN are not evidence of
+    no resume: the read path has not been validated on the device.
+    """
+    if alarm is None:
+        return {'state': 'ABSENT', 'outcome': None}
+    code = alarm & 15
+    fits = now < alarm < now + MARK_HORIZON + MARK_SLOT and alarm >> 32 == 0
+    if not fits or (alarm >> 4) & 255 != tag or not tag or not 0 < code < len(MARKS):
+        return {'state': 'FOREIGN', 'outcome': None}
+    return {'state': 'PRESENT', 'outcome': MARKS[code]}
 
 
 def main():
