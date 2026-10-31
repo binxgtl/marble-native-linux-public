@@ -1,6 +1,15 @@
 {
  "tag": "android-12.1.0_r27",
+ "header_tag": "android-16.0.0_r1",
  "files": {
+  "binder_cpp/android/binder_auto_utils.h": "8de4018f17330e3cb68eacd66ef2f10da19ae22b2da0e7f6f6ad4d100607a5f4",
+  "binder_cpp/android/binder_enums.h": "a4f3b34f5478d5ad820e93eabfa0d5fe82e53a71727ad6f48b5932a043060189",
+  "binder_cpp/android/binder_interface_utils.h": "9898e1d9b7e35072cc411a4ef419d1fa2d498b356e1c45943b23381497b8e8e3",
+  "binder_cpp/android/binder_internal_logging.h": "b3dc27d60e3c75629f231f94ab24779af9faeede2c4d605401179265d6d5eea8",
+  "binder_cpp/android/binder_parcel_utils.h": "8a2171d1b7259a39326e7475f481e54bddbe4d48e7f21e6b865cd8ebb0479dcd",
+  "binder_cpp/android/binder_parcelable_utils.h": "9c330de3ef09843d69d54116616efb52e7f442fb3bca28dc7d22f26c8f0fb869",
+  "binder_cpp/android/binder_to_string.h": "f5333debafd787a6dd0ad000fa08f8a0e585764bf994e75dc15a6fe7dd7da6da",
+  "binder_cpp/android/persistable_bundle_aidl.h": "7c8522735f137b9c0d74e6899fc65aaca80c3d8ccec2be96199d2bb152bc02b4",
   "keymint/android/hardware/security/keymint/Algorithm.aidl": "070272fb3256c06a614ab2af136e9c3c1a8c244bafa4785b74f4369c437eaaee",
   "keymint/android/hardware/security/keymint/AttestationKey.aidl": "5fc3b2a9dd10e367dba3881a6776287ae312c80860fbe197f49b3d07ce93e10b",
   "keymint/android/hardware/security/keymint/BeginResult.aidl": "f7da61ca0859caf6a8fc2b0d22f882d04bfb5b0701fee633322a6478b346c9e2",

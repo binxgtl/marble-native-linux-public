@@ -17,7 +17,7 @@ done
 for copy in a b; do
   objects=()
   mkdir -p "$out/obj-$copy"
-  common=(--target=aarch64-linux-android31 -O2 -fPIE -fno-ident -ffile-prefix-map="$out"=. -I"$src")
+  common=(--target=aarch64-linux-android31 -O2 -fPIE -fno-ident -ffile-prefix-map="$out"=. -I"$src" -isystem "$out/aidl/binder_cpp")
   while IFS= read -r file; do
     object=$out/obj-$copy/$(echo "$file" | sha256sum | cut -c1-16).o
     "$bin/clang++" "${common[@]}" -std=c++17 -I"$out/gen/include" -c "$file" -o "$object"
