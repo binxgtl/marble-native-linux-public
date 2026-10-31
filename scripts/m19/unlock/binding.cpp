@@ -131,6 +131,17 @@ const m19_keystore_ops kOps = {connect, decrypt, ephemeral};
 
 }  // namespace
 
+// The generated proxies call this for sensitive interfaces, and the NDK stub does not export it.
+// Forwarding keeps the behaviour: the parcel holding key material is wiped when it is freed.
+extern "C" void AParcel_markSensitive(const AParcel* parcel) {
+    using Mark = void (*)(const AParcel*);
+    static const Mark mark = [] {
+        void* library = dlopen("libbinder_ndk.so", RTLD_NOW);
+        return library ? reinterpret_cast<Mark>(dlsym(library, "AParcel_markSensitive")) : nullptr;
+    }();
+    if (mark) mark(parcel);
+}
+
 const m19_keystore_ops* m19_keystore2_ops() { return &kOps; }
 
 void* m19_keystore2_context() {
