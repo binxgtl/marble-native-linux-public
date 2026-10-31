@@ -15,22 +15,30 @@ SHA = Path('scripts/m11/anchor-native/p4/sha256.h')
 CORE = ('journal.c', 'oracle.c', 'machine.c', 'mark.c', 'linux.c')
 # name, exact text in run.c, replacement
 MUTANTS = (
-    ('no mark after the cycle', ' write_mark(r);\n', ''),
+    ('no mark after the cycles', ' write_mark(r);\n', ''),
     ('a failed colour still suspends', 'return rc?rc:r->display_failed?-ENODEV:0;', 'return rc;'),
-    ('colour while the writer is stuck', 'if(!machine.writer_active)(void)paint(r,RED,r->final_ms);', '(void)paint(r,RED,r->final_ms);'),
-    ('settling skipped', ' settle(r);\n log_dir(r,"/sys/class/udc");\n', ' log_dir(r,"/sys/class/udc");\n'),
+    ('colour while the writer is stuck', 'if(!r->cycles||!machines[r->cycles-1].writer_active)(void)paint(r,RED,r->final_ms);', '(void)paint(r,RED,r->final_ms);'),
+    ('settling skipped', ' settle(r);\n log_value(', ' log_value('),
     ('UDC names not logged', ' log_dir(r,"/sys/class/udc");\n', ''),
     ('no quiet period after the panel disable', 'if(now>=end||(now>=quiet&&(rc||!p.wake_active))){', 'if(now>=end||rc||!p.wake_active){'),
     ('SPI state not logged', ' log_value(r,"/sys/bus/platform/devices/990000.spi/power/runtime_status");\n', ''),
     ('export without the host hello', 'r->link=M16_LINK_HOST;\n  return 0;', 'r->link=M16_LINK_READY;\n  return 1;'),
-    ('failed run shown as GREEN', 'outcome==M16_O_VERIFIED_PASS?GREEN:YELLOW', 'GREEN'),
+    ('failed run shown as GREEN', 'r->all_ok?GREEN:YELLOW', 'GREEN'),
     ('log hash does not cover the log', 'sha_update(&s,(const char *)log_bytes,(ulong)size);', 'sha_update(&s,(const char *)log_bytes,(ulong)size-1);'),
-    ('resend keeps the old offset', ' m16_journal_rewind(&journal);\n', ''),
+    ('resend keeps the old offset', ' m16_journal_rewind(j);\n', ''),
     ('bootstrap failure ignored', ' if(rc||status)return M16_END_BOOTSTRAP;\n', ''),
-    ('a failed run marked as its verdict', 'm->failure!=M16_F_NONE', '0'),
-    ('USB started before the mark', ' write_mark(r);\n char *argv[]={(char *)r->adsp,NULL};\n pid_t p=spawn_logged(argv);\n if(p<0)return -1;\n',
-     ' char *argv[]={(char *)r->adsp,NULL};\n pid_t p=spawn_logged(argv);\n if(p<0)return -1;\n (void)poll(NULL,0,500);\n write_mark(r);\n'),
+    ('a failed cycle marked as its verdict', 'm16_mark_code(m->verdict,m->failure!=M16_F_NONE,', 'm16_mark_code(M16_V_PASS,0,'),
+    ('USB started before the mark', ' write_mark(r);\n if(bring_up_link(r)||export_cycles(r))return hold(r);\n',
+     ' if(bring_up_link(r)){write_mark(r);return hold(r);}\n write_mark(r);\n if(export_cycles(r))return hold(r);\n'),
     ('connector failure ignored', 'if(strcmp(r->line,"CONNECTOR_READY"))return -1;\n', 'if(strcmp(r->line,"CONNECTOR_READY"))return 0;\n'),
+    ('a failed cycle keeps looping', 'if(!cycle_passed(&machines[i])){good=0;r->all_ok=0;return 0;}', 'if(!cycle_passed(&machines[i]))good=0;'),
+    ('changed storage ignored', 'if(!rc&&strcmp(hash,r->baseline))rc=-EBADMSG;\n', ''),
+    ('a failed flash ignored', 'if((r->storage_ready&&check_storage(r))||check_display(r)){r->all_ok=0;return 0;}', 'if(r->storage_ready)(void)check_storage(r);'),
+    ('touch not required', 'if(r->touch_events<TOUCH_MIN_EVENTS)good=0;', ''),
+    ('events of any type count as touch', 'if(e[i].type==EV_ABS_TYPE)r->touch_events++;', 'r->touch_events++;'),
+    ('an RTC wake counts as the key', 'r->key_ok=m->verdict==M16_V_EARLY_WAKE&&!m->failure&&m->cycle.post.rtc_irq==m->cycle.pre.rtc_irq;', 'r->key_ok=!m->failure;'),
+    ('the same nonce for every cycle', 'nonce[15]^=(unsigned char)(i+1);', ''),
+    ('only the last cycle exported', 'for(unsigned i=0;i<r->cycles;i++){\n  struct m16_machine *m=&machines[i];\n  r->current=i;', 'for(unsigned i=r->cycles-1;i<r->cycles;i++){\n  struct m16_machine *m=&machines[i];\n  r->current=i;'),
 )
 
 

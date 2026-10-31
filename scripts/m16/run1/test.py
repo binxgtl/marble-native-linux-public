@@ -9,6 +9,7 @@ import re
 import select
 import shutil
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
@@ -24,7 +25,7 @@ import host  # noqa: E402
 ARGS = None
 SCALE = 20
 RTC_NOW = 80_076_948
-TAG = 0x33
+TAG = 0x34
 GOOD = '#!/bin/sh\nexit 0\n'
 DISPLAY = '#!/bin/sh\necho "$1 $2" >> "$(dirname "$0")/colours"\nexit 0\n'
 READY = '#!/bin/sh\necho CONNECTOR_READY\nexec cat >/dev/null\n'
@@ -54,18 +55,26 @@ class Bench:
         for cpu in range(8):
             self.write(f'sys/devices/system/cpu/cpu{cpu}/cpuidle/state1/s2idle/usage', '0\n')
         self.interrupts(0)
-        for name, text in (('bootstrap', GOOD), ('adsp', GOOD), ('connector', READY), ('display', DISPLAY)):
+        for name, text in (('bootstrap', GOOD), ('nodes', GOOD), ('adsp', GOOD), ('connector', READY), ('display', DISPLAY)):
             self.script(name, text)
         self.write('test/kmsg', '6,1,0,-;fixture kernel line\n')
         self.write('test/boot.log', 'fixture bootstrap\n')
-        path = self.test / 'state_fifo'
-        os.mkfifo(path)
-        self.pipe = os.open(path, os.O_RDWR | os.O_NONBLOCK)
-        try:
-            while True:
-                os.write(self.pipe, bytes(4096))
-        except BlockingIOError:
-            pass
+        (self.test / 'block').write_bytes(bytes(range(256)) * 16)
+        self.touches(40)
+        self.pipes = []
+        for cycle in range(6):  # one blocking state file per cycle
+            path = self.test / f'state_fifo{cycle}'
+            os.mkfifo(path)
+            pipe = os.open(path, os.O_RDWR | os.O_NONBLOCK)
+            try:
+                while True:
+                    os.write(pipe, bytes(4096))
+            except BlockingIOError:
+                pass
+            self.pipes.append(pipe)
+        self.resumed = 0
+        self.gap = 0
+        self.irqs = 0
         self.master, self.slave = pty.openpty()
         tty.setraw(self.slave)  # a default pty echoes the hello into the wire
         self.pending = bytearray()
@@ -84,14 +93,23 @@ class Bench:
         self.write('proc/interrupts', '           CPU0       CPU1\n'
                    f'260:  {count}  0  0  0  0  0  0  0  pmic_arb 25164545 Edge      pm8xxx_rtc_alarm\n')
 
-    def resume(self, slept_ns):
-        self.write('test/gap_ns', f'{slept_ns}\n')
-        self.write('sys/power/suspend_stats/success', '1\n')
+    def touches(self, count):
+        events = b''.join(struct.pack('<QQHHi', 1, 2, 3, 53, i) for i in range(count))
+        (self.test / 'touch').write_bytes(events + struct.pack('<QQHHi', 1, 2, 0, 0, 0))
+
+    def resume(self, slept_ns=28 * 10**9, rtc=True):
+        """The kernel returning from one cycle. Every counter in S1's shape is cumulative."""
+        self.resumed += 1
+        self.gap += slept_ns
+        self.write('test/gap_ns', f'{self.gap}\n')
+        self.write('sys/power/suspend_stats/success', f'{self.resumed}\n')
         for cpu in range(8):
-            self.write(f'sys/devices/system/cpu/cpu{cpu}/cpuidle/state1/s2idle/usage', '1\n')
-        self.interrupts(1)
-        self.write('sys/class/rtc/rtc0/wakealarm', '')
-        os.read(self.pipe, 65536)
+            self.write(f'sys/devices/system/cpu/cpu{cpu}/cpuidle/state1/s2idle/usage', f'{self.resumed}\n')
+        if rtc:
+            self.irqs += 1
+            self.interrupts(self.irqs)
+            self.write('sys/class/rtc/rtc0/wakealarm', '')
+        os.read(self.pipes[self.resumed - 1], 65536)
 
     def wait(self, name, seconds=20):
         end = time.monotonic() + seconds
@@ -103,9 +121,9 @@ class Bench:
     def text(self, name):
         return (self.root / name).read_text(encoding='ascii')
 
-    def start(self, channel_s=420):
-        return subprocess.Popen([str(ARGS.driver), str(self.root), os.ttyname(self.slave), str(SCALE), str(channel_s)],
-                                stdout=subprocess.PIPE, text=True)
+    def start(self, link_ms=20000, rtc_cycles=1, operator_steps=0):
+        return subprocess.Popen([str(ARGS.driver), str(self.root), os.ttyname(self.slave), str(SCALE), str(link_ms),
+                                 str(rtc_cycles), str(operator_steps)], stdout=subprocess.PIPE, text=True)
 
     def hello(self):
         os.write(self.master, b'M16HOST1\n')
@@ -141,7 +159,8 @@ class Bench:
         return fields, body
 
     def close(self):
-        os.close(self.pipe)
+        for pipe in self.pipes:
+            os.close(pipe)
         os.close(self.master)
         os.close(self.slave)
 
@@ -155,7 +174,7 @@ class Run(unittest.TestCase):
         self.bench.close()
         shutil.rmtree(self.dir, ignore_errors=True)
 
-    def finish(self, process, seconds=30):
+    def finish(self, process, seconds=45):
         timer = threading.Timer(seconds, process.kill)
         timer.start()
         try:
@@ -170,27 +189,50 @@ class Run(unittest.TestCase):
         path = self.bench.test / 'colours'
         return path.read_text(encoding='ascii').split('\n')[:-1] if path.exists() else []
 
-    def cycle(self, process=None):
+    def last_colour(self):
+        self.bench.wait('colours')
+        time.sleep(0.2)
+        return self.colours()[-1]
+
+    def cycle(self, process=None, index=0, alarm=30, **resume):
         process = process or self.bench.start()
-        self.bench.wait('writer_started')
-        self.assertEqual(self.bench.text('sys/class/rtc/rtc0/wakealarm'), '+45\n')
-        self.bench.resume(40 * 10**9)
+        self.bench.wait(f'writer_started{index}')
+        self.assertEqual(self.bench.text('sys/class/rtc/rtc0/wakealarm'), f'+{alarm}\n')
+        self.bench.resume(**resume)
         return process
 
-    def export(self):
+    def export(self, count=1):
         self.bench.hello()
-        report = host.decode(self.bench.read_wire())
-        return report
+        self.assertEqual(self.bench.read_line(), f'M16CYCLES {count}')
+        return host.decode(self.bench.read_wire())
+
+    def acknowledge(self, count=1):
+        """Takes every wire in order, as the PC does, and returns each report."""
+        reports = [self.export(count)]
+        self.bench.ack(reports[0])
+        for _ in range(count - 1):
+            reports.append(host.decode(self.bench.read_wire()))
+            self.bench.ack(reports[-1])
+        return reports
 
     def mark_read(self):
         return host.read_mark(int(self.bench.text('sys/class/rtc/rtc0/wakealarm')), RTC_NOW + 300, TAG)
 
-    def test_complete_cycle(self):
+    def full_run(self, key=True):
+        process = self.bench.start(rtc_cycles=2, operator_steps=1)
+        self.cycle(process, 0)
+        self.cycle(process, 1)
+        if key:
+            self.cycle(process, 2, alarm=90, slept_ns=20 * 10**9, rtc=False)
+        else:
+            self.cycle(process, 2, alarm=90, slept_ns=88 * 10**9)
+        return process
+
+    def test_complete_single_cycle(self):
         process = self.cycle()
-        report = self.export()
+        [report] = self.acknowledge()
         self.assertTrue(report['pass'], report)
         self.assertEqual(self.mark_read(), {'state': 'PRESENT', 'outcome': 'PASS'})
-        self.bench.ack(report)
         fields, body = self.bench.read_log()
         result = self.finish(process)
         self.assertEqual(fields[0], 'M16LOG1')
@@ -198,34 +240,105 @@ class Run(unittest.TestCase):
         self.assertEqual((int(fields[3]), int(fields[4])), (0, result['mark_value']))
         self.assertIn(b'fixture bootstrap', body)
         self.assertIn(b'fixture kernel line', body)
-        self.assertEqual(result['end'], 0)
-        self.assertEqual((result['verdict'], result['failure']), ('PASS', 'NONE'))
+        self.assertEqual((result['end'], result['verdict'], result['failure']), (0, 'PASS', 'NONE'))
         self.bench.wait('colours')
         time.sleep(0.2)
-        self.assertEqual(self.colours(), ['000000ff 1', '0000ff00 1'], 'BLUE before, GREEN only after the ACK')
+        self.assertEqual(self.colours(), ['000000ff 1', '00ffffff 1', '0000ff00 1'], 'BLUE, a flash per cycle, GREEN last')
+
+    def test_full_run_with_operator_steps(self):
+        process = self.full_run()
+        reports = self.acknowledge(3)
+        self.bench.read_log()
+        result = self.finish(process)
+        self.assertEqual([report['verdict'] for report in reports], ['PASS', 'PASS', 'EARLY_WAKE'])
+        self.assertEqual(len({report['nonce'] for report in reports}), 3, 'a record cannot move between cycles')
+        self.assertEqual((result['end'], result['all_ok'], result['key_ok'], result['touch']), (0, 1, 1, 40))
+        self.assertEqual(self.mark_read()['outcome'], 'PASS')
+        self.bench.wait('colours')
+        time.sleep(0.2)
+        self.assertEqual(self.colours(), ['000000ff 1', '00ffffff 1', '00ffffff 1', '0000ffff 300', '00ff00ff 1', '00ffffff 1', '0000ff00 1'])
+
+    def test_a_missed_key_press_is_not_a_pass(self):
+        process = self.full_run(key=False)
+        reports = self.acknowledge(3)
+        self.bench.read_log()
+        result = self.finish(process)
+        self.assertEqual(reports[2]['verdict'], 'PASS', 'the armed RTC ended the cycle')
+        self.assertEqual((result['end'], result['key_ok']), (1, 0))
+        self.assertEqual(self.mark_read()['outcome'], 'FAILED_AFTER_RESUME')
+        self.assertEqual(self.last_colour(), '00ffff00 1')
+
+    def test_no_touch_events_is_not_a_pass(self):
+        self.bench.touches(3)
+        process = self.full_run()
+        self.acknowledge(3)
+        self.bench.read_log()
+        result = self.finish(process)
+        self.assertEqual((result['end'], result['touch'], result['key_ok']), (1, 3, 1))
+        self.assertEqual(self.mark_read()['outcome'], 'FAILED_AFTER_RESUME')
+
+    def test_a_failed_cycle_stops_the_loop(self):
+        process = self.bench.start(rtc_cycles=3)
+        self.cycle(process, 0)
+        self.bench.wait('writer_started1')
+        self.bench.resume(slept_ns=2 * 10**9)  # far too short for the alarm
+        reports = self.acknowledge(2)
+        self.bench.read_log()
+        result = self.finish(process)
+        self.assertEqual([report['verdict'] for report in reports], ['PASS', 'EARLY_WAKE'])
+        self.assertEqual((result['end'], result['cycles']), (1, 2))
+        self.assertFalse((self.bench.test / 'writer_started2').exists(), 'no further cycle')
+        self.assertEqual(self.mark_read()['outcome'], 'EARLY_WAKE')
+
+    def test_changed_storage_stops_the_loop(self):
+        process = self.bench.start(rtc_cycles=3)
+        self.bench.wait('writer_started0')
+        (self.bench.test / 'block').write_bytes(b'not the same bytes')
+        self.bench.resume()
+        self.acknowledge()
+        self.bench.read_log()
+        result = self.finish(process)
+        self.assertEqual((result['end'], result['cycles']), (1, 1))
+        self.assertIn('storage rc=-74', self.bench.text('test/kmsg'))
+        self.assertEqual(self.mark_read()['outcome'], 'FAILED_AFTER_RESUME')
+
+    def test_a_failed_flash_stops_the_loop(self):
+        process = self.bench.start(rtc_cycles=3)
+        self.bench.wait('writer_started0')
+        self.bench.script('display', '#!/bin/sh\nexit 1\n')
+        self.bench.resume()
+        self.acknowledge()
+        self.bench.read_log()
+        self.assertEqual(self.finish(process)['cycles'], 1)
+
+    def test_missing_storage_is_reported_and_the_cycle_still_runs(self):
+        (self.bench.test / 'block').unlink()
+        process = self.cycle()
+        self.acknowledge()
+        self.bench.read_log()
+        result = self.finish(process)
+        self.assertEqual((result['end'], result['verdict']), (1, 'PASS'))
+        self.assertIn('storage baseline ready=0', self.bench.text('test/kmsg'))
 
     def test_the_mark_is_written_before_adsp_starts(self):
         self.bench.script('adsp', '#!/bin/sh\ncp "$(dirname "$0")/../sys/class/rtc/rtc0/wakealarm" "$(dirname "$0")/seen"\nexit 0\n')
         process = self.cycle()
-        report = self.export()
-        self.bench.ack(report)
+        self.acknowledge()
         self.bench.read_log()
         result = self.finish(process)
         self.assertEqual(int(self.bench.text('test/seen')), result['mark_value'])
 
     def test_the_export_waits_for_the_host(self):
         process = self.cycle()
-        self.assertFalse(select.select([self.bench.master], [], [], 0.5)[0], 'nothing before the hello')
-        report = self.export()
-        self.bench.ack(report)
+        self.assertFalse(select.select([self.bench.master], [], [], 0.8)[0], 'nothing before the hello')
+        self.acknowledge()
         self.bench.read_log()
         self.assertEqual(self.finish(process)['end'], 0)
 
     def test_the_cycle_waits_out_the_touch_bus_after_the_panel_disable(self):
         """Run2 entered suspend 224 ms after touch used the bus, inside its 250 ms autosuspend."""
         process = self.cycle()
-        report = self.export()
-        self.bench.ack(report)
+        self.acknowledge()
         self.bench.read_log()
         self.finish(process)
         log = self.bench.text('test/kmsg')
@@ -237,12 +350,11 @@ class Run(unittest.TestCase):
         self.bench.write('sys/class/wakeup/wakeup0/active_time_ms', '12\n')
         process = self.bench.start()
         time.sleep(0.2)
-        self.assertFalse((self.bench.test / 'writer_started').exists())
+        self.assertFalse((self.bench.test / 'writer_started0').exists())
         self.bench.write('sys/class/wakeup/wakeup0/active_time_ms', '0\n')
         self.cycle(process)
-        report = self.export()
+        [report] = self.acknowledge()
         self.assertTrue(report['pass'], report)
-        self.bench.ack(report)
         self.bench.read_log()
         self.finish(process)
         self.assertIn('settle rc=0 active=0', self.bench.text('test/kmsg'))
@@ -250,50 +362,44 @@ class Run(unittest.TestCase):
     def test_a_source_that_stays_held_refuses_suspend(self):
         self.bench.write('sys/class/wakeup/wakeup0/active_time_ms', '12\n')
         process = self.bench.start()
-        report = self.export()
+        [report] = self.acknowledge()
         self.assertEqual(report['failure']['reason'], 'WAKE_ACTIVE')
-        self.bench.ack(report)
         self.bench.read_log()
         result = self.finish(process)
         self.assertEqual(result['end'], 1)
-        self.assertFalse((self.bench.test / 'writer_started').exists())
+        self.assertFalse((self.bench.test / 'writer_started0').exists())
         self.assertEqual(self.mark_read(), {'state': 'PRESENT', 'outcome': 'FAILED_BEFORE_SUSPEND'})
-        self.bench.wait('colours')
-        time.sleep(0.2)
-        self.assertEqual(self.colours()[-1], '00ffff00 1', 'YELLOW: evidence is home, the cycle did not pass')
+        self.assertEqual(self.last_colour(), '00ffff00 1', 'YELLOW: evidence is home, the cycle did not pass')
 
     def test_a_real_udc_refuses_suspend(self):
         (self.bench.root / 'sys/class/udc/a600000.dwc3').mkdir()
         process = self.bench.start()
-        report = self.export()
+        [report] = self.acknowledge()
         self.assertEqual(report['failure']['reason'], 'USB_PRESENT')
-        self.bench.ack(report)
         self.bench.read_log()
         self.finish(process)
-        self.assertFalse((self.bench.test / 'writer_started').exists())
+        self.assertFalse((self.bench.test / 'writer_started0').exists())
         self.assertIn('dir /sys/class/udc: dummy_udc.0', self.bench.text('test/kmsg'))
         self.assertIn('dir /sys/class/udc: a600000.dwc3', self.bench.text('test/kmsg'))
 
     def test_a_failed_colour_never_suspends(self):
         self.bench.script('display', '#!/bin/sh\necho "$1 $2" >> "$(dirname "$0")/colours"\nexit 2\n')
         process = self.bench.start()
-        report = self.export()
+        [report] = self.acknowledge()
         self.assertEqual((report['failure']['reason'], report['failure']['error']), ('PREFLIGHT_READ', -19))
-        self.bench.ack(report)
         self.bench.read_log()
         self.finish(process)
-        self.assertFalse((self.bench.test / 'writer_started').exists())
+        self.assertFalse((self.bench.test / 'writer_started0').exists())
         self.assertEqual(self.mark_read()['outcome'], 'FAILED_BEFORE_SUSPEND')
 
     def test_a_missing_rtc_is_exported_not_held(self):
         (self.bench.root / 'sys/class/rtc/rtc0/name').unlink()
         process = self.bench.start()
-        report = self.export()
+        [report] = self.acknowledge()
         self.assertEqual(report['failure']['reason'], 'RTC_IDENTITY')
-        self.bench.ack(report)
         self.bench.read_log()
         self.finish(process)
-        self.assertFalse((self.bench.test / 'writer_started').exists())
+        self.assertFalse((self.bench.test / 'writer_started0').exists())
 
     def test_bootstrap_failure_holds_before_anything_is_shown(self):
         self.bench.script('bootstrap', '#!/bin/sh\nexit 1\n')
@@ -307,9 +413,7 @@ class Run(unittest.TestCase):
         result = self.finish(process)
         self.assertEqual(result['end'], 2)
         self.assertEqual(self.mark_read(), {'state': 'PRESENT', 'outcome': 'PASS'})
-        self.bench.wait('colours')
-        time.sleep(0.2)
-        self.assertEqual(self.colours()[-1], '00ff0000 1', 'RED: resumed, evidence not exported')
+        self.assertEqual(self.last_colour(), '00ff0000 1', 'RED: resumed, evidence not exported')
 
     def test_connector_failure_holds_with_the_mark_kept(self):
         # Stdout stays open, as on the real binary: it reports the failure, then pauses.
@@ -317,20 +421,20 @@ class Run(unittest.TestCase):
         began = time.monotonic()
         result = self.finish(self.cycle())
         self.assertEqual(result['end'], 2)
-        self.assertLess(time.monotonic() - began, 8, 'held at once, not by running out the channel deadline')
+        self.assertLess(time.monotonic() - began, 8, 'held at once, not by running out the link deadline')
         self.assertEqual(self.mark_read()['state'], 'PRESENT')
 
-    def test_no_host_runs_out_the_channel_deadline(self):
-        result = self.finish(self.cycle(self.bench.start(channel_s=20)))
+    def test_no_host_runs_out_the_link_deadline(self):
+        result = self.finish(self.cycle(self.bench.start(link_ms=1000)))
         self.assertEqual(result['end'], 2)
         self.assertEqual(self.mark_read()['state'], 'PRESENT')
 
     def test_a_stuck_writer_touches_nothing(self):
         process = self.bench.start()
-        self.bench.wait('writer_started')
+        self.bench.wait('writer_started0')
         result = self.finish(process)
         self.assertEqual((result['end'], result['failure'], result['writer_active']), (2, 'WRITER_TIMEOUT', 1))
-        self.assertEqual(self.bench.text('sys/class/rtc/rtc0/wakealarm'), '+45\n', 'the RTC is left alone')
+        self.assertEqual(self.bench.text('sys/class/rtc/rtc0/wakealarm'), '+30\n', 'the RTC is left alone')
         time.sleep(0.5)  # a colour child, if any, gets time to record itself
         self.assertEqual(len(self.colours()), 1, 'no colour while the transition is unresolved')
 
@@ -347,6 +451,7 @@ class Run(unittest.TestCase):
     def test_resend_gives_identical_bytes(self):
         process = self.cycle()
         self.bench.hello()
+        self.assertEqual(self.bench.read_line(), 'M16CYCLES 1')
         first = self.bench.read_wire()
         os.write(self.bench.master, b'M16RESEND1\n')
         second = self.bench.read_wire()
@@ -358,7 +463,7 @@ class Run(unittest.TestCase):
 
 class Scope(unittest.TestCase):
     """Run1 cannot grow a path the milestone forbids."""
-    SOURCES = ('run.c', 'run.h', 'pid1.c', 'display.c', 'load-rtc.c', 'init', 'bootstrap', 'adsp')
+    SOURCES = ('run.c', 'run.h', 'pid1.c', 'display.c', 'load-rtc.c', 'init', 'bootstrap', 'nodes', 'adsp')
 
     def code(self):
         text = '\n'.join((HERE / name).read_text(encoding='utf-8') for name in self.SOURCES)
@@ -379,6 +484,13 @@ class Scope(unittest.TestCase):
                                                                   '/sys/class/udc', '/sys/devices/system/cpu/cpu0/cpuidle',
                                                                   '/sys/bus/platform/devices/990000.spi/power/runtime_status'})
         self.assertEqual(code.count('O_WRONLY'), 2, 'only kmsg and the alarm are written')
+        self.assertEqual(code.count('O_RDWR'), 1, 'the tty alone')
+
+    def test_storage_is_read_only(self):
+        code = (HERE / 'run.c').read_text(encoding='utf-8')
+        self.assertEqual(re.findall(r'open\(r->block,([A-Z_|a-z>-]+)\)', code), ['O_RDONLY|O_CLOEXEC|r->block_flags'])
+        self.assertIn('.block_flags=O_DIRECT', (HERE / 'pid1.c').read_text(encoding='utf-8'))
+        self.assertIn('mknod -m 400', (HERE / 'nodes').read_text(encoding='utf-8'))
 
     def test_adsp_keeps_the_m15_order(self):
         old = (HERE.parent.parent / 'm15/runtime/bootstrap').read_text(encoding='utf-8')

@@ -8,6 +8,7 @@ core=("$s2/journal.c" "$s2/oracle.c" "$s2/machine.c" "$s2/mark.c" "$s2/linux.c")
 sh -n "$src/init"
 sh -n "$src/bootstrap"
 sh -n "$src/adsp"
+sh -n "$src/nodes"
 for variant in normal sanitize; do
   flags=(-std=c11 -O2 -Wall -Wextra -Werror)
   if [[ $variant == sanitize ]]; then

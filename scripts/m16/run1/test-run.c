@@ -11,7 +11,7 @@
 
 /* Real run.c, machine and linux.c against a synthetic tree. Time is scaled and the sleep
  * gap comes from the fixture. Never staged into an image. */
-struct harness { struct m16_linux adapter; struct m16_ops real; const char *root; uint64_t scale; };
+struct harness { struct m16_linux adapter; struct m16_ops real; const char *root; uint64_t scale; unsigned started; char state[64]; };
 
 static uint64_t gap_ns(const struct harness *h) {
  char path[4096],b[32];
@@ -39,42 +39,48 @@ static int wrap_enabled(void *a,int *e) { struct harness *h=a; return h->real.al
 static int wrap_clear(void *a) { struct harness *h=a; return h->real.alarm_clear(&h->adapter); }
 static int wrap_count_read(void *a,uint32_t *c) { struct harness *h=a; return h->real.wake_count_read(&h->adapter,c); }
 static int wrap_count_write(void *a,uint32_t c) { struct harness *h=a; return h->real.wake_count_write(&h->adapter,c); }
+/* One blocking fifo per cycle, so the fixture can release each writer on its own. */
 static int wrap_writer_start(void *a) {
  struct harness *h=a;
+ snprintf(h->state,sizeof(h->state),"/test/state_fifo%u",h->started);
+ h->adapter.state_write=h->state;
  int rc=h->real.writer_start(&h->adapter);
  char path[4096];
- snprintf(path,sizeof(path),"%s/test/writer_started",h->root);
+ snprintf(path,sizeof(path),"%s/test/writer_started%u",h->root,h->started++);
  int fd=rc?-1:open(path,O_WRONLY|O_CREAT|O_CLOEXEC,0644);
  if(fd>=0)close(fd);
  return rc;
 }
 static int wrap_writer_poll(void *a,int64_t *rc,int64_t *e) { struct harness *h=a; return h->real.writer_poll(&h->adapter,rc,e); }
-static char paths[8][4096];
+static char paths[11][4096];
 static const char *under(unsigned slot,const char *root,const char *name) {
  snprintf(paths[slot],sizeof(paths[slot]),"%s/%s",root,name);
  return paths[slot];
 }
 int main(int argc,char **argv) {
- if(argc!=5)return 64; /* root tty scale channel_s */
+ if(argc!=7)return 64; /* root tty scale link_ms rtc_cycles operator_steps */
  setvbuf(stdout,NULL,_IOLBF,0);
  static struct harness h;
  static struct m16_run r;
  h.root=argv[1];h.scale=strtoull(argv[3],NULL,10);
  m16_linux_init(&h.adapter,h.root,200);
- h.adapter.state_write="/test/state_fifo";
  m16_linux_ops(&h.real,&h.adapter);
  r.base=(struct m16_ops){.arg=&h,.clock=scaled_clock,.preflight=wrap_preflight,.counters=wrap_counters,
   .alarm_arm=wrap_arm,.alarm_enabled=wrap_enabled,.alarm_clear=wrap_clear,.wake_count_read=wrap_count_read,
   .wake_count_write=wrap_count_write,.writer_start=wrap_writer_start,.writer_poll=wrap_writer_poll};
- r.config=(struct m16_config){.alarm_s=45,.early_s=15,.late_s=5,.resume_margin_s=20,.channel_s=(uint32_t)strtoul(argv[4],NULL,10),.export_s=600,.ack_s=600,.cycle_mode=1};
+ r.config=(struct m16_config){.alarm_s=30,.early_s=10,.late_s=5,.resume_margin_s=20,.channel_s=30,.export_s=600,.ack_s=600,.cycle_mode=1};
+ r.key_config=(struct m16_config){.alarm_s=90,.early_s=5,.late_s=5,.resume_margin_s=20,.channel_s=30,.export_s=600,.ack_s=600,.cycle_mode=2};
  r.root=h.root;r.tty=argv[2];
  r.bootstrap=under(0,h.root,"test/bootstrap");r.adsp=under(1,h.root,"test/adsp");r.connector=under(2,h.root,"test/connector");
  r.display=under(3,h.root,"test/display");r.kmsg=under(4,h.root,"test/kmsg");r.boot_log=under(5,h.root,"test/boot.log");
- r.tag=0x33;memcpy(r.nonce,"M16RUN1-FIXTURE!",16);
- r.bootstrap_ms=5000;r.quiet_ms=300;r.settle_ms=800;r.display_ms=2000;r.blue_ms=1;r.final_ms=1;r.step_ms=1;r.pace_ms=1;r.log_ms=20000;
+ r.nodes=under(6,h.root,"test/nodes");r.block=under(7,h.root,"test/block");r.touch=under(8,h.root,"test/touch");
+ r.tag=0x34;memcpy(r.nonce,"M16RUN1-FIXTURE!",16);
+ r.rtc_cycles=(unsigned)strtoul(argv[5],NULL,10);r.operator_steps=atoi(argv[6]);
+ r.bootstrap_ms=5000;r.quiet_ms=300;r.settle_ms=800;r.display_ms=2000;r.blue_ms=1;r.check_ms=1;r.storage_ms=2000;r.touch_ms=300;r.prompt_ms=1;
+ r.final_ms=1;r.step_ms=1;r.pace_ms=1;r.link_ms=(unsigned)strtoul(argv[4],NULL,10);r.log_ms=20000;
  enum m16_run_end end=m16_run_main(&r);
- const struct m16_machine *m=m16_run_machine();
- printf("{\"end\":%d,\"failure\":\"%s\",\"failure_error\":%d,\"verdict\":\"%s\",\"mark_rc\":%d,\"mark_value\":%llu,\"mark_code\":%d,\"writer_active\":%d}\n",
-        (int)end,m16_fail_name(m->failure),(int)m->failure_error,m16_verdict_name(m->verdict),r.mark_rc,(unsigned long long)r.mark_value,(int)r.mark_code,m->writer_active);
+ const struct m16_machine *m=m16_run_machine(r.cycles?r.cycles-1:0);
+ printf("{\"end\":%d,\"cycles\":%u,\"all_ok\":%d,\"key_ok\":%d,\"touch\":%ld,\"failure\":\"%s\",\"failure_error\":%d,\"verdict\":\"%s\",\"mark_rc\":%d,\"mark_value\":%llu,\"mark_code\":%d,\"writer_active\":%d}\n",
+        (int)end,r.cycles,r.all_ok,r.key_ok,r.touch_events,m16_fail_name(m->failure),(int)m->failure_error,m16_verdict_name(m->verdict),r.mark_rc,(unsigned long long)r.mark_value,(int)r.mark_code,m->writer_active);
  return 0;
 }

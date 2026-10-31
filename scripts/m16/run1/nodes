@@ -1,0 +1,22 @@
+#!/bin/busybox sh
+# SPDX-License-Identifier: GPL-2.0-only
+# Device nodes for the read-only checks. No devtmpfs here, and touch registers after bootstrap.
+BB=/bin/busybox
+fail=0
+block=$($BB cat /sys/class/block/sda/dev) || fail=1
+if [ -n "${block:-}" ]; then
+ $BB mknod -m 400 /dev/m16-ufs b "${block%%:*}" "${block#*:}" || fail=1
+fi
+found=
+for node in /sys/class/input/event*; do
+ if [ "$($BB cat "$node/device/name" 2>/dev/null)" = goodix_ts ]; then
+  found=$($BB cat "$node/dev") || fail=1
+ fi
+done
+if [ -n "$found" ]; then
+ $BB mknod -m 400 /dev/m16-touch c "${found%%:*}" "${found#*:}" || fail=1
+else
+ printf 'M16 nodes: no goodix_ts event device\n' >&2
+ fail=1
+fi
+exit "$fail"
