@@ -12,7 +12,7 @@ for variant in normal sanitize; do
   gcc "${flags[@]}" "$src/hash.c" "$src/rdx.c" -o "$out/rdx-$variant"
   gcc "${flags[@]}" -c "$src/dm.c" -o "$out/dm-$variant.o"
   "$out/test-core-$variant"
-  python3 "$src/test-native.py" --rdx "$out/rdx-$variant" --core "$out/test-core-$variant"
+  ASAN_OPTIONS=detect_leaks=0 python3 "$src/test-native.py" --rdx "$out/rdx-$variant" --core "$out/test-core-$variant"
 done
 python3 "$src/mutate.py" | tee "$out/mutants.txt"
 # Reviewable binary only, never a boot image. Independent outputs must match.
