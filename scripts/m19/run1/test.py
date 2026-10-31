@@ -255,6 +255,10 @@ class Scripts(unittest.TestCase):
             (entry / 'uevent').write_text(f'MAJOR=8\nDEVNAME={name}\nPARTNAME={part}\n')
             (entry / 'dev').write_text(number + '\n')
             (entry / 'stat').write_text(' '.join(['0'] * 17) + '\n')
+        for name in ('sda', 'sdb'):
+            disk = self.root / 'sys/block' / name
+            disk.mkdir(parents=True)
+            (disk / 'stat').write_text(' '.join(['0'] * 17) + '\n')
 
     def run_script(self, name, **env):
         environment = dict(os.environ, M19_ROOT=str(self.root), M19_BB=str(self.test / 'bb'), M19_TEST=str(self.test), **env)
@@ -273,7 +277,7 @@ class Scripts(unittest.TestCase):
         self.assertLess(log.rindex('--setro'), log.index('mount -t tmpfs'))
         args = (self.test / 'rdx.args').read_text().split()
         self.assertEqual(args[1], plan.RECOVERY_SHA256)
-        self.assertEqual(args[4:], [f'ro.build.version.security_patch={plan.ANDROID_PATCH}', f'ro.vendor.build.security_patch={plan.ANDROID_PATCH}'])
+        self.assertEqual(args[4:], [f'ro.build.version.security_patch={plan.SYSTEM_PATCH}', f'ro.vendor.build.security_patch={plan.VENDOR_PATCH}'])
 
     def test_t0_stops_when_read_only_did_not_take(self):
         self.assertEqual(self.run_script('t0-extract', M19_GETRO='0').returncode, 1)
@@ -327,7 +331,7 @@ class Scripts(unittest.TestCase):
         self.assertIn('M19_UNLOCK status=OK', (self.root / 'run/m19/unlock.line').read_text())
 
     def test_t2_fails_on_any_other_status(self):
-        for line in ('M19_UNLOCK status=UPGRADE_REQUIRED detail=0 dev=0:0', 'M19_UNLOCK status=DECRYPT detail=-62 dev=0:0', ''):
+        for line in ('M19_UNLOCK status=UPGRADE_REQUIRED detail=0 upgraded=0 dev=0:0', 'M19_UNLOCK status=DECRYPT detail=-62 upgraded=0 dev=0:0', ''):
             (self.test / 'unlock.out').write_text(line + '\n')
             with self.subTest(line=line):
                 self.assertEqual(self.run_script('t2-unlock').returncode, 1)
@@ -339,6 +343,12 @@ class Scripts(unittest.TestCase):
         self.assertIn('mknod -m 400', log)
         self.assertIn(' b 253 0', log)
         self.assertIn('mount -t f2fs -o ro,noatime,norecovery,inlinecrypt', log)
+
+    def test_t2_and_t5_accept_a_run_that_upgraded_in_memory(self):
+        (self.test / 'unlock.out').write_text('M19_UNLOCK status=OK detail=0 upgraded=1 dev=253:0\n')
+        self.assertEqual(self.run_script('t2-unlock').returncode, 0)
+        self.assertEqual(self.run_script('t5-mount').returncode, 0)
+        self.assertIn(' b 253 0', self.bb_log())
 
     def test_t5_mount_options_match_the_plan(self):
         text = (HERE / 't5-mount').read_text()
@@ -390,7 +400,19 @@ class Scripts(unittest.TestCase):
     def test_t8_passes_on_zero_counters(self):
         result = self.run_script('t8-writes')
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stderr.count('writes=0 sectors=0 discards=0 discarded=0'), 4)
+        self.assertEqual(result.stderr.count('writes=0 sectors=0 discards=0 discarded=0'), 6)
+
+    def test_t8_fails_on_a_write_to_any_other_partition(self):
+        for position in (4, 6, 11, 13):
+            fields = ['0'] * 17
+            fields[position] = '1'
+            (self.root / 'sys/block/sdb/stat').write_text(' '.join(fields) + '\n')
+            with self.subTest(position=position):
+                self.assertEqual(self.run_script('t8-writes').returncode, 1)
+
+    def test_t8_fails_when_no_disk_is_visible(self):
+        shutil.rmtree(self.root / 'sys/block')
+        self.assertEqual(self.run_script('t8-writes').returncode, 1)
 
     def test_t8_fails_on_any_counter(self):
         for position, name in ((4, 'writes'), (6, 'sectors'), (11, 'discards'), (13, 'discarded')):
@@ -416,7 +438,7 @@ class Static(unittest.TestCase):
         pins = dict(line.split('=', 1) for line in (HERE / 'pins').read_text().splitlines() if '=' in line and not line.startswith('#'))
         self.assertEqual(pins['RECOVERY_SHA256'], plan.RECOVERY_SHA256)
         self.assertEqual(int(pins['USERDATA_SECTORS']), plan.USERDATA_SECTORS)
-        self.assertEqual(pins['ANDROID_PATCH'], plan.ANDROID_PATCH)
+        self.assertEqual((pins['SYSTEM_PATCH'], pins['VENDOR_PATCH']), (plan.SYSTEM_PATCH, plan.VENDOR_PATCH))
 
     def test_scripts_hold_no_writing_command(self):
         forbidden = re.compile(r'\b(mkfs|fsck|mke2fs|tune2fs|blkdiscard|fstrim|remount|setrw|wipe|reboot|poweroff|flash|sgdisk|parted)\b|\bof=/dev|,rw\b|\brw,')

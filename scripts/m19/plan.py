@@ -14,7 +14,10 @@ DM_READONLY_FLAG = 1
 SECTOR = 512
 USERDATA_SECTORS = 470183896
 TABLE_FEATURES = ('sector_size:4096', 'iv_large_sectors', 'wrappedkey_v0')
-ANDROID_RELEASE, ANDROID_PATCH = '15', '2026-08-05'
+ANDROID_RELEASE = '15'
+# The values the HAL reads at second 3 of an Android boot, from build.prop. getprop on a running
+# Android shows 2026-08-05, set by a module on /data long after the HAL has read its values.
+SYSTEM_PATCH, VENDOR_PATCH = '2026-05-01', '2026-02-01'
 RECOVERY_SHA256 = 'fa40e1eb92ea3e27b0996fe5b32ef6768b888bccab423353a673b47d69b3dd4f'
 HEADER_VERSION, HEADER_PATCH = '12.0.0', '2025-09'
 F2FS_FORBIDDEN = {'discard', 'gc_merge', 'atgc', 'age_extent_cache', 'compress_cache', 'rw', 'remount',
@@ -42,11 +45,16 @@ RECOVERY_REMOVED = ('system/bin/recovery', 'system/bin/twrp', 'init.recovery.ser
 RECOVERY_MARKER = 'system/bin/recovery'
 READ_ONLY_NODES = ('recovery_a', 'metadata', 'userdata', 'ssd')
 RC_EXTRA_SERVICES = ('ueventd', 'logd', 'm19.logcat')
+# Android init also parses every rc file left in the ramdisk. lpdumpd waits on a property nothing sets.
+RC_REPLACED = 'system/etc/init/hw/init.rc'
+RC_TREE_ALLOWED = (*(name for name, _ in TEE_SERVICES), *RC_EXTRA_SERVICES, 'lpdumpd')
+# gatekeeperd clears the TEE Gatekeeper on a cold boot with no marker in /data, which would end the PIN.
+FORBIDDEN_BINARIES = ('system/bin/gatekeeperd', 'system/bin/vold', 'system/bin/update_verifier')
 
 
 def patched_properties(text):
-    """TWRP ships patch level 2099-12-31. The HAL must see the values Android runs with."""
-    overrides = {'ro.build.version.security_patch': ANDROID_PATCH, 'ro.vendor.build.security_patch': ANDROID_PATCH}
+    """TWRP ships patch level 2099-12-31. The HAL must see the values Android's HAL read at boot."""
+    overrides = {'ro.build.version.security_patch': SYSTEM_PATCH, 'ro.vendor.build.security_patch': VENDOR_PATCH}
     seen, lines = set(), []
     for line in text.splitlines():
         name = line.partition('=')[0]
@@ -136,6 +144,22 @@ def init_rc():
     return text
 
 
+def rc_starts(text):
+    """Everything an rc file starts from a trigger, including property triggers."""
+    found, trigger = set(), False
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith('on '):
+            trigger = True
+        elif line.startswith(('service ', 'import ')):
+            trigger = False
+        elif trigger and line.startswith('start '):
+            found.add(line.split()[1])
+        elif trigger and line.split(' ')[0] in ('class_start', 'exec', 'exec_start', 'exec_background'):
+            found.add(line)
+    return found
+
+
 def check_rc(text):
     if RC_FORBIDDEN.search(text):
         raise Stop('RC_FORBIDDEN')
@@ -163,10 +187,13 @@ def preflight(survey, audit, closure_names):
     header, carrier = survey.get('boot_a_header', {}), audit.get('carrier_header', {})
     gate('BOOT_HEADER_PAIR', header == carrier and header.get('os_version') == HEADER_VERSION
          and header.get('os_patch') == HEADER_PATCH, 'boot_a and carrier must present the same OS fields')
-    properties = survey.get('properties', {})
-    gate('ANDROID_VERSION', properties.get('ro.build.version.release') == ANDROID_RELEASE
-         and properties.get('ro.build.version.security_patch') == ANDROID_PATCH, 'HAL properties are pinned to these')
-    gate('VENDOR_PATCH', properties.get('ro.vendor.build.security_patch') == ANDROID_PATCH)
+    built = survey.get('build_props', {})
+    gate('ANDROID_VERSION', built.get('ro.build.version.release') == ANDROID_RELEASE
+         and built.get('ro.build.version.security_patch') == SYSTEM_PATCH, 'pins come from build.prop, never a live getprop')
+    gate('VENDOR_PATCH', built.get('ro.vendor.build.security_patch') == VENDOR_PATCH)
+    extra = set(audit.get('rc_starts', ['?'])) - set(RC_TREE_ALLOWED)
+    gate('RC_TREE', not extra, ','.join(sorted(extra)))
+    gate('NO_KEY_DAEMONS', not audit.get('forbidden_binaries', ['?']), 'gatekeeperd or vold in the ramdisk')
     gate('RECOVERY_PINNED', survey.get('recovery_a_sha256') == audit.get('image_sha256'), 'TWRP on the device is the audited image')
     policies = survey.get('policies', {})
     roots = [path for path in policies if path == '/data/ubuntu' or path.startswith('/data/ubuntu/')]

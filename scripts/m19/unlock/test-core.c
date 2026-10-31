@@ -148,10 +148,13 @@ static struct fake good(void)
     return fake;
 }
 
+static int last_upgraded;
+
 static enum m19_status run(struct fake *fake, const char *directory, const char *device, uint64_t sectors, int *detail)
 {
     struct m19_target target = {"m19-userdata", device, sectors};
-    return m19_metadata_unlock(directory, &target, &KS, fake, &DM, fake, detail);
+    last_upgraded = -1;
+    return m19_metadata_unlock(directory, &target, &KS, fake, &DM, fake, detail, &last_upgraded);
 }
 
 static void fresh(char *path, const char *name)
@@ -200,16 +203,37 @@ static void test_wiped_after_failure(void)
         assert(fake.leak_ephemeral[i] == 0);
 }
 
-static void test_upgrade_required_stops_before_table(void)
+static void test_upgrade_continues_and_is_reported(void)
 {
     char path[256];
     int detail;
     struct fake fake = good();
     fresh(path, "upgrade");
-    fake.decrypt_result = M19_KS_UPGRADE;
-    assert(run(&fake, path, DEVICE, SECTORS, &detail) == M19_UPGRADE_REQUIRED);
-    assert(fake.ephemerals == 0 && fake.creates == 0);
+    assert(run(&fake, path, DEVICE, SECTORS, &detail) == M19_OK);
+    assert(last_upgraded == 0);
     fake = good();
+    fake.decrypt_result = M19_KS_UPGRADE;
+    assert(run(&fake, path, DEVICE, SECTORS, &detail) == M19_OK);
+    assert(last_upgraded == 1 && fake.ephemerals == 1 && fake.creates == 1 && fake.resumes == 1);
+}
+
+static void test_decrypt_error_never_counts_as_upgraded(void)
+{
+    char path[256];
+    int detail;
+    struct fake fake = good();
+    fresh(path, "upgrade3");
+    fake.decrypt_result = M19_KS_ERROR;
+    assert(run(&fake, path, DEVICE, SECTORS, &detail) == M19_DECRYPT);
+    assert(last_upgraded == 0 && fake.ephemerals == 0 && fake.creates == 0);
+}
+
+static void test_storage_key_upgrade_stops_before_table(void)
+{
+    char path[256];
+    int detail;
+    struct fake fake = good();
+    fresh(path, "upgrade2");
     fake.ephemeral_result = M19_KS_UPGRADE;
     assert(run(&fake, path, DEVICE, SECTORS, &detail) == M19_UPGRADE_REQUIRED);
     assert(fake.creates == 0);
@@ -364,7 +388,9 @@ int main(int argc, char **argv)
     test_happy_path();
     test_buffers_wiped();
     test_wiped_after_failure();
-    test_upgrade_required_stops_before_table();
+    test_upgrade_continues_and_is_reported();
+    test_decrypt_error_never_counts_as_upgraded();
+    test_storage_key_upgrade_stops_before_table();
     test_pending_upgrade_stops_before_keystore();
     test_layout_gates();
     test_oversized_blob_refused();

@@ -27,6 +27,8 @@ POLICY_PATHS = ('/data', '/data/ubuntu', '/data/ubuntu/usr', '/data/ubuntu/usr/b
                 '/data/ubuntu/var/lib/dpkg', '/data/ubuntu/tmp', '/data/media', '/data/media/0', '/data/misc',
                 '/data/misc/vold', '/data/misc/keystore', '/data/system', '/data/system_de/0', '/data/system_ce/0',
                 '/data/user/0', '/data/user_de/0', '/data/unencrypted')
+BUILD_PROP_FILES = ('/system/build.prop', '/vendor/build.prop')
+BUILD_PROPS = r'^ro\.(build\.version\.(release|security_patch)|vendor\.build\.security_patch)='
 KEY_DIRS = ('/metadata/vold/metadata_encryption/key', '/data/unencrypted/key', '/data/misc/vold/user_keys/ce/0/current')
 ROOTFS_DIRS = ('/tmp', '/var/tmp', '/var/log', '/var/cache', '/var/spool', '/var/lib/systemd', '/var/lib/NetworkManager',
                '/var/lib/upower', '/usr/lib/xorg/Xorg', '/usr/lib/xorg/modules/drivers/modesetting_drv.so',
@@ -63,6 +65,7 @@ T=/data/data/com.termux/files/usr
 R=/data/ubuntu
 echo "STATE	$(dumpsys user 2>/dev/null | grep -m1 -o 'RUNNING_[A-Z]*')"
 for p in {props}; do echo "PROP	$p	$(getprop $p)"; done
+grep -hE '{BUILD_PROPS}' {' '.join(BUILD_PROP_FILES)} | sed 's/=/	/; s/^/BUILDPROP	/'
 grep -E '[[:space:]]/data[[:space:]]' /vendor/etc/fstab.qcom | sed 's/^/FSTAB	/'
 D=$(grep -m1 ' /data f2fs ' /proc/mounts | cut -d' ' -f1)
 echo "FEATURES	$(cat /sys/fs/f2fs/${{D##*/}}/features 2>/dev/null)"
@@ -95,7 +98,7 @@ def sanitize(value):
 
 
 def parse(text):
-    survey = {'properties': {}, 'policies': {}, 'key_dirs': {}, 'rootfs_paths': [], 'bootconfig': {}, 'sp_suffixes': []}
+    survey = {'properties': {}, 'build_props': {}, 'policies': {}, 'key_dirs': {}, 'rootfs_paths': [], 'bootconfig': {}, 'sp_suffixes': []}
     for line in text.splitlines():
         fields = line.split('\t')
         kind = fields[0]
@@ -103,6 +106,8 @@ def parse(text):
             survey['user_state'] = fields[1]
         elif kind == 'PROP':
             survey['properties'][fields[1]] = fields[2]
+        elif kind == 'BUILDPROP':
+            survey['build_props'][fields[1]] = fields[2]
         elif kind == 'FSTAB':
             survey['fstab_userdata'] = fields[1]
         elif kind == 'FEATURES':

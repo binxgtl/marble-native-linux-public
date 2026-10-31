@@ -23,8 +23,8 @@ specification.loader.exec_module(builders)
 
 RDX = CORE = None
 RC_PATH = 'system/etc/init/hw/init.rc'
-PATCH = 'ro.build.version.security_patch=2026-08-05'
-VENDOR_PATCH = 'ro.vendor.build.security_patch=2026-08-05'
+PATCH = 'ro.build.version.security_patch=2026-05-01'
+VENDOR_PATCH = 'ro.vendor.build.security_patch=2026-02-01'
 PROPERTIES = b'ro.a=1\nro.build.version.security_patch=2099-12-31\nro.vendor.build.security_patch=2099-12-31\n'
 
 

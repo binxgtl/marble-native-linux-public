@@ -54,6 +54,8 @@ def audit(image, carrier=None):
             links[name] = data.decode('utf-8', 'replace')
     resolved, unresolved = elfdeps.closure([path for path in seeds() if path in files], files, LIBRARY_DIRS)
     missing = sorted({*(path for path in (*seeds(), *DATA_SEEDS) if path not in files), *unresolved})
+    scripts = [data.decode('utf-8', 'replace') for name, data in files.items()
+               if name.endswith('.rc') and name != plan.RC_REPLACED and name not in plan.RECOVERY_REMOVED]
     report = {
         'schema': 1,
         'image_sha256': hashlib.sha256(image).hexdigest(),
@@ -64,6 +66,8 @@ def audit(image, carrier=None):
         'properties': properties(files.get('prop.default', b'').decode('utf-8', 'replace')),
         'missing_seeds': missing,
         'removed_at_staging_present': [path for path in plan.RECOVERY_REMOVED if path in files],
+        'rc_starts': sorted(set().union(*map(plan.rc_starts, scripts))),
+        'forbidden_binaries': [path for path in plan.FORBIDDEN_BINARIES if path in files or path in links],
         'closure_bytes': sum(len(files[path]) for path in resolved),
         'closure': [{'path': path, 'bytes': len(files[path]), 'sha256': hashlib.sha256(files[path]).hexdigest()}
                     for path in resolved],

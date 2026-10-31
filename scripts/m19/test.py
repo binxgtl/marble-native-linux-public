@@ -82,8 +82,9 @@ def elf(needed_names):
 def good_survey():
     return {
         'boot_a_header': {'os_version': '12.0.0', 'os_patch': '2025-09'},
-        'properties': {'ro.build.version.release': '15', 'ro.build.version.security_patch': '2026-08-05',
-                       'ro.vendor.build.security_patch': '2026-08-05'},
+        'build_props': {'ro.build.version.release': '15', 'ro.build.version.security_patch': '2026-05-01',
+                        'ro.vendor.build.security_patch': '2026-02-01'},
+        'properties': {'ro.build.version.security_patch': '2026-08-05', 'ro.vendor.build.security_patch': '2026-08-05'},
         'recovery_a_sha256': 'a' * 64,
         'policies': {'/data/ubuntu': {'policy': 'none'}, '/data/ubuntu/usr': {'policy': 'none'},
                      '/data/media/0': {'policy': 'v2', 'contents': 1, 'filenames': 4, 'flags': 0x0a, 'class': 'ce'}},
@@ -99,7 +100,23 @@ def good_survey():
 
 
 def good_audit():
-    return {'image_sha256': 'a' * 64, 'carrier_header': {'os_version': '12.0.0', 'os_patch': '2025-09'}, 'missing_seeds': []}
+    return {'image_sha256': 'a' * 64, 'carrier_header': {'os_version': '12.0.0', 'os_patch': '2025-09'}, 'missing_seeds': [],
+            'rc_starts': ['keystore2', 'logd', 'lpdumpd', 'servicemanager'], 'forbidden_binaries': []}
+
+
+@unittest.skipUnless((Path(__file__).resolve().parent / 'unlock').is_dir(), 'source tree only')
+class ClientSource(unittest.TestCase):
+    def text(self, name):
+        return (Path(__file__).resolve().parent / 'unlock' / name).read_text(encoding='utf-8')
+
+    def test_client_has_no_path_that_changes_a_key_file(self):
+        for name in ('core.c', 'binding.cpp', 'main.cpp'):
+            self.assertNotRegex(self.text(name), r'O_WRONLY|O_RDWR|O_CREAT|O_TRUNC|\bfopen\b|\brename\b|\bunlink\b|\bwrite\(|deleteKey|ofstream')
+
+    def test_upgraded_blob_is_wiped_and_the_operation_continues(self):
+        text = self.text('binding.cpp')
+        self.assertIn('m19_wipe(response.upgradedBlob->data()', text)
+        self.assertNotIn('iOperation->abort', text)
 
 
 class BootImage(unittest.TestCase):
@@ -360,8 +377,8 @@ class Plan(unittest.TestCase):
                 node[path[-1]] = value
             return apply
         cases = (('BOOT_HEADER_PAIR', edit(['boot_a_header', 'os_patch'], '2026-08')),
-                 ('ANDROID_VERSION', edit(['properties', 'ro.build.version.security_patch'], '2026-09-05')),
-                 ('VENDOR_PATCH', edit(['properties', 'ro.vendor.build.security_patch'], '2026-09-05')),
+                 ('ANDROID_VERSION', edit(['build_props', 'ro.build.version.security_patch'], '2026-08-05')),
+                 ('VENDOR_PATCH', edit(['build_props', 'ro.vendor.build.security_patch'], '2026-08-05')),
                  ('RECOVERY_PINNED', edit(['recovery_a_sha256'], 'b' * 64)),
                  ('ROOTFS_NO_POLICY', edit(['policies', '/data/ubuntu/usr', 'policy'], 'v2')),
                  ('MEDIA_CE', edit(['policies', '/data/media/0', 'flags'], 0)),
@@ -386,8 +403,34 @@ class Plan(unittest.TestCase):
         text = 'ro.a=1\nro.build.version.security_patch=2099-12-31\nro.vendor.build.security_patch=2099-12-31\n'
         result = plan.patched_properties(text)
         self.assertNotIn('2099', result)
-        self.assertEqual(result.count(plan.ANDROID_PATCH), 2)
+        self.assertIn(f'ro.build.version.security_patch={plan.SYSTEM_PATCH}\n', result)
+        self.assertIn(f'ro.vendor.build.security_patch={plan.VENDOR_PATCH}\n', result)
         self.assertIn('ro.a=1', result)
+
+    def test_pins_are_not_the_spoofed_value(self):
+        self.assertNotIn('2026-08-05', (plan.SYSTEM_PATCH, plan.VENDOR_PATCH))
+
+    def test_preflight_ignores_a_live_getprop(self):
+        state = good_survey()
+        state['properties']['ro.build.version.security_patch'] = '2099-12-31'
+        self.assertEqual(plan.blocking(plan.preflight(state, good_audit(), set(plan.TEE_MODULES))), [])
+
+    def test_preflight_stops_a_trigger_that_starts_gatekeeper(self):
+        audit = good_audit()
+        audit['rc_starts'].append('gatekeeper-1-0')
+        gates = plan.blocking(plan.preflight(good_survey(), audit, set(plan.TEE_MODULES)))
+        self.assertEqual([(g.name, g.detail) for g in gates], [('RC_TREE', 'gatekeeper-1-0')])
+
+    def test_preflight_stops_a_key_daemon_in_the_ramdisk(self):
+        audit = good_audit()
+        audit['forbidden_binaries'] = ['system/bin/gatekeeperd']
+        gates = plan.blocking(plan.preflight(good_survey(), audit, set(plan.TEE_MODULES)))
+        self.assertEqual([g.name for g in gates], ['NO_KEY_DAEMONS'])
+
+    def test_rc_starts_reads_triggers_only(self):
+        text = ('service a /bin/a\n    class early_hal\non init\n    start b\n    mkdir /x\n'
+                'on property:c=1\n    start c\n    class_start main\nservice d /bin/d\n    disabled\n    start e\n')
+        self.assertEqual(plan.rc_starts(text), {'b', 'c', 'class_start main'})
 
     def test_properties_stop_when_a_line_is_absent(self):
         with self.assertRaisesRegex(fbe.Stop, 'PROP_OVERRIDE'):

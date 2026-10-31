@@ -150,7 +150,7 @@ static int valid_target(const struct m19_target *target)
 
 enum m19_status m19_metadata_unlock(const char *directory, const struct m19_target *target,
                                     const struct m19_keystore_ops *keystore, void *keystore_context,
-                                    const struct m19_dm_ops *dm, void *dm_context, int *detail)
+                                    const struct m19_dm_ops *dm, void *dm_context, int *detail, int *upgraded)
 {
     static struct m19_key_dir keys;
     static uint8_t storage[M19_KEY_MAX], ephemeral[M19_KEY_MAX];
@@ -161,6 +161,7 @@ enum m19_status m19_metadata_unlock(const char *directory, const struct m19_targ
     int created = 0, result;
 
     *detail = 0;
+    *upgraded = 0;
     if (!valid_target(target))
         return M19_ARGUMENTS;
     if (dm->sectors(dm_context, target->device, &sectors))
@@ -177,10 +178,13 @@ enum m19_status m19_metadata_unlock(const char *directory, const struct m19_targ
     struct m19_decrypt_request request = {keys.blob, keys.blob_size, keys.app_id, sizeof(keys.app_id), keys.encrypted, M19_NONCE_BYTES,
                                           keys.encrypted + M19_NONCE_BYTES, keys.encrypted_size - M19_NONCE_BYTES};
     result = keystore->decrypt(keystore_context, &request, storage, sizeof(storage), &storage_size, detail);
-    if (result != M19_KS_OK) {
-        status = result == M19_KS_UPGRADE ? M19_UPGRADE_REQUIRED : M19_DECRYPT;
+    /* As in TWRP, an upgrade is a copy in the TA. The operation runs on it and the blob on disk stays. */
+    if (result != M19_KS_OK && result != M19_KS_UPGRADE) {
+        status = M19_DECRYPT;
         goto out;
     }
+    *upgraded = result == M19_KS_UPGRADE;
+    /* STORAGE_KEY blobs are exempt from version checks in the TA, so an upgrade here is unexplained. */
     result = keystore->ephemeral(keystore_context, storage, storage_size, ephemeral, sizeof(ephemeral), &ephemeral_size, detail);
     if (result != M19_KS_OK) {
         status = result == M19_KS_UPGRADE ? M19_UPGRADE_REQUIRED : M19_EPHEMERAL;

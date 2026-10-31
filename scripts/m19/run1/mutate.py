@@ -36,6 +36,9 @@ MUTANTS = (
     ('t7-overlay', 'upperdir=$base/upper', 'upperdir=$R/m19-data/upper'),
     ('t8-writes', '[ "$writes" = 0 ] && [ "$sectors" = 0 ] && [ "$discards" = 0 ] && [ "$discarded" = 0 ] || fail=1', '[ "$writes" = 0 ] || fail=1'),
     ('t8-writes', 'for name in userdata metadata recovery_a ssd; do', 'for name in metadata; do'),
+    ('t8-writes', '[ "$5" = 0 ] && [ "$7" = 0 ] && [ "${12:-0}" = 0 ] && [ "${14:-0}" = 0 ] || fail=1', '[ "$5" = 0 ] || fail=1'),
+    ('t8-writes', '[ -n "$seen" ] || { printf \'M19 T8 no disk\\n\' >&2; fail=1; }', ':'),
+    ('t0-extract', '"ro.vendor.build.security_patch=$VENDOR_PATCH"', '"ro.vendor.build.security_patch=$SYSTEM_PATCH"'),
 )
 
 

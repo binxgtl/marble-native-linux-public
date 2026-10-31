@@ -28,5 +28,5 @@ read_only_node ssd ssd
 $BB mkdir -p "$R/tee"
 $BB mount -t tmpfs -o mode=0755,size=512m tmpfs "$R/tee" || fail tmpfs
 "$R/sbin/m19-rdx" "$R/dev/m19-recovery" "$RECOVERY_SHA256" "$R/tee" "$R/m19/init.rc" \
- "ro.build.version.security_patch=$ANDROID_PATCH" "ro.vendor.build.security_patch=$ANDROID_PATCH" >&2 || fail extract
+ "ro.build.version.security_patch=$SYSTEM_PATCH" "ro.vendor.build.security_patch=$VENDOR_PATCH" >&2 || fail extract
 exit 0

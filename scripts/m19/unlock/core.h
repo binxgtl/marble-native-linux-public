@@ -83,7 +83,7 @@ enum m19_status m19_read_key_dir(const char *directory, struct m19_key_dir *keys
 int m19_table_parameters(const uint8_t *key, size_t key_size, const char *device, char *output, size_t capacity);
 enum m19_status m19_metadata_unlock(const char *directory, const struct m19_target *target,
                                     const struct m19_keystore_ops *keystore, void *keystore_context,
-                                    const struct m19_dm_ops *dm, void *dm_context, int *detail);
+                                    const struct m19_dm_ops *dm, void *dm_context, int *detail, int *upgraded);
 
 #ifdef __cplusplus
 }

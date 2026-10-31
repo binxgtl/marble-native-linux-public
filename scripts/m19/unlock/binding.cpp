@@ -1,4 +1,4 @@
-// Keystore2 binding for the M19 client: the calls AOSP vold makes, with upgrades refused.
+// Keystore2 binding for the M19 client: the calls TWRP's vold makes, keeping no upgraded blob.
 #include <aidl/android/hardware/security/keymint/BlockMode.h>
 #include <aidl/android/hardware/security/keymint/KeyParameter.h>
 #include <aidl/android/hardware/security/keymint/KeyParameterValue.h>
@@ -96,9 +96,12 @@ int decrypt(void* opaque, const m19_decrypt_request* request, uint8_t* output, s
     auto status = context->level->createOperation(descriptor(request->blob, request->blob_size), parameters, true, &response);
     *detail = status_detail(status);
     if (!status.isOk() || !response.iOperation) return M19_KS_ERROR;
+    int outcome = M19_KS_OK;
     if (response.upgradedBlob) {
-        response.iOperation->abort();
-        return M19_KS_UPGRADE;
+        // The operation already runs on the upgraded copy. TWRP parks that copy in /tmp and never
+        // reads it back, so wiping it here is the same behaviour with nothing left on a filesystem.
+        m19_wipe(response.upgradedBlob->data(), response.upgradedBlob->size());
+        outcome = M19_KS_UPGRADE;
     }
     std::vector<uint8_t> body(request->body_and_mac, request->body_and_mac + request->body_and_mac_size), plain;
     std::optional<std::vector<uint8_t>> part;
@@ -113,7 +116,7 @@ int decrypt(void* opaque, const m19_decrypt_request* request, uint8_t* output, s
     if (part) plain.insert(plain.end(), part->begin(), part->end());
     int result = finish_output(plain, output, capacity, size);
     m19_wipe(plain.data(), plain.size());
-    return result;
+    return result == M19_KS_OK ? outcome : result;
 }
 
 int ephemeral(void* opaque, const uint8_t* storage_key, size_t storage_key_size, uint8_t* output, size_t capacity, size_t* size, int* detail) {

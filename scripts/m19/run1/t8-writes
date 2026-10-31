@@ -1,6 +1,7 @@
 #!/bin/busybox sh
-# T8: the block layer's own counters. Any write or discard that reached these partitions this
-# boot fails the run, whichever path it took. It runs even after an earlier step failed.
+# T8: the block layer's own counters. Any write or discard that reached these partitions, or any
+# other partition on a UFS LUN, fails the run whichever path it took. RPMB is not a block disk, so
+# this cannot see it. It runs even after an earlier step failed.
 set -u
 R=${M19_ROOT:-}
 BB=${M19_BB:-/bin/busybox}
@@ -20,4 +21,13 @@ for name in userdata metadata recovery_a ssd; do
  printf 'M19 T8 %s writes=%s sectors=%s discards=%s discarded=%s\n' "$name" "$writes" "$sectors" "$discards" "$discarded" >&2
  [ "$writes" = 0 ] && [ "$sectors" = 0 ] && [ "$discards" = 0 ] && [ "$discarded" = 0 ] || fail=1
 done
+seen=
+for disk in "$R"/sys/block/sd*; do
+ [ -e "$disk/stat" ] || continue
+ seen=1
+ set -- $($BB cat "$disk/stat")
+ printf 'M19 T8 %s writes=%s sectors=%s discards=%s discarded=%s\n' "${disk##*/}" "$5" "$7" "${12:-0}" "${14:-0}" >&2
+ [ "$5" = 0 ] && [ "$7" = 0 ] && [ "${12:-0}" = 0 ] && [ "${14:-0}" = 0 ] || fail=1
+done
+[ -n "$seen" ] || { printf 'M19 T8 no disk\n' >&2; fail=1; }
 exit "$fail"
