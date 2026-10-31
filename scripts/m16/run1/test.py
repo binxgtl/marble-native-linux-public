@@ -24,7 +24,7 @@ import host  # noqa: E402
 ARGS = None
 SCALE = 20
 RTC_NOW = 80_076_948
-TAG = 0x32
+TAG = 0x33
 GOOD = '#!/bin/sh\nexit 0\n'
 DISPLAY = '#!/bin/sh\necho "$1 $2" >> "$(dirname "$0")/colours"\nexit 0\n'
 READY = '#!/bin/sh\necho CONNECTOR_READY\nexec cat >/dev/null\n'
@@ -46,6 +46,7 @@ class Bench:
             'sys/class/rtc/rtc0/wakealarm': '', 'sys/class/rtc/rtc0/since_epoch': f'{RTC_NOW}\n',
             'sys/devices/system/cpu/online': '0-7\n', 'sys/class/remoteproc/remoteproc0/state': 'offline\n',
             'sys/class/wakeup/wakeup0/active_time_ms': '0\n',
+            'sys/bus/platform/devices/990000.spi/power/runtime_status': 'suspended\n',
         }
         for name, text in files.items():
             self.write(name, text)
@@ -220,6 +221,18 @@ class Run(unittest.TestCase):
         self.bench.read_log()
         self.assertEqual(self.finish(process)['end'], 0)
 
+    def test_the_cycle_waits_out_the_touch_bus_after_the_panel_disable(self):
+        """Run2 entered suspend 224 ms after touch used the bus, inside its 250 ms autosuspend."""
+        process = self.cycle()
+        report = self.export()
+        self.bench.ack(report)
+        self.bench.read_log()
+        self.finish(process)
+        log = self.bench.text('test/kmsg')
+        self.assertGreaterEqual(int(re.search(r'settle rc=0 active=0 ms=(\d+)', log).group(1)), 300)
+        self.assertIn('990000.spi/power/runtime_status: suspended', log)
+        self.assertLess(log.index('settle rc='), log.index('runtime_status: suspended'))
+
     def test_a_held_source_settles_before_the_machine_reads_it(self):
         self.bench.write('sys/class/wakeup/wakeup0/active_time_ms', '12\n')
         process = self.bench.start()
@@ -363,7 +376,8 @@ class Scope(unittest.TestCase):
     def test_only_the_named_kernel_writes(self):
         code = (HERE / 'run.c').read_text(encoding='utf-8')
         self.assertEqual(set(re.findall(r'"(/sys[^"]+)"', code)), {'/sys/class/rtc/rtc0/since_epoch', '/sys/class/rtc/rtc0/wakealarm',
-                                                                  '/sys/class/udc', '/sys/devices/system/cpu/cpu0/cpuidle'})
+                                                                  '/sys/class/udc', '/sys/devices/system/cpu/cpu0/cpuidle',
+                                                                  '/sys/bus/platform/devices/990000.spi/power/runtime_status'})
         self.assertEqual(code.count('O_WRONLY'), 2, 'only kmsg and the alarm are written')
 
     def test_adsp_keeps_the_m15_order(self):

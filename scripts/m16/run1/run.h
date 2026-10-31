@@ -19,7 +19,7 @@ struct m16_run {
  const char *root,*bootstrap,*adsp,*connector,*display,*tty,*kmsg,*boot_log;
  unsigned char nonce[16];
  uint8_t tag;
- unsigned bootstrap_ms,settle_ms,display_ms,blue_ms,final_ms,step_ms,pace_ms,log_ms;
+ unsigned bootstrap_ms,quiet_ms,settle_ms,display_ms,blue_ms,final_ms,step_ms,pace_ms,log_ms;
  /* Filled in by m16_run_main(). */
  int display_failed,mark_rc,tty_fd,connector_in,connector_out;
  uint64_t mark_value;

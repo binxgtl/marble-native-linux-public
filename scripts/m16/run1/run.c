@@ -94,14 +94,18 @@ static void show_blue(struct m16_run *r) {
  r->display_failed=rc||status;
  diag(r,"blue rc=%d status=%d",rc,status);
 }
-/* Boot leaves transient wakeup sources held. The machine reads them once, so wait first. */
+/* Boot leaves transient wakeup sources held, and the machine reads them once. The panel
+ * disable also reaches touch, whose SPI bus then needs its 250 ms autosuspend: spi_geni
+ * refuses suspend until that lapses, which is what stopped Run2. Android never sees this,
+ * because it suspends long after the screen goes off. So hold for quiet_ms in any case. */
 static void settle(const struct m16_run *r) {
- unsigned long long begin=now_ms(),end=begin+r->settle_ms;
+ unsigned long long begin=now_ms(),quiet=begin+r->quiet_ms,end=begin+r->settle_ms;
  for(;;){
   struct m16_preflight p;
   memset(&p,0,sizeof(p));
   int rc=r->base.preflight(r->base.arg,&p);
-  if(rc||!p.wake_active||now_ms()>=end){
+  unsigned long long now=now_ms();
+  if(now>=end||(now>=quiet&&(rc||!p.wake_active))){
    diag(r,"settle rc=%d active=%u ms=%llu",rc,p.wake_active,now_ms()-begin);
    return;
   }
@@ -148,6 +152,18 @@ static void log_dir(const struct m16_run *r,const char *rel) {
  if(!d){diag(r,"dir %s errno=%d",rel,errno);return;}
  for(struct dirent *e;(e=readdir(d));)if(e->d_name[0]!='.')diag(r,"dir %s: %.64s",rel,e->d_name);
  closedir(d);
+}
+static void log_value(const struct m16_run *r,const char *rel) {
+ char path[PATH_MAX],b[64];
+ if(file_path(r,rel,path,sizeof(path)))return;
+ int fd=open(path,O_RDONLY|O_CLOEXEC|O_NONBLOCK);
+ ssize_t n=fd<0?-1:read(fd,b,sizeof(b)-1);
+ int error=errno;
+ if(fd>=0)close(fd);
+ if(n<=0){diag(r,"value %s errno=%d",rel,error);return;}
+ while(n&&b[n-1]=='\n')n--;
+ b[n]=0;
+ diag(r,"value %s: %s",rel,b);
 }
 /* After the seal and before ADSP, so it survives a failed channel and any later reset. */
 static void write_mark(struct m16_run *r) {
@@ -334,6 +350,7 @@ enum m16_run_end m16_run_main(struct m16_run *r) {
  settle(r);
  log_dir(r,"/sys/class/udc");
  log_dir(r,"/sys/devices/system/cpu/cpu0/cpuidle");
+ log_value(r,"/sys/bus/platform/devices/990000.spi/power/runtime_status");
  const struct m16_ops ops={.arg=r,.clock=run_clock,.preflight=run_preflight,.counters=run_counters,
   .alarm_arm=run_arm,.alarm_enabled=run_enabled,.alarm_clear=run_clear,.wake_count_read=run_count_read,
   .wake_count_write=run_count_write,.writer_start=run_writer_start,.writer_poll=run_writer_poll,

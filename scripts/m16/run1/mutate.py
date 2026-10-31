@@ -20,6 +20,8 @@ MUTANTS = (
     ('colour while the writer is stuck', 'if(!machine.writer_active)(void)paint(r,RED,r->final_ms);', '(void)paint(r,RED,r->final_ms);'),
     ('settling skipped', ' settle(r);\n log_dir(r,"/sys/class/udc");\n', ' log_dir(r,"/sys/class/udc");\n'),
     ('UDC names not logged', ' log_dir(r,"/sys/class/udc");\n', ''),
+    ('no quiet period after the panel disable', 'if(now>=end||(now>=quiet&&(rc||!p.wake_active))){', 'if(now>=end||rc||!p.wake_active){'),
+    ('SPI state not logged', ' log_value(r,"/sys/bus/platform/devices/990000.spi/power/runtime_status");\n', ''),
     ('export without the host hello', 'r->link=M16_LINK_HOST;\n  return 0;', 'r->link=M16_LINK_READY;\n  return 1;'),
     ('failed run shown as GREEN', 'outcome==M16_O_VERIFIED_PASS?GREEN:YELLOW', 'GREEN'),
     ('log hash does not cover the log', 'sha_update(&s,(const char *)log_bytes,(ulong)size);', 'sha_update(&s,(const char *)log_bytes,(ulong)size-1);'),
