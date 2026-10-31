@@ -239,6 +239,11 @@ static void test_layout_gates(void)
     unlink(file);
     assert(run(&fake, path, DEVICE, SECTORS, &detail) == M19_LAYOUT);
     assert(run(&fake, "/nonexistent/m19", DEVICE, SECTORS, &detail) == M19_LAYOUT);
+    /* AOSP reads a missing secdiscardable as an empty hash. This client refuses it. */
+    fresh(path, "nosecdis");
+    snprintf(file, sizeof(file), "%s/secdiscardable", path);
+    unlink(file);
+    assert(run(&fake, path, DEVICE, SECTORS, &detail) == M19_LAYOUT);
     fresh(path, "version");
     write_bytes(path, "version", "2", 1);
     assert(run(&fake, path, DEVICE, SECTORS, &detail) == M19_VERSION);
@@ -277,6 +282,7 @@ static void test_size_and_argument_gates(void)
     assert(run(&fake, path, DEVICE, SECTORS, &detail) == M19_OK);
     fake = good();
     assert(run(&fake, path, "259:17", SECTORS, &detail) == M19_ARGUMENTS);
+    assert(run(&fake, path, "/dev/259:17", SECTORS, &detail) == M19_ARGUMENTS);
     assert(run(&fake, path, "/dev/a b", SECTORS, &detail) == M19_ARGUMENTS);
     assert(run(&fake, path, DEVICE, SECTORS + 1, &detail) == M19_ARGUMENTS);
     assert(run(&fake, path, DEVICE, 0, &detail) == M19_ARGUMENTS);
