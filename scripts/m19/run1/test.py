@@ -66,7 +66,7 @@ class Bench:
         path = self.test / 'colours'
         return [line.split()[0] for line in path.read_text().splitlines()] if path.exists() else []
 
-    def run(self, link_ms=3000, step_ms=2000, hello=True):
+    def run(self, link_ms=3000, step_ms=2000, hello=True, greeting=None):
         lines, buffer, stop = [], bytearray(), threading.Event()
 
         def reader():
@@ -79,7 +79,7 @@ class Bench:
                     except OSError:
                         return
                 if not sent:
-                    os.write(self.master, b'noise\n' + plan_hello())
+                    os.write(self.master, greeting or b'noise\n' + plan_hello())
                     sent = True
 
         thread = threading.Thread(target=reader)
@@ -200,6 +200,10 @@ class Run(unittest.TestCase):
     def test_wrong_connector_line_never_reaches_the_tee(self):
         self.bench.script('connector', '#!/bin/sh\necho NOT_READY\nexec cat >/dev/null\n')
         self.assertEqual(self.bench.run()['ran'], [0] * 7)
+
+    def test_wrong_greeting_never_reaches_the_tee(self):
+        result = self.bench.run(link_ms=300, greeting=b'M16HOST1\nnoise\n')
+        self.assertEqual((result['end'], result['ran']), (2, [0] * 7))
 
     def test_silent_host_never_reaches_the_tee(self):
         result = self.bench.run(link_ms=300, hello=False)
