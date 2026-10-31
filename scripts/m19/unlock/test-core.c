@@ -66,13 +66,13 @@ static int fake_decrypt(void *context, const struct m19_decrypt_request *request
     fake->seen_body = request->body_and_mac_size;
     assert(request->blob_size == 4 && !memcmp(request->blob, "BLOB", 4));
     assert(request->nonce_size == M19_NONCE_BYTES && request->app_id_size == M19_HASH_BYTES);
-    if (fake->decrypt_result != M19_KS_OK)
+    if (fake->decrypt_result == M19_KS_ERROR)
         return fake->decrypt_result;
     assert(capacity >= (size_t)fake->storage_size);
     memset(output, 0xaa, (size_t)fake->storage_size);
     *size = (size_t)fake->storage_size;
     fake->leak_storage = output;
-    return M19_KS_OK;
+    return fake->decrypt_result;
 }
 
 static int fake_ephemeral(void *context, const uint8_t *key, size_t key_size, uint8_t *output, size_t capacity, size_t *size, int *detail)
