@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Fetch the frozen Keystore2 and KeyMint V1 AIDL plus the C++ binder headers, and check both
-against aidl.lock.json. The NDK sysroot ships only the C binder API."""
+against aidl.lock.json. The NDK sysroot ships only the public C binder API."""
 import argparse
 import hashlib
 import io
@@ -18,6 +18,7 @@ SOURCES = (
     ('secureclock', 'platform/hardware/interfaces', TAG, 'security/secureclock/aidl/aidl_api/android.hardware.security.secureclock/1', '.aidl'),
     ('keystore2', 'platform/system/hardware/interfaces', TAG, 'keystore2/aidl/aidl_api/android.system.keystore2/1', '.aidl'),
     ('binder_cpp', 'platform/frameworks/native', HEADER_TAG, 'libs/binder/ndk/include_cpp', '.h'),
+    ('binder_platform', 'platform/frameworks/native', HEADER_TAG, 'libs/binder/ndk/include_platform', '.h'),
 )
 
 
