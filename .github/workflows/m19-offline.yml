@@ -13,10 +13,23 @@ jobs:
       matrix:
         runner: [ubuntu-24.04, ubuntu-24.04-arm]
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - name: Gates, plans and parsers on synthetic inputs (no device)
         run: python3 scripts/m19/test.py
       - name: Mutants of the safety gates (no device)
         run: python3 scripts/m19/mutate.py
+      - name: Unlock core and ramdisk extractor, normal and ASan/UBSan, mutants, static binary (no device)
+        run: bash scripts/m19/unlock/test.sh artifacts/m19/${{ runner.arch }}
+      - name: Bionic client against frozen Keystore2 AIDL (no device)
+        if: runner.arch == 'X64'
+        run: bash scripts/m19/unlock/build-ndk.sh artifacts/m19/ndk
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: m19-native-${{ runner.arch }}-${{ github.sha }}
+          path: |
+            artifacts/m19/**/m19-rdx-a
+            artifacts/m19/**/m19-unlock-a
+            artifacts/m19/**/*.txt
