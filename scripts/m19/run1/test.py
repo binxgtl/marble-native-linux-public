@@ -290,6 +290,10 @@ class Scripts(unittest.TestCase):
         (self.root / 'm19/m19-unlock').write_text('x')
         result = self.run_script('t1-start')
         self.assertEqual(result.returncode, 0, result.stderr)
+        # init is started in the background, so its log line can land after the script exits.
+        deadline = time.monotonic() + 5
+        while 'second_stage' not in self.bb_log() and time.monotonic() < deadline:
+            time.sleep(0.02)
         log = self.bb_log()
         self.assertIn(' bs=4096 count=1', log)
         self.assertIn('mount -t ext4 -o ro,noload', log)
