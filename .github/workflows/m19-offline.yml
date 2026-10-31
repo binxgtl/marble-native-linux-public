@@ -1,0 +1,22 @@
+name: M19 native Ubuntu FBE offline
+on:
+  push:
+    branches: [m19/native-ubuntu-fbe]
+    paths: ['scripts/m19/**', '.github/workflows/m19-offline.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  regression:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Gates, plans and parsers on synthetic inputs (no device)
+        run: python3 scripts/m19/test.py
+      - name: Mutants of the safety gates (no device)
+        run: python3 scripts/m19/mutate.py
