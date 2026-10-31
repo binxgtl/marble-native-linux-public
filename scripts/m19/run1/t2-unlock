@@ -1,0 +1,20 @@
+#!/bin/busybox sh
+# T2 to T4: the client releases the metadata key and loads the read-only table.
+# Its one status line carries no key material, so it can go to the log.
+set -eu
+R=${M19_ROOT:-}
+BB=${M19_BB:-/bin/busybox}
+. "$R/m19/pins"
+fail() { printf 'M19 T2 failed: %s\n' "$*" >&2 || :; exit 1; }
+if [ ! -e "$R/dev/device-mapper" ]; then
+ number=$($BB cat "$R/sys/class/misc/device-mapper/dev") || fail control-number
+ $BB mknod -m 600 "$R/dev/device-mapper" c "${number%%:*}" "${number#*:}" || fail control-node
+fi
+line=$(LD_LIBRARY_PATH=/system/lib64:/vendor/lib64/hw $BB chroot "$R/tee" /m19/m19-unlock \
+ /metadata/vold/metadata_encryption/key m19-userdata /dev/m19-userdata "$USERDATA_SECTORS") || :
+printf 'M19 %s\n' "$line" >&2
+printf '%s\n' "$line" >"$R/run/m19/unlock.line" || fail status-file
+case "$line" in
+ "M19_UNLOCK status=OK "*) exit 0;;
+ *) exit 1;;
+esac

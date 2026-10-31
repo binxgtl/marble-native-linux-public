@@ -22,6 +22,8 @@ jobs:
         run: python3 scripts/m19/mutate.py
       - name: Unlock core and ramdisk extractor, normal and ASan/UBSan, mutants, static binary (no device)
         run: bash scripts/m19/unlock/test.sh artifacts/m19/${{ runner.arch }}
+      - name: R1 PID 1 and T scripts on synthetic trees, normal and ASan/UBSan, mutants, static binaries (no device)
+        run: bash scripts/m19/run1/test.sh artifacts/m19/${{ runner.arch }}/run1
       - name: Bionic client against frozen Keystore2 AIDL (no device)
         if: runner.arch == 'X64'
         run: bash scripts/m19/unlock/build-ndk.sh artifacts/m19/ndk
@@ -32,4 +34,8 @@ jobs:
           path: |
             artifacts/m19/**/m19-rdx-a
             artifacts/m19/**/m19-unlock-a
+            artifacts/m19/**/pid1-a
+            artifacts/m19/**/pid1-b
+            artifacts/m19/**/load-heaps-a
+            artifacts/m19/**/load-heaps-b
             artifacts/m19/**/*.txt

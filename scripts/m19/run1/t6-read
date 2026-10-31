@@ -1,0 +1,13 @@
+#!/bin/busybox sh
+# T6: proof of decryption. Without the right key these bytes are noise, so a match cannot be luck.
+set -eu
+R=${M19_ROOT:-}
+BB=${M19_BB:-/bin/busybox}
+. "$R/m19/pins"
+fail() { printf 'M19 T6 failed: %s\n' "$*" >&2 || :; exit 1; }
+root=$R/m19-data/ubuntu
+$BB grep -qx "VERSION_ID=\"$ROOTFS_VERSION\"" "$root/usr/lib/os-release" || fail os-release
+hash=$($BB sha256sum "$root/$ROOTFS_PROBE") || fail probe-read
+[ "${hash%% *}" = "$ROOTFS_PROBE_SHA256" ] || fail probe-hash
+printf 'M19 T6 rootfs %s, probe hash matches\n' "$ROOTFS_VERSION" >&2
+exit 0

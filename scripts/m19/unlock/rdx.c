@@ -26,6 +26,7 @@
 #define RAMDISK_MAX (512u << 20)
 #define OVERRIDES_MAX 8
 #define RC_PATH "system/etc/init/hw/init.rc"
+#define RECOVERY_MARKER "system/bin/recovery"
 
 static const uint8_t BOOT_MAGIC[8] = {'A', 'N', 'D', 'R', 'O', 'I', 'D', '!'};
 static const uint8_t LZ4_LEGACY[4] = {0x02, 0x21, 0x4c, 0x18};
@@ -398,6 +399,9 @@ int main(int argc, char **argv)
     if (!rc_seen)
         return finish("RC", 1);
     if (write_file(root, RC_PATH, rc, rc_size, 0644))
+        return finish("WRITE", 1);
+    /* Android init reads prop.default only if this path exists. It holds no program. */
+    if (make_parents(root, RECOVERY_MARKER) || write_file(root, RECOVERY_MARKER, (const uint8_t *)"", 0, 0600))
         return finish("WRITE", 1);
     return finish("OK", 0);
 }

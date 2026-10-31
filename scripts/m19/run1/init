@@ -1,0 +1,17 @@
+#!/bin/busybox sh
+# Same early mounts as the M16 entry. PID 1 owns everything after this exec.
+set -eu
+BB=/bin/busybox
+hold() { printf 'M19 BOOT HOLD: %s\n' "$*" >&2 || :; while :; do $BB sleep 60 || :; done; }
+[ "$$" = 1 ] || hold not-pid1
+$BB mkdir -p /proc /sys /run /dev || hold mkdir
+$BB mount -t proc -o nosuid,nodev,noexec proc /proc || hold proc
+$BB mount -t sysfs -o nosuid,nodev,noexec sysfs /sys || hold sysfs
+$BB mount -t tmpfs -o mode=0755,nosuid,size=16m tmpfs /dev || hold dev
+$BB mknod -m 666 /dev/null c 1 3 || hold null
+$BB mknod -m 600 /dev/kmsg c 1 11 || hold kmsg
+$BB mount -t tmpfs -o mode=0700,nosuid,nodev,size=32m tmpfs /run || hold run
+$BB mkdir /run/m19 /dev/dri || hold ram-directories
+exec </dev/null >/run/m19/bootstrap.log 2>&1
+exec /sbin/m19-pid1
+hold pid1-exec

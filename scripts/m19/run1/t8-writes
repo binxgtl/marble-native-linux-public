@@ -1,0 +1,23 @@
+#!/bin/busybox sh
+# T8: the block layer's own counters. Any write or discard that reached these partitions this
+# boot fails the run, whichever path it took. It runs even after an earlier step failed.
+set -u
+R=${M19_ROOT:-}
+BB=${M19_BB:-/bin/busybox}
+fail=0
+for name in userdata metadata recovery_a ssd; do
+ found=
+ for entry in "$R"/sys/class/block/*; do
+  if $BB grep -qx "PARTNAME=$name" "$entry/uevent" 2>/dev/null; then found=$entry; fi
+ done
+ if [ -z "$found" ]; then
+  printf 'M19 T8 no partition %s\n' "$name" >&2
+  fail=1
+  continue
+ fi
+ set -- $($BB cat "$found/stat")
+ writes=$5 sectors=$7 discards=${12:-0} discarded=${14:-0}
+ printf 'M19 T8 %s writes=%s sectors=%s discards=%s discarded=%s\n' "$name" "$writes" "$sectors" "$discards" "$discarded" >&2
+ [ "$writes" = 0 ] && [ "$sectors" = 0 ] && [ "$discards" = 0 ] && [ "$discarded" = 0 ] || fail=1
+done
+exit "$fail"

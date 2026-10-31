@@ -325,6 +325,17 @@ class Plan(unittest.TestCase):
         self.assertLess(text.index('start hwservicemanager'), text.index('start vendor.qseecomd'))
         self.assertLess(text.index('listeners.registered'), text.index('start vendor.keymaster-4-1'))
         self.assertNotIn('gatekeeper', text)
+        self.assertLess(text.index('start logd'), text.index('start servicemanager'))
+        self.assertIn('write /tmp/m19/listeners 1', text)
+
+    def test_rc_defines_its_own_services_without_critical(self):
+        text = plan.init_rc()
+        for name in ('service ueventd', 'service logd', 'service m19.logcat'):
+            self.assertIn(name, text)
+        self.assertNotIn('critical', text)
+
+    def test_marker_stays_in_the_removed_list(self):
+        self.assertIn(plan.RECOVERY_MARKER, plan.RECOVERY_REMOVED)
 
     def test_rc_refuses_forbidden_lines(self):
         for line in ('    start recovery', '    start vold', '    mount f2fs /dev/x /data', '    mkdir /metadata',

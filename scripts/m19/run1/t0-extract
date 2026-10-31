@@ -1,0 +1,32 @@
+#!/bin/busybox sh
+# T0: read-only block nodes, then the pinned TWRP ramdisk into tmpfs.
+set -eu
+R=${M19_ROOT:-}
+BB=${M19_BB:-/bin/busybox}
+. "$R/m19/pins"
+fail() { printf 'M19 T0 failed: %s\n' "$*" >&2 || :; exit 1; }
+sysfs_entry() {
+ for entry in "$R"/sys/class/block/*; do
+  if $BB grep -qx "PARTNAME=$1" "$entry/uevent" 2>/dev/null; then
+   printf '%s\n' "$entry"
+   return 0
+  fi
+ done
+ return 1
+}
+read_only_node() {
+ entry=$(sysfs_entry "$2") || fail "no partition $2"
+ number=$($BB cat "$entry/dev") || fail "no number $2"
+ $BB mknod -m 400 "$R/dev/m19-$1" b "${number%%:*}" "${number#*:}" || fail "node $1"
+ $BB blockdev --setro "$R/dev/m19-$1" || fail "set read-only $1"
+ [ "$($BB blockdev --getro "$R/dev/m19-$1")" = 1 ] || fail "read-only check $1"
+}
+read_only_node recovery recovery_a
+read_only_node metadata metadata
+read_only_node userdata userdata
+read_only_node ssd ssd
+$BB mkdir -p "$R/tee"
+$BB mount -t tmpfs -o mode=0755,size=512m tmpfs "$R/tee" || fail tmpfs
+"$R/sbin/m19-rdx" "$R/dev/m19-recovery" "$RECOVERY_SHA256" "$R/tee" "$R/m19/init.rc" \
+ "ro.build.version.security_patch=$ANDROID_PATCH" "ro.vendor.build.security_patch=$ANDROID_PATCH" >&2 || fail extract
+exit 0

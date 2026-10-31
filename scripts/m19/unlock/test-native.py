@@ -75,7 +75,14 @@ class Rdx(unittest.TestCase):
     def test_leaves_out_recovery_and_modules(self):
         self.assert_status(self.run_rdx(image()), 'OK', 0)
         for name in (*plan.RECOVERY_REMOVED, 'vendor/lib/modules/x.ko', 'twres/fonts/a'):
-            self.assertFalse((self.dest / name).exists(), name)
+            if name != plan.RECOVERY_MARKER:
+                self.assertFalse((self.dest / name).exists(), name)
+
+    def test_marker_is_empty_and_not_executable(self):
+        self.assert_status(self.run_rdx(image()), 'OK', 0)
+        marker = self.dest / plan.RECOVERY_MARKER
+        self.assertEqual(marker.read_bytes(), b'')
+        self.assertFalse(stat.S_IMODE(marker.stat().st_mode) & 0o111)
 
     def test_wrong_hash_writes_nothing(self):
         self.assert_status(self.run_rdx(image(), digest='0' * 64), 'HASH')

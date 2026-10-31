@@ -30,6 +30,7 @@ MUTANTS = (
     ('rdx.c', 'if (!wanted.seen[i])', 'if (0)'),
     ('rdx.c', 'if (!rc_seen)', 'if (0)'),
     ('rdx.c', 'if (write_file(root, RC_PATH, rc, rc_size, 0644))', 'if (0)'),
+    ('rdx.c', 'write_file(root, RECOVERY_MARKER, (const uint8_t *)"", 0, 0600)', 'write_file(root, RECOVERY_MARKER, (const uint8_t *)"X", 1, 0755)'),
     ('rdx.c', 'if (!ramdisk || start + ramdisk > image_size)', 'if (!ramdisk)'),
     ('hash.c', '0x5be0cd19137e2179ULL', '0x5be0cd19137e2178ULL'),
     ('hash.c', 'tail_size = rest < 56 ? 64 : 128', 'tail_size = rest < 55 ? 64 : 128'),

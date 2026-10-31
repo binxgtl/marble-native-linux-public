@@ -1,0 +1,7 @@
+# Values R1 is pinned to. Sourced by the T scripts, checked against plan.py by test.py.
+RECOVERY_SHA256=fa40e1eb92ea3e27b0996fe5b32ef6768b888bccab423353a673b47d69b3dd4f
+USERDATA_SECTORS=470183896
+ANDROID_PATCH=2026-08-05
+ROOTFS_VERSION=24.04
+ROOTFS_PROBE=usr/lib/systemd/systemd
+ROOTFS_PROBE_SHA256=afb2da22aa2419ba534b94be1c0b525440f1de6a47b6d84ed731ac6bf51f9bc9

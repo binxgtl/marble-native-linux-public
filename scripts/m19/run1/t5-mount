@@ -1,0 +1,15 @@
+#!/bin/busybox sh
+# T5: mount the unlocked device read-only. norecovery skips roll-forward, which would write.
+set -eu
+R=${M19_ROOT:-}
+BB=${M19_BB:-/bin/busybox}
+fail() { printf 'M19 T5 failed: %s\n' "$*" >&2 || :; exit 1; }
+line=$($BB cat "$R/run/m19/unlock.line") || fail status-file
+number=${line##*dev=}
+case "$number" in
+ *[!0-9:]*|:*|*:|'') fail device-number;;
+esac
+$BB mknod -m 400 "$R/dev/m19-dm" b "${number%%:*}" "${number#*:}" || fail device-node
+$BB mkdir -p "$R/m19-data" || fail mount-point
+$BB mount -t f2fs -o ro,noatime,norecovery,inlinecrypt "$R/dev/m19-dm" "$R/m19-data" || fail mount
+exit 0

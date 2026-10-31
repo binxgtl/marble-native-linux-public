@@ -1,0 +1,14 @@
+#!/bin/busybox sh
+# T7: is overlayfs refused here, as the kernel source says? Upper and work are tmpfs, and the
+# result is recorded either way. Failure is expected, so this script always exits 0.
+R=${M19_ROOT:-}
+BB=${M19_BB:-/bin/busybox}
+base=$R/run/m19/overlay
+$BB mkdir -p "$base/upper" "$base/work" "$base/merged"
+if $BB mount -t overlay overlay -o "lowerdir=$R/m19-data/ubuntu,upperdir=$base/upper,workdir=$base/work" "$base/merged"; then
+ printf 'M19 T7 overlay mounted\n' >&2
+ $BB umount "$base/merged"
+else
+ printf 'M19 T7 overlay refused\n' >&2
+fi
+exit 0

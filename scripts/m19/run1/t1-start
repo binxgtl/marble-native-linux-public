@@ -1,0 +1,39 @@
+#!/bin/busybox sh
+# T1: the state first-stage init would leave, then Android init as a child, in a chroot.
+# A loaded policy cannot be unloaded, which this run accepts. Permissive comes first.
+set -eu
+R=${M19_ROOT:-}
+BB=${M19_BB:-/bin/busybox}
+. "$R/m19/pins"
+fail() { printf 'M19 T1 failed: %s\n' "$*" >&2 || :; exit 1; }
+wait_marker() {
+ i=0
+ while [ "$i" -lt 900 ]; do
+  [ ! -e "$R/tee/tmp/m19/$1" ] || return 0
+  $BB sleep 0.1; i=$((i+1))
+ done
+ fail "marker $1"
+}
+$BB mkdir -p "$R/dev/pts" "$R/dev/socket" "$R/dev/dm-user" || fail dev-directories
+$BB mount -t devpts devpts "$R/dev/pts" || fail devpts
+for entry in 'random 1 8' 'urandom 1 9' 'ptmx 5 2' 'kmsg_debug 1 11'; do
+ set -- $entry
+ [ -e "$R/dev/$1" ] || $BB mknod -m 666 "$R/dev/$1" c "$2" "$3" || fail "node $1"
+done
+$BB mount -t selinuxfs selinuxfs "$R/sys/fs/selinux" || fail selinuxfs
+printf 0 >"$R/sys/fs/selinux/enforce" || fail permissive
+[ "$($BB cat "$R/sys/fs/selinux/enforce")" = 0 ] || fail permissive-check
+size=$($BB stat -c %s "$R/tee/sepolicy") || fail policy-size
+$BB dd if="$R/tee/sepolicy" of="$R/sys/fs/selinux/load" bs="$size" count=1 || fail policy-load
+$BB mount -o rbind "$R/dev" "$R/tee/dev" || fail chroot-dev
+$BB mount -t proc proc "$R/tee/proc" || fail chroot-proc
+$BB mount -o rbind "$R/sys" "$R/tee/sys" || fail chroot-sys
+$BB mount -t tmpfs -o mode=0775,size=64m tmpfs "$R/tee/tmp" || fail chroot-tmp
+$BB mkdir -p "$R/tee/tmp/m19" "$R/tee/m19" || fail chroot-directories
+$BB mount -t ext4 -o ro,noload "$R/dev/m19-metadata" "$R/tee/metadata" || fail metadata
+$BB cp "$R/m19/m19-unlock" "$R/tee/m19/m19-unlock" || fail client-copy
+$BB chmod 755 "$R/tee/m19/m19-unlock" || fail client-mode
+$BB setsid $BB chroot "$R/tee" /system/bin/init second_stage </dev/null >/dev/null 2>&1 &
+wait_marker hwservicemanager
+wait_marker listeners
+exit 0
