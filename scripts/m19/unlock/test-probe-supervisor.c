@@ -9,7 +9,7 @@ static int worker(const char *mode, m19_probe_progress send, void *context,
     if (!strcmp(mode, "block")) for (;;) pause();
     if (!strcmp(mode, "partial")) {
         struct channel *c = context; unsigned char byte = 1;
-        (void)write(c->fd, &byte, 1); _exit(0);
+        ssize_t n = write(c->fd, &byte, 1); _exit(n == 1 ? 0 : 125);
     }
     if (!strcmp(mode, "wrong-stage")) { send(context, M19_P_FINISH, M19_U_UNKNOWN, 0); return 1; }
     if (!strcmp(mode, "duplicate")) { send(context, M19_P_READ, M19_U_NOT_ATTEMPTED, 0); return 1; }
