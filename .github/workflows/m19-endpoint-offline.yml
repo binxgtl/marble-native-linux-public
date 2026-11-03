@@ -1,0 +1,36 @@
+name: M19 endpoint-only offline qualification
+on:
+  push:
+    branches: [m19/endpoint-check]
+    paths:
+      - 'scripts/m19/endpoint/**'
+      - '.github/workflows/m19-endpoint-offline.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  endpoint:
+    if: github.ref == 'refs/heads/m19/endpoint-check'
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Endpoint-only Linux C tests with fake Binder library and sanitizers (no device)
+        run: bash scripts/m19/endpoint/test.sh artifacts/m19/endpoint/${{ runner.arch }}
+      - name: Build Android arm64 endpoint client with NDK (no device)
+        if: runner.arch == 'X64'
+        run: bash scripts/m19/endpoint/build-ndk.sh artifacts/m19/endpoint/${{ runner.arch }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: m19-endpoint-${{ runner.arch }}-${{ github.sha }}
+          path: |
+            artifacts/m19/endpoint/${{ runner.arch }}/*.txt
+            artifacts/m19/endpoint/${{ runner.arch }}/*.json
+            artifacts/m19/endpoint/${{ runner.arch }}/m19-endpoint-a
+            artifacts/m19/endpoint/${{ runner.arch }}/m19-endpoint-b
+          if-no-files-found: warn
