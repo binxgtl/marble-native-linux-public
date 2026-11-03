@@ -18,6 +18,9 @@ jobs:
       - uses: actions/checkout@v4
       - name: Gates, plans and parsers on synthetic inputs (no device)
         run: python3 scripts/m19/test.py
+      - name: Bionic client against frozen Keystore2 AIDL (no device)
+        if: runner.arch == 'X64'
+        run: bash scripts/m19/unlock/build-ndk.sh artifacts/m19/ndk
       - name: Actual binding and one-shot probe on typed fakes, read-only fixtures and deadlines (no Binder or TEE)
         run: bash scripts/m19/unlock/test-probe.sh artifacts/m19/${{ runner.arch }}/probe-tests
       - name: Mutants of the safety gates (no device)
@@ -26,9 +29,6 @@ jobs:
         run: bash scripts/m19/unlock/test.sh artifacts/m19/${{ runner.arch }}
       - name: R1 PID 1 and T scripts on synthetic trees, normal and ASan/UBSan, mutants, static binaries (no device)
         run: bash scripts/m19/run1/test.sh artifacts/m19/${{ runner.arch }}/run1
-      - name: Bionic client against frozen Keystore2 AIDL (no device)
-        if: runner.arch == 'X64'
-        run: bash scripts/m19/unlock/build-ndk.sh artifacts/m19/ndk
       - uses: actions/upload-artifact@v4
         if: always()
         with:

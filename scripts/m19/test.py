@@ -2,9 +2,15 @@
 """M19 offline tests. All inputs are synthetic; no phone, image or secret is used."""
 import copy
 import hashlib
+import importlib.util
+import io
 import struct
 import sys
+import tarfile
+import time
 import unittest
+from unittest import mock
+from urllib.error import HTTPError, URLError
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -17,6 +23,51 @@ import plan
 import preflight
 import rootfs
 import survey
+
+spec = importlib.util.spec_from_file_location('m19_fetch_aidl', Path(__file__).parent / 'unlock' / 'fetch-aidl.py')
+fetch_aidl = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(fetch_aidl)
+
+
+class AidlFetch(unittest.TestCase):
+    def archive(self):
+        out = io.BytesIO()
+        with tarfile.open(fileobj=out, mode='w:gz') as tar:
+            entry = tarfile.TarInfo('android/test.h');entry.size = 6
+            tar.addfile(entry, io.BytesIO(b'public'))
+        return out.getvalue()
+
+    def run_fetch(self, outcomes):
+        with mock.patch.object(fetch_aidl.urllib.request, 'urlopen', side_effect=outcomes) as opened, \
+             mock.patch.object(time, 'sleep') as slept:
+            value = fetch_aidl.fetch('binder_cpp', 'public/source', 'frozen', 'include', '.h')
+            return value, opened.call_count, slept.call_args_list
+
+    def test_transient_503_retries_same_frozen_source(self):
+        try:
+            value, calls, sleeps = self.run_fetch([HTTPError('synthetic', 503, 'temporary', {}, None), io.BytesIO(self.archive())])
+        except HTTPError:
+            self.fail('transient 503 discarded a recoverable frozen AIDL fetch')
+        self.assertEqual(value, {'binder_cpp/android/test.h': b'public'})
+        self.assertEqual(calls, 2);self.assertEqual(sleeps, [mock.call(1)])
+
+    def test_timeout_and_transport_error_are_bounded(self):
+        value, calls, sleeps = self.run_fetch([TimeoutError(), URLError('synthetic'), io.BytesIO(self.archive())])
+        self.assertEqual(value, {'binder_cpp/android/test.h': b'public'})
+        self.assertEqual(calls, 3);self.assertEqual(sleeps, [mock.call(1), mock.call(2)])
+
+    def test_transient_exhaustion_is_not_success(self):
+        with mock.patch.object(fetch_aidl.urllib.request, 'urlopen', side_effect=HTTPError('synthetic', 503, 'temporary', {}, None)) as opened, \
+             mock.patch.object(time, 'sleep') as slept:
+            with self.assertRaises(HTTPError):fetch_aidl.fetch('binder_cpp', 'public/source', 'frozen', 'include', '.h')
+            self.assertEqual(opened.call_count, 3);self.assertEqual(slept.call_count, 2)
+
+    def test_permanent_http_errors_are_not_retried(self):
+        for code in (403, 404):
+            with self.subTest(code=code), mock.patch.object(fetch_aidl.urllib.request, 'urlopen', side_effect=HTTPError('synthetic', code, 'permanent', {}, None)) as opened, \
+                 mock.patch.object(time, 'sleep') as slept:
+                with self.assertRaises(HTTPError):fetch_aidl.fetch('binder_cpp', 'public/source', 'frozen', 'include', '.h')
+                self.assertEqual(opened.call_count, 1);slept.assert_not_called()
 
 FSTAB = ('/dev/block/bootdevice/by-name/userdata /data f2fs noatime,nosuid,nodev,discard,inlinecrypt '
          'latemount,wait,check,formattable,fileencryption=aes-256-xts:aes-256-cts:v2+inlinecrypt_optimized+wrappedkey_v0,'

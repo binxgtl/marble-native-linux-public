@@ -7,6 +7,8 @@ src=scripts/m19/unlock
 python3 "$src/fetch-aidl.py" --out "$out/aidl"
 aidl=$(ls -d "${ANDROID_HOME:?}"/build-tools/* | sort -V | tail -n 1)/aidl
 bin=${ANDROID_NDK_LATEST_HOME:?}/toolchains/llvm/prebuilt/linux-x86_64/bin
+cat "$ANDROID_NDK_LATEST_HOME/source.properties" | tee "$out/ndk-version.txt"
+sha256sum "$aidl" "$bin/clang" "$bin/llvm-strip" "$bin/llvm-readelf" | tee "$out/build-tools.txt"
 "$bin/clang" --version | head -n 1
 mapfile -t interfaces < <(find "$out/aidl" -name '*.aidl' | LC_ALL=C sort)
 for file in "${interfaces[@]}"; do

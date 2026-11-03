@@ -5,7 +5,10 @@ import argparse
 import hashlib
 import io
 import json
+import sys
 import tarfile
+import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -22,10 +25,26 @@ SOURCES = (
 )
 
 
+def read_archive(url):
+    for attempt in range(1, 4):
+        try:
+            with urllib.request.urlopen(url, timeout=120) as response:
+                return response.read()
+        except urllib.error.HTTPError as error:
+            error.close()
+            if error.code not in (429, 500, 502, 503, 504) or attempt == 3:
+                raise
+        except (urllib.error.URLError, TimeoutError):
+            if attempt == 3:
+                raise
+        print(f'AIDL transient download failure; retry {attempt}/3', file=sys.stderr)
+        time.sleep(attempt)
+    raise AssertionError('unreachable')
+
+
 def fetch(name, repository, tag, path, suffix):
     url = f'https://android.googlesource.com/{repository}/+archive/refs/tags/{tag}/{path}.tar.gz'
-    with urllib.request.urlopen(url, timeout=120) as response:
-        archive = response.read()
+    archive = read_archive(url)
     files = {}
     with tarfile.open(fileobj=io.BytesIO(archive), mode='r:gz') as tar:
         for member in tar.getmembers():
