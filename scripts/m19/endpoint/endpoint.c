@@ -12,8 +12,6 @@
 
 #if defined(__ANDROID__)
 #include <android/binder_ibinder.h>
-#include <android/binder_manager.h>
-#include <android/binder_parcel.h>
 #else
 /* Host-test declarations mirror the public Binder NDK callback ABI. */
 typedef struct AIBinder AIBinder;
