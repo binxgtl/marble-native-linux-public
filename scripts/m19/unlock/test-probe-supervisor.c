@@ -1,5 +1,6 @@
 /* Exact supervisor with a deliberately hostile synthetic worker. No Binder. */
 #include "probe-supervisor.c"
+#include "core.h"
 #include <stdlib.h>
 static int worker(const char *mode, m19_probe_progress send, void *context,
                   int *detail, enum m19_upgrade_fact *upgrade, int *observed)
