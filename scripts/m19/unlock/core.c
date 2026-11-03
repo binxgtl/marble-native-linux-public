@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <unistd.h>
 
 #include "core.h"
@@ -20,7 +21,7 @@ static const char *const KEY_FILES[] = {"encrypted_key", "keymaster_key_blob", "
 const char *m19_status_name(enum m19_status status)
 {
     static const char *const names[] = {"OK", "ARGUMENTS", "LAYOUT", "VERSION", "UPGRADE_PENDING", "SECDISCARDABLE", "CONNECT",
-                                        "DECRYPT", "UPGRADE_REQUIRED", "EPHEMERAL", "SIZE", "TABLE"};
+                                        "DECRYPT", "UPGRADE_REQUIRED", "EPHEMERAL", "SIZE", "TABLE", "READONLY"};
     return (size_t)status < sizeof(names) / sizeof(names[0]) ? names[status] : "UNKNOWN";
 }
 
@@ -40,10 +41,15 @@ void m19_app_id(const uint8_t *secdiscardable, size_t size, uint8_t digest[M19_H
 
 static int read_file(int directory, const char *name, uint8_t *output, size_t capacity, size_t *size)
 {
-    int fd = openat(directory, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    int fd = openat(directory, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK | O_NOATIME);
     size_t used = 0;
     if (fd < 0)
         return -1;
+    struct stat st;
+    if (fstat(fd, &st) || !S_ISREG(st.st_mode) || st.st_size < 0 || (uint64_t)st.st_size > capacity) {
+        close(fd);
+        return -1;
+    }
     for (;;) {
         ssize_t got = read(fd, output + used, capacity - used);
         if (got < 0 && errno == EINTR)
@@ -64,12 +70,17 @@ static int read_file(int directory, const char *name, uint8_t *output, size_t ca
     }
 }
 
-static enum m19_status check_names(const char *path)
+static enum m19_status check_names(int fd)
 {
-    DIR *directory = opendir(path);
+    int copy = dup(fd);
+    if (copy < 0) return M19_LAYOUT;
+    DIR *directory = fdopendir(copy);
     size_t seen = 0;
-    if (!directory)
+    if (!directory) {
+        close(copy);
         return M19_LAYOUT;
+    }
+    errno = 0;
     for (struct dirent *entry; (entry = readdir(directory));) {
         size_t known = 0;
         if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, ".."))
@@ -86,21 +97,27 @@ static enum m19_status check_names(const char *path)
         }
         seen++;
     }
-    closedir(directory);
+    int error = errno;
+    if (closedir(directory) || error)
+        return M19_LAYOUT;
     return seen == sizeof(KEY_FILES) / sizeof(KEY_FILES[0]) ? M19_OK : M19_LAYOUT;
 }
 
-enum m19_status m19_read_key_dir(const char *path, struct m19_key_dir *keys)
+static enum m19_status read_key_dir(const char *path, struct m19_key_dir *keys, int require_readonly)
 {
     static uint8_t secdiscardable[M19_SECDISCARDABLE_BYTES + 1];
     uint8_t version[2];
     size_t size = 0;
-    enum m19_status status = check_names(path);
-    if (status != M19_OK)
-        return status;
-    int directory = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    int directory = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW | O_NOATIME);
     if (directory < 0)
         return M19_LAYOUT;
+    enum m19_status status = M19_READONLY;
+    struct statvfs fs;
+    if (require_readonly && (fstatvfs(directory, &fs) || !(fs.f_flag & ST_RDONLY)))
+        goto out;
+    status = check_names(directory);
+    if (status != M19_OK)
+        goto out;
     status = M19_LAYOUT;
     if (read_file(directory, "version", version, sizeof(version), &size)) {
         goto out;
@@ -127,6 +144,11 @@ out:
     return status;
 }
 
+enum m19_status m19_read_key_dir(const char *path, struct m19_key_dir *keys)
+{
+    return read_key_dir(path, keys, 0);
+}
+
 int m19_table_parameters(const uint8_t *key, size_t key_size, const char *device, char *output, size_t capacity)
 {
     static const char hex[] = "0123456789abcdef";
@@ -148,9 +170,9 @@ static int valid_target(const struct m19_target *target)
            !strchr(target->device, ':') && target->sectors && !(target->sectors % 8);
 }
 
-enum m19_status m19_metadata_unlock(const char *directory, const struct m19_target *target,
+static enum m19_status unlock_mode(const char *directory, const struct m19_target *target,
                                     const struct m19_keystore_ops *keystore, void *keystore_context,
-                                    const struct m19_dm_ops *dm, void *dm_context, int *detail, int *upgraded)
+                                    const struct m19_dm_ops *dm, void *dm_context, int *detail, int *upgraded, int probe)
 {
     static struct m19_key_dir keys;
     static uint8_t storage[M19_KEY_MAX], ephemeral[M19_KEY_MAX];
@@ -162,13 +184,13 @@ enum m19_status m19_metadata_unlock(const char *directory, const struct m19_targ
 
     *detail = 0;
     *upgraded = 0;
-    if (!valid_target(target))
+    if (!probe && !valid_target(target))
         return M19_ARGUMENTS;
-    if (dm->sectors(dm_context, target->device, &sectors))
+    if (!probe && dm->sectors(dm_context, target->device, &sectors))
         return M19_SIZE;
-    if ((sectors & ~(uint64_t)7) != target->sectors)
+    if (!probe && (sectors & ~(uint64_t)7) != target->sectors)
         return M19_SIZE;
-    status = m19_read_key_dir(directory, &keys);
+    status = read_key_dir(directory, &keys, probe);
     if (status != M19_OK)
         goto out;
     if (keystore->connect(keystore_context, detail) != M19_KS_OK) {
@@ -177,9 +199,14 @@ enum m19_status m19_metadata_unlock(const char *directory, const struct m19_targ
     }
     struct m19_decrypt_request request = {keys.blob, keys.blob_size, keys.app_id, sizeof(keys.app_id), keys.encrypted, M19_NONCE_BYTES,
                                           keys.encrypted + M19_NONCE_BYTES, keys.encrypted_size - M19_NONCE_BYTES};
+    *upgraded = -1; /* UNKNOWN until a successful decrypt response; not proof of remote rollback. */
     result = keystore->decrypt(keystore_context, &request, storage, sizeof(storage), &storage_size, detail);
     /* As in TWRP, an upgrade is a copy in the TA. The operation runs on it and the blob on disk stays. */
     if (result != M19_KS_OK && result != M19_KS_UPGRADE) {
+        status = M19_DECRYPT;
+        goto out;
+    }
+    if (!storage_size || storage_size > sizeof(storage)) {
         status = M19_DECRYPT;
         goto out;
     }
@@ -188,6 +215,14 @@ enum m19_status m19_metadata_unlock(const char *directory, const struct m19_targ
     result = keystore->ephemeral(keystore_context, storage, storage_size, ephemeral, sizeof(ephemeral), &ephemeral_size, detail);
     if (result != M19_KS_OK) {
         status = result == M19_KS_UPGRADE ? M19_UPGRADE_REQUIRED : M19_EPHEMERAL;
+        goto out;
+    }
+    if (!ephemeral_size || ephemeral_size > sizeof(ephemeral)) {
+        status = M19_EPHEMERAL;
+        goto out;
+    }
+    if (probe) {
+        status = M19_OK;
         goto out;
     }
     if (m19_table_parameters(ephemeral, ephemeral_size, target->device, parameters, sizeof(parameters))) {
@@ -210,4 +245,17 @@ out:
     m19_wipe(ephemeral, sizeof(ephemeral));
     m19_wipe(parameters, sizeof(parameters));
     return status;
+}
+
+enum m19_status m19_metadata_unlock(const char *directory, const struct m19_target *target,
+                                    const struct m19_keystore_ops *keystore, void *keystore_context,
+                                    const struct m19_dm_ops *dm, void *dm_context, int *detail, int *upgraded)
+{
+    return unlock_mode(directory, target, keystore, keystore_context, dm, dm_context, detail, upgraded, 0);
+}
+
+enum m19_status m19_metadata_probe(const char *directory, const struct m19_keystore_ops *keystore,
+                                  void *context, int *detail, int *upgraded)
+{
+    return unlock_mode(directory, NULL, keystore, context, NULL, NULL, detail, upgraded, 1);
 }

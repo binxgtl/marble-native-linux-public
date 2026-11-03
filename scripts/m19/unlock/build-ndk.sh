@@ -33,9 +33,27 @@ for copy in a b; do
   done
   "$bin/clang++" --target=aarch64-linux-android31 -pie -static-libstdc++ -Wl,--build-id=none -Wl,--gc-sections \
     "${objects[@]}" -lbinder_ndk -ldl -o "$out/m19-unlock-$copy"
+  # Probe has its own supervisor/main and NEVER links dm.c or the generic CLI.
+  probe_objects=()
+  for object in "${objects[@]}"; do
+    case "$object" in */main.o|*/dm.o) ;; *) probe_objects+=("$object");; esac
+  done
+  "$bin/clang++" "${common[@]}" -std=c++17 -Wall -Wextra -Werror -I"$out/gen/include" \
+    -c "$src/probe.cpp" -o "$out/obj-$copy/probe.o"
+  "$bin/clang" "${common[@]}" -std=c11 -Wall -Wextra -Werror \
+    -c "$src/probe-supervisor.c" -o "$out/obj-$copy/probe-supervisor.o"
+  "$bin/clang++" --target=aarch64-linux-android31 -pie -static-libstdc++ -Wl,--build-id=none -Wl,--gc-sections \
+    "${probe_objects[@]}" "$out/obj-$copy/probe.o" "$out/obj-$copy/probe-supervisor.o" \
+    -lbinder_ndk -ldl -o "$out/m19-probe-$copy"
 done
 cmp "$out/m19-unlock-a" "$out/m19-unlock-b"
 "$bin/llvm-strip" -s "$out/m19-unlock-a"
 "$bin/llvm-readelf" -d "$out/m19-unlock-a" | grep NEEDED | tee "$out/needed.txt"
 python3 "$src/check-needed.py" "$out/needed.txt"
 sha256sum "$out/m19-unlock-a" | tee "$out/unlock-binary.txt"
+cmp "$out/m19-probe-a" "$out/m19-probe-b"
+"$bin/llvm-strip" -s "$out/m19-probe-a" "$out/m19-probe-b"
+cmp "$out/m19-probe-a" "$out/m19-probe-b"
+"$bin/llvm-readelf" -d "$out/m19-probe-a" | grep NEEDED | tee "$out/probe-needed.txt"
+python3 "$src/check-needed.py" "$out/probe-needed.txt"
+sha256sum "$out/m19-probe-a" "$out/m19-probe-b" | tee "$out/probe-binary.txt"

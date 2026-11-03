@@ -29,6 +29,7 @@ enum m19_status {
     M19_EPHEMERAL,
     M19_SIZE,
     M19_TABLE,
+    M19_READONLY,
 };
 
 enum m19_keystore_result { M19_KS_OK, M19_KS_ERROR, M19_KS_UPGRADE };
@@ -84,6 +85,9 @@ int m19_table_parameters(const uint8_t *key, size_t key_size, const char *device
 enum m19_status m19_metadata_unlock(const char *directory, const struct m19_target *target,
                                     const struct m19_keystore_ops *keystore, void *keystore_context,
                                     const struct m19_dm_ops *dm, void *dm_context, int *detail, int *upgraded);
+/* Probe-only entry: requires an already read-only key mount, never constructs a DM table. */
+enum m19_status m19_metadata_probe(const char *directory, const struct m19_keystore_ops *keystore,
+                                  void *context, int *detail, int *upgraded);
 
 #ifdef __cplusplus
 }

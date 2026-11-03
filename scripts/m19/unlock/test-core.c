@@ -217,7 +217,7 @@ static void test_upgrade_continues_and_is_reported(void)
     assert(last_upgraded == 1 && fake.ephemerals == 1 && fake.creates == 1 && fake.resumes == 1);
 }
 
-static void test_decrypt_error_never_counts_as_upgraded(void)
+static void test_decrypt_error_is_upgrade_unknown(void)
 {
     char path[256];
     int detail;
@@ -225,7 +225,22 @@ static void test_decrypt_error_never_counts_as_upgraded(void)
     fresh(path, "upgrade3");
     fake.decrypt_result = M19_KS_ERROR;
     assert(run(&fake, path, DEVICE, SECTORS, &detail) == M19_DECRYPT);
-    assert(last_upgraded == 0 && fake.ephemerals == 0 && fake.creates == 0);
+    assert(last_upgraded == -1 && fake.ephemerals == 0 && fake.creates == 0);
+}
+
+static void test_empty_keys_and_readonly_probe(void)
+{
+    char path[256]; int detail;
+    struct fake fake = good(); fresh(path, "empty-keys");
+    fake.storage_size = 0;
+    assert(run(&fake, path, DEVICE, SECTORS, &detail) == M19_DECRYPT);
+    assert(!fake.ephemerals && !fake.creates);
+    fake = good(); fake.ephemeral_size = 0;
+    assert(run(&fake, path, DEVICE, SECTORS, &detail) == M19_EPHEMERAL);
+    assert(!fake.creates);
+    fake = good();
+    assert(m19_metadata_probe(path, &KS, &fake, &detail, &last_upgraded) == M19_READONLY);
+    assert(!fake.connects && !fake.creates);
 }
 
 static void test_storage_key_upgrade_stops_before_table(void)
@@ -389,7 +404,8 @@ int main(int argc, char **argv)
     test_buffers_wiped();
     test_wiped_after_failure();
     test_upgrade_continues_and_is_reported();
-    test_decrypt_error_never_counts_as_upgraded();
+    test_decrypt_error_is_upgrade_unknown();
+    test_empty_keys_and_readonly_probe();
     test_storage_key_upgrade_stops_before_table();
     test_pending_upgrade_stops_before_keystore();
     test_layout_gates();

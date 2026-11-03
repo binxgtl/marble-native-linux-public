@@ -18,6 +18,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Gates, plans and parsers on synthetic inputs (no device)
         run: python3 scripts/m19/test.py
+      - name: Actual binding and one-shot probe on typed fakes, read-only fixtures and deadlines (no Binder or TEE)
+        run: bash scripts/m19/unlock/test-probe.sh artifacts/m19/${{ runner.arch }}/probe-tests
       - name: Mutants of the safety gates (no device)
         run: python3 scripts/m19/mutate.py
       - name: Unlock core and ramdisk extractor, normal and ASan/UBSan, mutants, static binary (no device)
@@ -34,6 +36,8 @@ jobs:
           path: |
             artifacts/m19/**/m19-rdx-a
             artifacts/m19/**/m19-unlock-a
+            artifacts/m19/**/m19-probe-a
+            artifacts/m19/**/m19-probe-b
             artifacts/m19/**/pid1-a
             artifacts/m19/**/pid1-b
             artifacts/m19/**/load-heaps-a

@@ -115,7 +115,9 @@ class ClientSource(unittest.TestCase):
 
     def test_upgraded_blob_is_wiped_and_the_operation_continues(self):
         text = self.text('binding.cpp')
-        self.assertIn('m19_wipe(response.upgradedBlob->data()', text)
+        self.assertIn('wipe(create.upgradedBlob)', text)
+        self.assertIn('wipe(ephemeral.upgradedBlob)', text)
+        self.assertIn('~Call()', text)
         self.assertNotIn('iOperation->abort', text)
 
 
