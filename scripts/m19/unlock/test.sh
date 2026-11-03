@@ -8,7 +8,7 @@ for variant in normal sanitize; do
   if [[ $variant == sanitize ]]; then
     flags+=(-O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer)
   fi
-  gcc "${flags[@]}" "$src/core.c" "$src/hash.c" "$src/test-core.c" -o "$out/test-core-$variant"
+  gcc "${flags[@]}" -DM19_HASH_TEST "$src/core.c" "$src/hash.c" "$src/test-core.c" -o "$out/test-core-$variant"
   gcc "${flags[@]}" "$src/hash.c" "$src/rdx.c" -o "$out/rdx-$variant"
   gcc "${flags[@]}" -c "$src/dm.c" -o "$out/dm-$variant.o"
   "$out/test-core-$variant"

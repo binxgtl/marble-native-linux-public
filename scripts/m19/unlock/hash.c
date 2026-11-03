@@ -6,6 +6,18 @@
 #define ROTR32(x, n) (((x) >> (n)) | ((x) << (32 - (n))))
 #define ROTR64(x, n) (((x) >> (n)) | ((x) << (64 - (n))))
 
+/* SHA-512 processes secdiscardable; clear its explicit working copies too.
+ * Self-contained because rdx/R1 also link hash.c without the unlock core. */
+static void clear_hash(void *data, size_t size)
+{
+    volatile uint8_t *bytes = data;
+    for (size_t i = 0; i < size; i++) bytes[i] = 0;
+#ifdef M19_HASH_TEST
+    extern void m19_hash_test_cleared(const void *, size_t);
+    m19_hash_test_cleared(data, size);
+#endif
+}
+
 static const uint32_t K256[64] = {
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01,
     0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
@@ -97,6 +109,8 @@ static void block512(uint64_t state[8], const uint8_t *block)
     }
     for (int i = 0; i < 8; i++)
         state[i] += s[i];
+    clear_hash(w, sizeof(w));
+    clear_hash(s, sizeof(s));
 }
 
 void m19_sha512_parts(const void *first, size_t first_size, const void *second, size_t second_size, uint8_t digest[64])
@@ -132,4 +146,6 @@ void m19_sha512_parts(const void *first, size_t first_size, const void *second, 
         block512(state, buffer + i);
     for (int i = 0; i < 64; i++)
         digest[i] = (uint8_t)(state[i / 8] >> (56 - 8 * (i % 8)));
+    clear_hash(buffer, sizeof(buffer));
+    clear_hash(state, sizeof(state));
 }

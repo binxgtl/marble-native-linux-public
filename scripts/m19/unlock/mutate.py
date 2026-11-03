@@ -39,6 +39,10 @@ MUTANTS = (
     ('rdx.c', 'if (!ramdisk || start + ramdisk > image_size)', 'if (!ramdisk)'),
     ('hash.c', '0x5be0cd19137e2179ULL', '0x5be0cd19137e2178ULL'),
     ('hash.c', 'tail_size = rest < 56 ? 64 : 128', 'tail_size = rest < 55 ? 64 : 128'),
+    ('hash.c', 'clear_hash(w, sizeof(w));', ''),
+    ('hash.c', 'clear_hash(s, sizeof(s));', ''),
+    ('hash.c', 'clear_hash(buffer, sizeof(buffer));', ''),
+    ('hash.c', 'clear_hash(state, sizeof(state));', ''),
 )
 
 
@@ -63,7 +67,7 @@ def main():
                 if path.suffix in ('.c', '.h', '.py'):
                     shutil.copy(path, target)
             (target / name).write_text(source.replace(old, new), encoding='utf-8')
-            if run([*flags, 'core.c', 'hash.c', 'test-core.c', '-o', 'test-core'], target).returncode:
+            if run([*flags, '-DM19_HASH_TEST', 'core.c', 'hash.c', 'test-core.c', '-o', 'test-core'], target).returncode:
                 sys.exit(f'mutant {number} does not compile')
             if run([*flags, 'hash.c', 'rdx.c', '-o', 'rdx'], target).returncode:
                 sys.exit(f'mutant {number} does not compile')

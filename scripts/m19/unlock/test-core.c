@@ -26,6 +26,28 @@ struct fake {
 
 static char root[128];
 
+#ifdef M19_HASH_TEST
+static unsigned hash_schedules, hash_states, hash_buffers;
+void m19_hash_test_cleared(const void *data, size_t size)
+{
+    const uint8_t *bytes = data;
+    for (size_t i = 0; i < size; i++) assert(bytes[i] == 0);
+    if (size == 640) hash_schedules++;
+    else if (size == 64) hash_states++;
+    else { assert(size == 256); hash_buffers++; }
+}
+static void test_hash_working_copies_wiped(void)
+{
+    uint8_t input[M19_SECDISCARDABLE_BYTES], digest[M19_HASH_BYTES];
+    memset(input, 0x5a, sizeof(input));
+    hash_schedules = hash_states = hash_buffers = 0;
+    m19_app_id(input, sizeof(input), digest);
+    /* 129 data blocks + padding, then the final state and staging buffer. */
+    assert(hash_schedules == 130 && hash_states == 131 && hash_buffers == 1);
+    m19_wipe(input, sizeof(input)); m19_wipe(digest, sizeof(digest));
+}
+#endif
+
 static void write_bytes(const char *directory, const char *name, const void *data, size_t size)
 {
     char path[256];
@@ -402,6 +424,9 @@ int main(int argc, char **argv)
     }
     snprintf(root, sizeof(root), "/tmp/m19-core-%d", getpid());
     mkdir(root, 0700);
+#ifdef M19_HASH_TEST
+    test_hash_working_copies_wiped();
+#endif
     test_happy_path();
     test_buffers_wiped();
     test_wiped_after_failure();
