@@ -10,6 +10,7 @@ static int worker(const char* directory, m19_probe_progress progress, void* cont
     int status = m19_metadata_probe(directory, m19_keystore2_ops(), m19_keystore2_context(), detail, &legacy);
     *upgrade = m19_keystore2_upgrade();
     *observed = m19_keystore2_upgrade_observed();
+    if (status && *upgrade != M19_U_NOT_ATTEMPTED) *upgrade = M19_U_UNKNOWN;
     return status;
 }
 int main(int argc, char** argv) {

@@ -66,8 +66,6 @@ static int fake_decrypt(void *context, const struct m19_decrypt_request *request
     fake->seen_body = request->body_and_mac_size;
     assert(request->blob_size == 4 && !memcmp(request->blob, "BLOB", 4));
     assert(request->nonce_size == M19_NONCE_BYTES && request->app_id_size == M19_HASH_BYTES);
-    if (fake->decrypt_result == M19_KS_ERROR)
-        return fake->decrypt_result;
     assert(capacity >= (size_t)fake->storage_size);
     memset(output, 0xaa, (size_t)fake->storage_size);
     *size = (size_t)fake->storage_size;
@@ -225,7 +223,11 @@ static void test_decrypt_error_is_upgrade_unknown(void)
     fresh(path, "upgrade3");
     fake.decrypt_result = M19_KS_ERROR;
     assert(run(&fake, path, DEVICE, SECTORS, &detail) == M19_DECRYPT);
-    assert(last_upgraded == -1 && fake.ephemerals == 0 && fake.creates == 0);
+    assert(last_upgraded == -1 && fake.ephemerals == 0);
+    assert(fake.creates == 0 && fake.loads == 0 && fake.resumes == 0 && fake.removes == 0);
+    assert(fake.leak_storage);
+    for (int i = 0; i < fake.storage_size; i++)
+        assert(fake.leak_storage[i] == 0);
 }
 
 static void test_empty_keys_and_readonly_probe(void)

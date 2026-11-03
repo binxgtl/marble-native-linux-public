@@ -2,14 +2,14 @@
 """Run real binding/supervisor logic on typed fakes and read-only tmpfs fixtures.
 No Android device, real Binder, key data or TEE. Root needed for private mounts.
 """
-import argparse,hashlib,os,signal,subprocess,tempfile,time,unittest
+import argparse,ctypes,hashlib,os,select,signal,subprocess,tempfile,time,unittest
 from pathlib import Path
 
 BINDING=PROBE=SUPERVISOR=None
 FAULTS=('success','missing-library','missing-marker','missing-lookup','missing-service','null-level','level-error',
-        'create-error','create-error-upgrade','empty-upgrade','null-operation','upgrade','update-error','update-throw',
+        'create-error','create-error-upgrade','empty-upgrade','oversized-upgrade','null-operation','upgrade','update-error','update-throw',
         'update-oversize','finish-error','finish-throw','upgrade-then-fail','empty','convert-error','convert-error-upgrade',
-        'convert-empty','convert-oversize','convert-throw','convert-upgrade')
+        'convert-empty','convert-oversize','convert-throw','convert-upgrade','convert-empty-upgrade','convert-oversized-upgrade')
 GOOD={'success','upgrade'}
 MOUNT='mount --bind "$1" "$1" && mount -o remount,bind,ro "$1" && exec "$2" --probe "$1"'
 
@@ -42,7 +42,8 @@ class Probe(unittest.TestCase):
                 self.assertEqual(p.returncode,0 if fault in GOOD else 1,p.stdout+p.stderr)
                 self.assertIn('reaped=1',p.stdout);self.assertIn('retry=0 r1=0',p.stdout)
                 self.assertIn('final=OK' if fault in GOOD else 'final=ERROR',p.stdout)
-                if fault in ('upgrade-then-fail','create-error-upgrade','convert-error-upgrade','convert-upgrade'):
+                if fault in ('upgrade-then-fail','create-error-upgrade','empty-upgrade','oversized-upgrade',
+                             'convert-error-upgrade','convert-upgrade','convert-empty-upgrade','convert-oversized-upgrade'):
                     self.assertIn('upgrade=UNKNOWN upgrade_observed=1',p.stdout)
                 if fault=='success':self.assertIn('upgrade=NONE_OBSERVED upgrade_observed=0',p.stdout)
                 if fault=='upgrade':self.assertIn('upgrade=OBSERVED upgrade_observed=1',p.stdout)
@@ -83,6 +84,51 @@ class Probe(unittest.TestCase):
         self.assertEqual(p.returncode,1,err);self.assertIn('final=INTERRUPTED',out);self.assertIn('remote=UNKNOWN',out)
 
 class Supervisor(unittest.TestCase):
+    def test_complete_consistent_worker(self):
+        p=subprocess.run([SUPERVISOR,'success'],capture_output=True,text=True,timeout=6)
+        self.assertEqual(p.returncode,0,p.stdout+p.stderr)
+        self.assertIn('final=OK',p.stdout)
+        self.assertIn('upgrade=NONE_OBSERVED upgrade_observed=0 reaped=1',p.stdout)
+    def test_upgrade_fact_contradictions_and_regressions(self):
+        for mode in ('none-with-seen','observed-without-seen','not-after-create','finish-regression','observed-regression','error-none'):
+            with self.subTest(mode=mode):
+                p=subprocess.run([SUPERVISOR,mode],capture_output=True,text=True,timeout=6)
+                self.assertEqual(p.returncode,1,p.stdout+p.stderr)
+                self.assertIn('final=PROTOCOL',p.stdout)
+                self.assertIn('upgrade=UNKNOWN',p.stdout)
+                self.assertIn('reaped=1',p.stdout)
+                self.assertNotIn('final=OK',p.stdout)
+                if mode=='error-none':self.assertNotIn('stage=result upgrade=NONE_OBSERVED',p.stdout)
+    def test_worker_dies_if_supervisor_is_killed(self):
+        # Adopt the worker so the test can verify its actual terminal wait,
+        # including against the historical missing-PDEATHSIG implementation.
+        libc=ctypes.CDLL(None,use_errno=True);old=ctypes.c_int()
+        self.assertEqual(libc.prctl(37,ctypes.byref(old),0,0,0),0) # PR_GET_CHILD_SUBREAPER
+        self.assertEqual(libc.prctl(36,1,0,0,0),0) # PR_SET_CHILD_SUBREAPER
+        p=None;child=None;reaped=False
+        try:
+            p=subprocess.Popen([SUPERVISOR,'block'],stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+            ready,_,_=select.select([p.stdout],[],[],2)
+            self.assertTrue(ready,'supervisor never reported initial worker stage')
+            self.assertIn(b'stage=key_read',p.stdout.readline())
+            children=Path(f'/proc/{p.pid}/task/{p.pid}/children').read_text().split()
+            self.assertEqual(len(children),1);child=int(children[0])
+            p.kill();p.communicate(timeout=3)
+            deadline=time.monotonic()+1
+            while time.monotonic()<deadline:
+                got,status=os.waitpid(child,os.WNOHANG)
+                if got==child:
+                    reaped=True
+                    self.assertTrue(os.WIFSIGNALED(status));self.assertEqual(os.WTERMSIG(status),signal.SIGKILL)
+                    break
+                time.sleep(.01)
+            self.assertTrue(reaped,'worker survived supervisor death; client call can escape deadline')
+        finally:
+            if p and p.poll() is None:p.kill();p.communicate(timeout=3)
+            if child and not reaped:
+                try:os.kill(child,signal.SIGKILL);os.waitpid(child,0)
+                except ProcessLookupError:pass
+            self.assertEqual(libc.prctl(36,old.value,0,0,0),0)
     def test_crash_partial_protocol_duplicate_and_timeout(self):
         for mode in ('crash','partial','wrong-stage','duplicate','block'):
             with self.subTest(mode=mode):
@@ -109,7 +155,11 @@ class Supervisor(unittest.TestCase):
                 if fill:os.close(r)
 
 if __name__=='__main__':
-    a=argparse.ArgumentParser();a.add_argument('--binding',required=True);a.add_argument('--probe',required=True);a.add_argument('--supervisor',required=True);x=a.parse_args()
+    a=argparse.ArgumentParser();a.add_argument('--binding',required=True);a.add_argument('--probe',required=True);a.add_argument('--supervisor',required=True)
+    a.add_argument('--case',choices=('parent-death','upgrade-facts','sticky-upgrade'));x=a.parse_args()
     BINDING,PROBE,SUPERVISOR=map(os.path.abspath,(x.binding,x.probe,x.supervisor))
     if os.geteuid()!=0:raise SystemExit('Root required for synthetic read-only private mount; no tests skipped')
-    unittest.main(argv=['probe-tests'],verbosity=2)
+    cases={'parent-death':'Supervisor.test_worker_dies_if_supervisor_is_killed',
+           'upgrade-facts':'Supervisor.test_upgrade_fact_contradictions_and_regressions',
+           'sticky-upgrade':'Binding.test_actual_binding_all_returned_paths'}
+    unittest.main(argv=['probe-tests']+([cases[x.case]] if x.case else []),verbosity=2)

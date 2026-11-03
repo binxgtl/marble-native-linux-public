@@ -64,6 +64,24 @@ static const char *upgrade_name(unsigned u) {
     static const char *const names[] = {"NOT_ATTEMPTED", "UNKNOWN", "NONE_OBSERVED", "OBSERVED"};
     return u < 4 ? names[u] : "UNKNOWN";
 }
+static int consistent(const struct event *e, unsigned prior_fact, unsigned prior_seen, unsigned key_rpc_started) {
+    if ((e->upgrade == M19_U_OBSERVED && !e->observed) ||
+        (e->upgrade == M19_U_NONE_OBSERVED && e->observed) ||
+        (e->upgrade == M19_U_NOT_ATTEMPTED && (e->observed || key_rpc_started))) return 0;
+    if (e->final) {
+        if (!key_rpc_started) return e->upgrade == M19_U_NOT_ATTEMPTED;
+        return e->status ? e->upgrade == M19_U_UNKNOWN : e->upgrade != M19_U_NOT_ATTEMPTED;
+    }
+    switch (e->stage) {
+    case M19_P_READ: case M19_P_LOOKUP: case M19_P_LEVEL:
+        return e->upgrade == M19_U_NOT_ATTEMPTED && !e->observed;
+    case M19_P_CREATE: return e->upgrade == M19_U_UNKNOWN && !e->observed;
+    case M19_P_UPDATE: return e->upgrade == M19_U_NONE_OBSERVED || e->upgrade == M19_U_OBSERVED;
+    case M19_P_FINISH: return e->upgrade == prior_fact && e->observed == prior_seen;
+    case M19_P_EPHEMERAL: return e->upgrade == M19_U_UNKNOWN && e->observed == prior_seen;
+    default: return 0;
+    }
+}
 int m19_probe_supervise(const char *directory, m19_probe_worker worker) {
     struct stat st;
     /* Only a host pipe/socket. A persistent-file redirection is not admitted. */
@@ -74,9 +92,12 @@ int m19_probe_supervise(const char *directory, m19_probe_worker worker) {
     if (pipe2(pipefd, O_CLOEXEC | O_NONBLOCK)) return 70;
     unsigned long long start = now();
     if (!start) { close(pipefd[0]); close(pipefd[1]); return 70; }
+    pid_t parent = getpid();
     pid_t child = fork();
     if (child < 0) { close(pipefd[0]); close(pipefd[1]); return 70; }
     if (!child) {
+        /* Arm before key/Binder access; close the fork-to-prctl parent-death race. */
+        if (prctl(PR_SET_PDEATHSIG, SIGKILL, 0, 0, 0) || getppid() != parent) _exit(125);
         close(pipefd[0]);
         int nullfd = open("/dev/null", O_RDWR | O_CLOEXEC | O_NOFOLLOW);
         struct stat sink;
@@ -113,7 +134,8 @@ int m19_probe_supervise(const char *directory, m19_probe_worker worker) {
             if (final || e.magic != MAGIC || e.sequence != next++ || e.stage > M19_P_RESULT ||
                 e.upgrade > M19_U_OBSERVED || e.observed > 1 || e.final > 1 || e.observed < observed ||
                 (!e.final && (e.stage != next - 1 || e.stage >= M19_P_RESULT)) ||
-                (e.final && (e.stage != M19_P_RESULT || e.status < 0 || e.status > 12))) {
+                (e.final && (e.stage != M19_P_RESULT || e.status < 0 || e.status > 12)) ||
+                !consistent(&e, fact, observed, key_rpc_started)) {
                 failure = "PROTOCOL"; break;
             }
             last = e.stage; fact = e.upgrade; observed = e.observed;

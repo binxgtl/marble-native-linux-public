@@ -126,9 +126,9 @@ struct Call {
 
 bool observe_upgrade(Context* c, const std::optional<std::vector<uint8_t>>& blob) {
     if (!blob) return true;
-    if (blob->empty() || blob->size() > M19_KEY_MAX) return false;
     c->observed = 1;
     c->upgrade = M19_U_OBSERVED;
+    if (blob->empty() || blob->size() > M19_KEY_MAX) return false;
     return true;
 }
 

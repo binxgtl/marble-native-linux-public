@@ -26,7 +26,7 @@ int main() {
         m19_decrypt_request req = {blob, sizeof(blob), app, sizeof(app), nonce, sizeof(nonce), body, sizeof(body)};
         result = ops->decrypt(context, &req, storage, sizeof(storage), &size, &detail);
         bool fail_decrypt = m19_test::fault("create-error") || m19_test::fault("create-error-upgrade") ||
-            m19_test::fault("empty-upgrade") || m19_test::fault("null-operation") ||
+            m19_test::fault("empty-upgrade") || m19_test::fault("oversized-upgrade") || m19_test::fault("null-operation") ||
             m19_test::fault("update-error") || m19_test::fault("update-throw") || m19_test::fault("update-oversize") ||
             m19_test::fault("finish-error") || m19_test::fault("finish-throw") ||
             m19_test::fault("upgrade-then-fail") || m19_test::fault("empty");
@@ -39,7 +39,8 @@ int main() {
             assert((result == M19_KS_UPGRADE) == m19_test::fault("upgrade"));
             result = ops->ephemeral(context, storage, size, ephemeral, sizeof(ephemeral), &size, &detail);
             bool fail_ephemeral = m19_test::fault("convert-error") || m19_test::fault("convert-error-upgrade") ||
-                m19_test::fault("convert-empty") || m19_test::fault("convert-oversize") || m19_test::fault("convert-throw");
+                m19_test::fault("convert-empty") || m19_test::fault("convert-oversize") || m19_test::fault("convert-throw") ||
+                m19_test::fault("convert-empty-upgrade") || m19_test::fault("convert-oversized-upgrade");
             assert((result == M19_KS_ERROR) == fail_ephemeral);
             if (fail_ephemeral || m19_test::fault("convert-upgrade")) {
                 for (uint8_t b : ephemeral) assert(b == 0);
@@ -49,7 +50,12 @@ int main() {
         }
     }
     bool observed = m19_test::fault("upgrade") || m19_test::fault("upgrade-then-fail") ||
-        m19_test::fault("create-error-upgrade") || m19_test::fault("convert-upgrade") || m19_test::fault("convert-error-upgrade");
+        m19_test::fault("create-error-upgrade") || m19_test::fault("empty-upgrade") || m19_test::fault("oversized-upgrade") ||
+        m19_test::fault("convert-upgrade") || m19_test::fault("convert-error-upgrade") ||
+        m19_test::fault("convert-empty-upgrade") || m19_test::fault("convert-oversized-upgrade");
+    if (m19_test::fault("empty-upgrade") || m19_test::fault("oversized-upgrade") ||
+        m19_test::fault("convert-empty-upgrade") || m19_test::fault("convert-oversized-upgrade"))
+        assert(m19_keystore2_upgrade() == M19_U_UNKNOWN && m19_keystore2_upgrade_observed() == 1);
     assert(m19_keystore2_upgrade_observed() == observed);
     for (const auto& r : m19_test::regions) assert(r.wiped);
     std::puts("PASS actual binding paths; client-owned watched copies wiped; host stand-ins only");

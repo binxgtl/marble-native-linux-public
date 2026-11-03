@@ -1,6 +1,7 @@
 // Host-only typed stand-in, NOT a Binder/wire/TEE emulator. Never linked into Android artifacts.
 #ifndef M19_BINDING_TEST_API_H
 #define M19_BINDING_TEST_API_H
+#include "core.h"
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -97,6 +98,7 @@ struct IKeystoreSecurityLevel {
         if (m19_test::fault("upgrade") || m19_test::fault("upgrade-then-fail") || m19_test::fault("create-error-upgrade"))
             m19_test::fill(response->upgradedBlob, 214);
         if (m19_test::fault("empty-upgrade")) m19_test::fill(response->upgradedBlob, 0);
+        if (m19_test::fault("oversized-upgrade")) m19_test::fill(response->upgradedBlob, M19_KEY_MAX + 1);
         if (!m19_test::fault("null-operation")) response->iOperation = std::make_shared<IKeystoreOperation>();
         return m19_test::error(m19_test::fault("create-error") || m19_test::fault("create-error-upgrade"));
     }
@@ -106,6 +108,8 @@ struct IKeystoreSecurityLevel {
         m19_test::watch(response->ephemeralKey);
         if (m19_test::fault("convert-upgrade") || m19_test::fault("convert-error-upgrade"))
             m19_test::fill(response->upgradedBlob, 64);
+        if (m19_test::fault("convert-empty-upgrade")) m19_test::fill(response->upgradedBlob, 0);
+        if (m19_test::fault("convert-oversized-upgrade")) m19_test::fill(response->upgradedBlob, M19_KEY_MAX + 1);
         m19_test::throwing("convert-throw");
         return m19_test::error(m19_test::fault("convert-error") || m19_test::fault("convert-error-upgrade"));
     }
