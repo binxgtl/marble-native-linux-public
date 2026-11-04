@@ -225,38 +225,196 @@ static int skipped(const char *name)
     return 0;
 }
 
-static int make_parents(int root, const char *name)
+/* Walk one path component at a time. Never let an archive symlink become a parent. */
+static int child_directory(int parent, char *name, mode_t mode, int create)
+{
+    int fd = openat(parent, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0 && errno == ENOENT && create) {
+        if (mkdirat(parent, name, mode) && errno != EEXIST)
+            return -1;
+        fd = openat(parent, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    }
+    if (fd < 0)
+        return -1;
+    struct stat st;
+    if (fstat(fd, &st) || !S_ISDIR(st.st_mode)) {
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+/* Return an opened, verified parent directory and a single-component leaf. */
+static int open_parent(int root, const char *name, int create, char *leaf, size_t leaf_size)
 {
     char path[512];
-    if (strlen(name) >= sizeof(path))
+    size_t length = strlen(name);
+    if (!length || length >= sizeof(path))
         return -1;
-    strcpy(path, name);
-    for (char *slash = strchr(path, '/'); slash; slash = strchr(slash + 1, '/')) {
-        *slash = 0;
-        if (mkdirat(root, path, 0755) && errno != EEXIST)
+    memcpy(path, name, length + 1);
+    while (length && path[length - 1] == '/')
+        path[--length] = 0;
+    if (!length)
+        return -1;
+
+    char *last = strrchr(path, '/');
+    char *parents = NULL;
+    char *base = path;
+    if (last) {
+        *last = 0;
+        parents = path;
+        base = last + 1;
+    }
+    if (!*base || !strcmp(base, ".") || !strcmp(base, "..") || strlen(base) >= leaf_size)
+        return -1;
+    strcpy(leaf, base);
+
+    int current = openat(root, ".", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (current < 0)
+        return -1;
+    char *part = parents;
+    while (part && *part) {
+        while (*part == '/')
+            part++;
+        if (!*part)
+            break;
+        char *end = strchr(part, '/');
+        if (end)
+            *end = 0;
+        if (strcmp(part, ".") && strcmp(part, "..")) {
+            int next = child_directory(current, part, 0755, create);
+            if (next < 0) {
+                close(current);
+                return -1;
+            }
+            close(current);
+            current = next;
+        } else if (!strcmp(part, "..")) {
+            close(current);
             return -1;
-        *slash = '/';
+        }
+        if (!end)
+            break;
+        part = end + 1;
+    }
+    return current;
+}
+
+static int make_directory(int root, const char *name, mode_t mode)
+{
+    char leaf[512];
+    int parent = open_parent(root, name, 1, leaf, sizeof(leaf));
+    if (parent < 0)
+        return -1;
+    int directory = child_directory(parent, leaf, mode & 07777, 1);
+    close(parent);
+    if (directory < 0)
+        return -1;
+    close(directory);
+    return 0;
+}
+
+static int write_new_at(int parent, const char *name, const uint8_t *data, size_t size, mode_t mode)
+{
+    int fd = openat(parent, name, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+    size_t done = 0;
+    if (fd < 0)
+        return -1;
+    struct stat st;
+    if (fstat(fd, &st) || !S_ISREG(st.st_mode) || st.st_nlink != 1)
+        goto fail;
+    while (done < size) {
+        ssize_t put = write(fd, data + done, size - done);
+        if (put < 0 && errno == EINTR)
+            continue;
+        if (put <= 0)
+            goto fail;
+        done += (size_t)put;
+    }
+    int status = fchmod(fd, mode & 07777);
+    if (close(fd))
+        status = -1;
+    if (status) {
+        unlinkat(parent, name, 0);
+        return -1;
     }
     return 0;
+fail:
+    close(fd);
+    unlinkat(parent, name, 0);
+    return -1;
 }
 
 static int write_file(int root, const char *name, const uint8_t *data, size_t size, mode_t mode)
 {
-    int fd = openat(root, name, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0600);
-    size_t done = 0;
-    if (fd < 0)
+    char leaf[512];
+    int parent = open_parent(root, name, 1, leaf, sizeof(leaf));
+    if (parent < 0)
         return -1;
-    while (done < size) {
-        ssize_t put = write(fd, data + done, size - done);
-        if (put <= 0) {
-            close(fd);
-            return -1;
-        }
-        done += (size_t)put;
-    }
-    int status = fchmod(fd, mode & 07777);
-    close(fd);
+    int status = write_new_at(parent, leaf, data, size, mode);
+    close(parent);
     return status;
+}
+
+/* Replace init.rc by renaming a fresh file; rename never follows the old leaf. */
+static int replace_file(int root, const char *name, const uint8_t *data, size_t size, mode_t mode)
+{
+    char leaf[512], temporary[64];
+    int parent = open_parent(root, name, 0, leaf, sizeof(leaf));
+    if (parent < 0)
+        return -1;
+    struct stat st;
+    if (fstatat(parent, leaf, &st, AT_SYMLINK_NOFOLLOW) || !S_ISREG(st.st_mode) || st.st_nlink != 1) {
+        close(parent);
+        return -1;
+    }
+    int length = snprintf(temporary, sizeof(temporary), ".m19-rdx-%ld.tmp", (long)getpid());
+    if (length < 0 || (size_t)length >= sizeof(temporary) ||
+        write_new_at(parent, temporary, data, size, mode)) {
+        close(parent);
+        return -1;
+    }
+    int status = renameat(parent, temporary, parent, leaf);
+    if (status)
+        unlinkat(parent, temporary, 0);
+    close(parent);
+    return status;
+}
+
+static int write_symlink(int root, const char *name, const char *target)
+{
+    char leaf[512];
+    int parent = open_parent(root, name, 1, leaf, sizeof(leaf));
+    if (parent < 0)
+        return -1;
+    int status = symlinkat(target, parent, leaf);
+    close(parent);
+    return status;
+}
+
+/* Resolve every destination component from a fixed anchor without following links. */
+static int open_root_directory(const char *path)
+{
+    int absolute = path[0] == '/';
+    const char *relative = path;
+    if (absolute) {
+        while (*relative == '/')
+            relative++;
+    }
+    if (!*relative)
+        return -1;
+
+    int anchor = open(absolute ? "/" : ".", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (anchor < 0)
+        return -1;
+    char leaf[512];
+    int parent = open_parent(anchor, relative, 0, leaf, sizeof(leaf));
+    close(anchor);
+    if (parent < 0)
+        return -1;
+    int root = child_directory(parent, leaf, 0755, 0);
+    close(parent);
+    return root;
 }
 
 /* Rewrites matching name= lines. Returns a new buffer that the caller frees. */
@@ -318,11 +476,9 @@ static const char *extract(const uint8_t *cpio, size_t size, int root, struct ov
             return "CPIO";
         if (skipped(name) || !strcmp(name, "."))
             continue;
-        if (make_parents(root, name))
-            return "WRITE";
         switch (mode & S_IFMT) {
         case S_IFDIR:
-            if (mkdirat(root, name, mode & 07777) && errno != EEXIST)
+            if (make_directory(root, name, mode))
                 return "WRITE";
             break;
         case S_IFLNK: {
@@ -331,7 +487,7 @@ static const char *extract(const uint8_t *cpio, size_t size, int root, struct ov
                 return "CPIO";
             memcpy(target, payload, file_size);
             target[file_size] = 0;
-            if (symlinkat(target, root, name))
+            if (write_symlink(root, name, target))
                 return "WRITE";
             break;
         }
@@ -387,21 +543,32 @@ int main(int argc, char **argv)
     uint8_t *cpio = unpack(image + start, (size_t)ramdisk, &cpio_size);
     if (!cpio)
         return finish("RAMDISK", 1);
-    int root = open(argv[3], O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    int root = open_root_directory(argv[3]);
     if (root < 0)
         return finish("WRITE", 1);
     const char *failure = extract(cpio, cpio_size, root, &wanted, &rc_seen);
-    if (failure)
+    if (failure) {
+        close(root);
         return finish(failure, 1);
+    }
     for (int i = 0; i < wanted.count; i++)
-        if (!wanted.seen[i])
+        if (!wanted.seen[i]) {
+            close(root);
             return finish("PROPERTY", 1);
-    if (!rc_seen)
+        }
+    if (!rc_seen) {
+        close(root);
         return finish("RC", 1);
-    if (write_file(root, RC_PATH, rc, rc_size, 0644))
+    }
+    if (replace_file(root, RC_PATH, rc, rc_size, 0644)) {
+        close(root);
         return finish("WRITE", 1);
+    }
     /* Android init reads prop.default only if this path exists. It holds no program. */
-    if (make_parents(root, RECOVERY_MARKER) || write_file(root, RECOVERY_MARKER, (const uint8_t *)"", 0, 0600))
+    if (write_file(root, RECOVERY_MARKER, (const uint8_t *)"", 0, 0600)) {
+        close(root);
         return finish("WRITE", 1);
+    }
+    close(root);
     return finish("OK", 0);
 }

@@ -117,6 +117,98 @@ class Rdx(unittest.TestCase):
         self.assert_status(result, 'CPIO')
         self.assertFalse((self.base / 'outside').exists())
 
+    def test_absolute_symlink_parent_cannot_escape(self):
+        outside = self.base / 'outside'
+        outside.mkdir()
+        sentinel = outside / 'sentinel'
+        sentinel.write_bytes(b'unchanged')
+        items = entries() + [('system/escape', 0o120777, os.fsencode(outside)),
+                             ('system/escape/created', 0o100644, b'escaped')]
+        self.assert_status(self.run_rdx(image(items)), 'WRITE')
+        self.assertEqual(sentinel.read_bytes(), b'unchanged')
+        self.assertFalse((outside / 'created').exists())
+
+    def test_relative_symlink_parent_cannot_escape(self):
+        outside = self.base / 'outside'
+        outside.mkdir()
+        sentinel = outside / 'sentinel'
+        sentinel.write_bytes(b'unchanged')
+        items = entries() + [('system/escape', 0o120777, b'../../outside'),
+                             ('system/escape/created', 0o100644, b'escaped')]
+        self.assert_status(self.run_rdx(image(items)), 'WRITE')
+        self.assertEqual(sentinel.read_bytes(), b'unchanged')
+        self.assertFalse((outside / 'created').exists())
+
+    def test_nested_symlink_parent_cannot_escape(self):
+        outside = self.base / 'outside'
+        outside.mkdir()
+        sentinel = outside / 'sentinel'
+        sentinel.write_bytes(b'unchanged')
+        items = entries() + [('system/nested/escape', 0o120777, b'../../../outside'),
+                             ('system/nested/escape/created', 0o100644, b'escaped')]
+        self.assert_status(self.run_rdx(image(items)), 'WRITE')
+        self.assertEqual(sentinel.read_bytes(), b'unchanged')
+        self.assertFalse((outside / 'created').exists())
+
+    def test_preexisting_symlink_parent_cannot_escape(self):
+        outside = self.base / 'outside'
+        outside.mkdir()
+        sentinel = outside / 'sentinel'
+        sentinel.write_bytes(b'unchanged')
+        (self.dest / 'system').symlink_to(outside, target_is_directory=True)
+        self.assert_status(self.run_rdx(image()), 'WRITE')
+        self.assertEqual(sentinel.read_bytes(), b'unchanged')
+        self.assertFalse((outside / 'bin/keystore2').exists())
+
+    def test_existing_final_symlink_is_not_followed(self):
+        outside = self.base / 'sentinel'
+        outside.write_bytes(b'unchanged')
+        (self.dest / 'system').mkdir()
+        (self.dest / 'system/bin').mkdir()
+        (self.dest / 'system/bin/keystore2').symlink_to(outside)
+        self.assert_status(self.run_rdx(image()), 'WRITE')
+        self.assertEqual(outside.read_bytes(), b'unchanged')
+
+    def test_existing_final_hardlink_is_not_truncated(self):
+        outside = self.base / 'sentinel'
+        outside.write_bytes(b'unchanged')
+        (self.dest / 'system').mkdir()
+        (self.dest / 'system/bin').mkdir()
+        os.link(outside, self.dest / 'system/bin/keystore2')
+        self.assert_status(self.run_rdx(image()), 'WRITE')
+        self.assertEqual(outside.read_bytes(), b'unchanged')
+
+    def test_final_root_symlink_is_refused(self):
+        real = self.base / 'real-tree'
+        real.mkdir()
+        self.dest.rmdir()
+        self.dest.symlink_to(real, target_is_directory=True)
+        self.assert_status(self.run_rdx(image()), 'WRITE')
+        self.assertEqual(list(real.iterdir()), [])
+
+    def test_destination_ancestor_symlink_is_refused(self):
+        outside = self.base / 'outside'
+        real_tree = outside / 'tree'
+        real_tree.mkdir(parents=True)
+        self.dest.rmdir()
+        (self.base / 'link').symlink_to(outside, target_is_directory=True)
+        self.dest = self.base / 'link' / 'tree'
+        self.assert_status(self.run_rdx(image()), 'WRITE')
+        self.assertEqual(list(real_tree.iterdir()), [])
+
+    def test_rc_parent_symlink_cannot_escape(self):
+        outside = self.base / 'outside'
+        outside.mkdir()
+        sentinel = outside / 'init.rc'
+        (outside / 'sentinel').write_bytes(b'unchanged')
+        items = entries()
+        rc_index = next(i for i, item in enumerate(items) if item[0] == RC_PATH)
+        items.insert(rc_index, ('system/etc/init', 0o120777, os.fsencode(outside)))
+        self.assert_status(self.run_rdx(image(items)), 'WRITE')
+        self.assertEqual((outside / 'sentinel').read_bytes(), b'unchanged')
+        self.assertFalse((outside / 'hw/init.rc').exists())
+        self.assertFalse(sentinel.exists())
+
     def test_absolute_name_refused(self):
         self.assert_status(self.run_rdx(image([('/etc/x', 0o100644, b'x')])), 'CPIO')
 
