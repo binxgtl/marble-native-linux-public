@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Real C endpoint/supervisor with synthetic DSO only. No phone, keys or Binder."""
-import argparse,ctypes,os,select,signal,subprocess,tempfile,time,unittest
+import argparse,ctypes,fcntl,os,select,signal,socket,subprocess,tempfile,time,unittest
 from pathlib import Path
 
 OUT=None;VARIANT=None
@@ -27,6 +27,12 @@ def receipt(p):
     return values
 
 class Endpoint(unittest.TestCase):
+    def test_loader_path_cannot_redirect_absolute_library(self):
+        env=dict(os.environ,LD_LIBRARY_PATH=str(OUT/f'shadow-{VARIANT}'))
+        p=subprocess.run([exe('core-basename'),'0'],env=env,capture_output=True,text=True,timeout=5)
+        self.assertEqual(p.returncode,90,p.stdout+p.stderr)
+        p=subprocess.run([exe('core'),'0'],env=env,capture_output=True,text=True,timeout=5)
+        self.assertEqual(p.returncode,0,p.stdout+p.stderr)
     def test_actual_core_and_supervised_returned_paths(self):
         for fault,status in FAULTS.items():
             with self.subTest(fault=fault):
@@ -76,11 +82,22 @@ class Endpoint(unittest.TestCase):
             if p.poll() is None:p.kill();p.communicate(timeout=3)
 
 class Supervisor(unittest.TestCase):
+    def test_loader_environment_is_refused_before_worker_or_output(self):
+        for name,value in (('LD_LIBRARY_PATH',str(OUT/f'shadow-{VARIANT}')),('LD_PRELOAD',''),('LD_AUDIT','')):
+            with self.subTest(name=name):
+                env=environment();env[name]=value
+                p=subprocess.run([exe('hostile'),'--check'],env=env,capture_output=True,text=True,timeout=5)
+                self.assertEqual(p.returncode,64,p.stdout+p.stderr);self.assertEqual(p.stdout,'')
+    def test_inherited_extra_descriptor_is_refused_before_worker(self):
+        with tempfile.TemporaryFile() as inherited:
+            p=subprocess.run([exe('hostile'),'--check'],env=environment(hostile='block'),
+                             pass_fds=(inherited.fileno(),),capture_output=True,text=True,timeout=5)
+            self.assertEqual(p.returncode,64,p.stdout+p.stderr);self.assertEqual(p.stdout,'')
     def test_complete_worker(self):
         p=invoke('hostile');self.assertEqual(p.returncode,0,p.stdout+p.stderr);self.assertEqual(receipt(p)['final'],'OK')
     def test_hostile_frames_and_worker_exit_never_pass(self):
         for mode in ('crash','incomplete','partial','skip','duplicate','false-success','missing-release',
-                     'flags-regress','descriptor-absent','success-errno','wrong-status','wrong-exit','trailing-byte'):
+                     'flags-regress','descriptor-absent','invented-descriptor','success-errno','wrong-status','wrong-exit','trailing-byte'):
             with self.subTest(mode=mode):
                 p=invoke('hostile',hostile=mode)
                 self.assertEqual(p.returncode,1,p.stdout);r=receipt(p)
@@ -91,6 +108,60 @@ class Supervisor(unittest.TestCase):
             self.assertEqual(p.returncode,64)
         p=subprocess.run([exe('hostile'),'--check'],preexec_fn=lambda:os.close(0),capture_output=True,timeout=5)
         self.assertEqual(p.returncode,64)
+    def test_read_only_pipe_and_datagram_output_refused(self):
+        read_fd,write_fd=os.pipe()
+        try:
+            p=subprocess.run([exe('hostile'),'--check'],stdout=read_fd,stderr=subprocess.PIPE,timeout=5)
+            self.assertEqual(p.returncode,64,p.stderr)
+        finally:
+            os.close(read_fd);os.close(write_fd)
+        receiver,sender=socket.socketpair(socket.AF_UNIX,socket.SOCK_DGRAM)
+        with receiver,sender:
+            p=subprocess.run([exe('hostile'),'--check'],stdout=sender,stderr=subprocess.PIPE,timeout=5)
+            self.assertEqual(p.returncode,64,p.stderr)
+    def test_connected_unix_stream_output_is_supported(self):
+        receiver,sender=socket.socketpair(socket.AF_UNIX,socket.SOCK_STREAM)
+        receiver.settimeout(5)
+        before=fcntl.fcntl(sender.fileno(),fcntl.F_GETFL)
+        p=None
+        try:
+            p=subprocess.Popen([exe('hostile'),'--check'],env=environment(),stdout=sender,stderr=subprocess.PIPE)
+            _,error=p.communicate(timeout=5)
+            self.assertEqual(p.returncode,0,error)
+            self.assertEqual(fcntl.fcntl(sender.fileno(),fcntl.F_GETFL),before)
+            sender.close()
+            output=[]
+            while True:
+                chunk=receiver.recv(4096)
+                if not chunk:break
+                output.append(chunk)
+            self.assertIn(b'final=OK',b''.join(output))
+        finally:
+            if p is not None and p.poll() is None:
+                p.kill();p.communicate(timeout=3)
+            receiver.close();sender.close()
+    def test_pipe_success_preserves_flags(self):
+        read_fd,write_fd=os.pipe()
+        before=fcntl.fcntl(write_fd,fcntl.F_GETFL)
+        try:
+            p=subprocess.run([exe('hostile'),'--check'],env=environment(),stdout=write_fd,stderr=subprocess.PIPE,timeout=5)
+            self.assertEqual(p.returncode,0,p.stderr)
+            self.assertEqual(fcntl.fcntl(write_fd,fcntl.F_GETFL),before)
+        finally:
+            os.close(write_fd)
+        output=os.read(read_fd,4096)
+        os.close(read_fd)
+        self.assertIn(b'final=OK',output)
+    def test_closed_unix_stream_output_failure_preserves_flags(self):
+        receiver,sender=socket.socketpair(socket.AF_UNIX,socket.SOCK_STREAM)
+        receiver.close()
+        before=fcntl.fcntl(sender.fileno(),fcntl.F_GETFL)
+        try:
+            p=subprocess.run([exe('hostile'),'--check'],env=environment(),stdout=sender,stderr=subprocess.PIPE,timeout=5)
+            self.assertNotEqual(p.returncode,0)
+            self.assertEqual(fcntl.fcntl(sender.fileno(),fcntl.F_GETFL),before)
+        finally:
+            sender.close()
     def test_closed_and_backpressured_output_fail(self):
         for fill in (False,True):
             r,w=os.pipe();os.set_blocking(w,False)
@@ -99,11 +170,16 @@ class Supervisor(unittest.TestCase):
                     while True:os.write(w,b'x'*4096)
                 except BlockingIOError:pass
             else:os.close(r)
+            os.set_blocking(w,True)
+            before=fcntl.fcntl(w,fcntl.F_GETFL)
             p=subprocess.Popen([exe('hostile'),'--check'],env=environment(hostile='block'),stdout=w,stderr=subprocess.PIPE)
-            os.close(w)
-            try:p.communicate(timeout=6);self.assertEqual(p.returncode,1)
+            try:
+                p.communicate(timeout=6)
+                self.assertNotEqual(p.returncode,0)
+                self.assertEqual(fcntl.fcntl(w,fcntl.F_GETFL),before)
             finally:
                 if p.poll() is None:p.kill();p.communicate(timeout=3)
+                os.close(w)
                 if fill:os.close(r)
     def test_parent_death_stops_worker(self):
         libc=ctypes.CDLL(None,use_errno=True);old=ctypes.c_int()
@@ -132,7 +208,11 @@ class Supervisor(unittest.TestCase):
 if __name__=='__main__':
     parser=argparse.ArgumentParser();parser.add_argument('--out',type=Path,required=True)
     parser.add_argument('--variant',choices=('normal','sanitize'),required=True)
-    parser.add_argument('--case',choices=('parent-death','protocol'));a=parser.parse_args()
+    parser.add_argument('--case',choices=('parent-death','protocol','inherited-fd','loader-env','transport','output-flags'));a=parser.parse_args()
     OUT=a.out.resolve();VARIANT=a.variant
-    cases={'parent-death':'Supervisor.test_parent_death_stops_worker','protocol':'Supervisor.test_hostile_frames_and_worker_exit_never_pass'}
+    cases={'parent-death':'Supervisor.test_parent_death_stops_worker','protocol':'Supervisor.test_hostile_frames_and_worker_exit_never_pass',
+           'inherited-fd':'Supervisor.test_inherited_extra_descriptor_is_refused_before_worker',
+           'loader-env':'Supervisor.test_loader_environment_is_refused_before_worker_or_output',
+           'transport':'Supervisor.test_read_only_pipe_and_datagram_output_refused',
+           'output-flags':'Supervisor.test_pipe_success_preserves_flags'}
     unittest.main(argv=['endpoint-tests']+([cases[a.case]] if a.case else []),verbosity=2)

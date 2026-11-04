@@ -11,6 +11,10 @@ for variant in normal sanitize; do
     flags+=(-O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer)
   fi
   gcc "${flags[@]}" -fPIC -shared "$src/fake-binder.c" -o "$out/fake-$variant.so"
+  mkdir -p "$out/shadow-$variant"
+  gcc "${flags[@]}" -fPIC -shared -DM19_FAKE_SHADOW "$src/fake-binder.c" -o "$out/shadow-$variant/libbinder_ndk.so"
+  # Reproduce the old basename resolution independently of supervisor admission.
+  gcc "${flags[@]}" -DM19_ENDPOINT_LIBRARY='"libbinder_ndk.so"' "$src/endpoint.c" "$src/test-core.c" -ldl -o "$out/core-basename-$variant"
   for suffix in '' "${symbols[@]}"; do
     if [[ -n $suffix ]]; then
       lib="$out/omit-$suffix-$variant.so"; name="-omit-$suffix"

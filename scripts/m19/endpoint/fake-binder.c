@@ -89,6 +89,10 @@ static void block_if_requested(const char *api_name)
 
 __attribute__((constructor)) static void fake_library_constructor(void)
 {
+#ifdef M19_FAKE_SHADOW
+    /* Offline-only decoy: proves a basename lookup executes redirected code. */
+    _exit(90);
+#endif
     if (is_fault("block-loadctor")) {
         (void)raise(SIGSTOP);
         for (;;) {

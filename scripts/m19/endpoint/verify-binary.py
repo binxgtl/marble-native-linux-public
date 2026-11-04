@@ -5,6 +5,13 @@ from pathlib import Path
 
 SYMBOLS=('AParcel_markSensitive','AServiceManager_checkService','AIBinder_Class_define',
          'AIBinder_associateClass','AIBinder_getClass','AIBinder_Class_getDescriptor','AIBinder_decStrong')
+# Any new dependency is a review event, not implicitly safe because it escaped
+# a blacklist. This permits the supervisor and libc loader machinery only.
+ALLOWED_IMPORTS={'__libc_init','__errno','__stack_chk_fail','environ',
+    'dlopen','dlerror','dlsym','_exit','strcmp','strncmp','fstat','fcntl','signal',
+    'pipe2','getpid','fork','close','read','snprintf','waitpid','poll','kill','prctl',
+    'getppid','setrlimit','open','dup2','write','clock_gettime','opendir','readdir',
+    'dirfd','closedir','getsockopt','getsockname','getpeername','send'}
 FORBIDDEN_IMPORTS={'ioctl','syscall','mount','umount','umount2','execve','execv','system','popen','posix_spawn',
                    'creat','mkdir','unlink','rename','truncate','pwrite','pwrite64','fopen','getenv','dlclose'}
 FORBIDDEN_BYTES=(b'/metadata',b'/data/',b'keymaster_key_blob',b'secdiscardable',b'getSecurityLevel',
@@ -20,16 +27,18 @@ def inspect(binary,readelf):
     dynamic=read('-d');symbols=read('--dyn-syms','--wide');programs=read('-l')
     needed=re.findall(r'\(NEEDED\).*?\[([^\]]+)\]',dynamic)
     assert set(needed)=={'libdl.so','libc.so'},needed
+    assert not re.search(r'\((?:RPATH|RUNPATH)\)',dynamic),'unexpected library search path'
     imports=[]
     for line in symbols.splitlines():
         fields=line.split()
         if len(fields)>=8 and fields[6]=='UND':imports.append(fields[7].split('@')[0])
     assert imports and not FORBIDDEN_IMPORTS.intersection(imports),imports
+    assert not set(imports)-ALLOWED_IMPORTS,('unreviewed imports',sorted(set(imports)-ALLOWED_IMPORTS))
     assert not any(name.startswith(('AIBinder_','AParcel_','AServiceManager_')) for name in imports),imports
     assert {'dlopen','dlsym','fork','waitpid','kill','prctl','clock_gettime','poll','pipe2'}.issubset(imports)
     assert '/system/bin/linker64' in programs
     for name in SYMBOLS:assert name.encode()+b'\0' in raw,name
-    assert b'libbinder_ndk.so\0' in raw
+    assert b'/system/lib64/libbinder_ndk.so\0' in raw
     for value in FORBIDDEN_BYTES:assert value not in raw,value
     assert b'android.system.keystore2.IKeystoreService/default\0' in raw
     assert b'M19_ENDPOINT1 final=' in raw

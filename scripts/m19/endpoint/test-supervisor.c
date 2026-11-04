@@ -23,7 +23,7 @@ int hostile_worker(m19_endpoint_progress send, void *context, struct m19_endpoin
     send(M19_ENDPOINT_STAGE_DESCRIPTOR, 7, context);
     if (!strcmp(mode, "missing-release")) return 0;
     send(M19_ENDPOINT_STAGE_RELEASE, !strcmp(mode, "flags-regress") ? 3 :
-        !strcmp(mode, "descriptor-absent") ? 7 : 15, context);
+        (!strcmp(mode, "descriptor-absent") || !strcmp(mode, "invented-descriptor")) ? 7 : 15, context);
     if (!strcmp(mode, "descriptor-absent")) r->flags = 23;
     if (!strcmp(mode, "success-errno")) r->detail_errno = EPROTO;
     if (!strcmp(mode, "wrong-status")) r->status = 7;

@@ -28,7 +28,9 @@ typedef binder_status_t (*AIBinder_Class_onTransact)(AIBinder *binder,
 #endif
 
 #ifndef M19_ENDPOINT_LIBRARY
-#define M19_ENDPOINT_LIBRARY "libbinder_ndk.so"
+/* Fixed platform path from the Android ABI survey; never search a caller's
+ * library path. The trusted loader/system image remains a launch prerequisite. */
+#define M19_ENDPOINT_LIBRARY "/system/lib64/libbinder_ndk.so"
 #endif
 
 static const char k_instance[] =

@@ -9,8 +9,12 @@ MUTANTS=(
     ('endpoint.c','binder = api.check_service(k_instance);','binder = api.check_service(k_instance);\n    binder = api.check_service(k_instance);','',0),
     ('endpoint.c','api.dec_strong(binder);','(void)binder;','',0),
     ('endpoint.c','result->detail_errno = captured_errno;','result->detail_errno = 0;','associatefalse',5),
-    ('supervisor.c','return next == 5 && p->stage == 4 && p->flags == 31 && !p->detail_errno;','return 1;','protocol',None),
+    ('supervisor.c','return next == 5 && p->stage == 4 && previous_flags == 15 &&\n        p->flags == 31 && !p->detail_errno;','return 1;','protocol',None),
     ('supervisor.c','if (prctl(PR_SET_PDEATHSIG, SIGKILL, 0, 0, 0) || getppid() != parent) _exit(125);','(void)parent;','parent-death',None),
+    ('supervisor.c','!inherited_fds_clean()) return 64;','0) return 64;','inherited-fd',None),
+    ('supervisor.c','if (has_loader_environment()) return 64;','/* removed loader admission */','loader-env',None),
+    ('supervisor.c','type != SOCK_STREAM','0','transport',None),
+    ('supervisor.c','if (!output_is_socket) {','fcntl(1, F_SETFL, fcntl(1, F_GETFL) | O_NONBLOCK);\n    if (!output_is_socket) {','output-flags',None),
 )
 def run(cmd,**kwargs):return subprocess.run(cmd,capture_output=True,timeout=10,**kwargs)
 def main():
