@@ -535,6 +535,18 @@ class Scripts(unittest.TestCase):
 
 
 class Static(unittest.TestCase):
+    def test_bootstrap_loads_exactly_the_added_modules(self):
+        text = (HERE / 'bootstrap').read_text()
+        self.assertIn('/sbin/m19-load-heaps qcom_dma_heaps.ko msm_qmp.ko || hold heaps\n', text)
+        self.assertIn('-eq 102 ] || hold heaps-count', text)
+        self.assertEqual(text.count('m19-load-heaps'), 1)
+
+    def test_heaps_loader_accepts_only_plain_module_names(self):
+        text = (HERE / 'load-heaps.c').read_text()
+        self.assertIn("!strchr(name, '/')", text)
+        self.assertIn('"/lib/modules/%s"', text)
+        self.assertNotRegex(text, r'execv|system\(|popen|O_WRONLY|O_RDWR')
+
     def test_no_t_script_requires_a_test_root(self):
         for name in SCRIPTS:
             if name.startswith('t'):

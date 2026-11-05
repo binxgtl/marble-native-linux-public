@@ -13,8 +13,9 @@ fi
 [ "$($BB wc -l </proc/modules)" -eq 95 ] || hold prefix-count
 /sbin/m15-load-m8-tail || hold m8-tail
 [ "$($BB wc -l </proc/modules)" -eq 100 ] || hold closure-count
-/sbin/m19-load-heaps || hold heaps
-[ "$($BB wc -l </proc/modules)" -eq 101 ] || hold heaps-count
+# msm_qmp drives the qmp-tme mailbox that tmecom, and through it HWKM and ICE, need (R1b).
+/sbin/m19-load-heaps qcom_dma_heaps.ko msm_qmp.ko || hold heaps
+[ "$($BB wc -l </proc/modules)" -eq 102 ] || hold heaps-count
 link=
 i=0
 while [ "$i" -lt 300 ]; do
