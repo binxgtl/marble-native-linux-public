@@ -3,10 +3,20 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/wait.h>
 
 #include "r1.h"
 
 static char paths[24][4096];
+
+/* Only linked into this synthetic test driver; production has no fault seam. */
+pid_t __real_waitpid(pid_t pid, int *status, int options);
+pid_t __wrap_waitpid(pid_t pid, int *status, int options)
+{
+    if (pid < -1 && getenv("M19_FAULT_REAP"))
+        return 0;
+    return __real_waitpid(pid, status, options);
+}
 
 static const char *under(unsigned slot, const char *root, const char *name)
 {
@@ -24,7 +34,7 @@ int main(int argc, char **argv)
     const char *root = argv[1];
     unsigned step_ms = (unsigned)strtoul(argv[4], NULL, 10);
     const struct { const char *name, *file; unsigned flags; } table[7] = {
-        {"T0-extract", "test/t0", M19_STEP_REQUIRED}, {"T1-services", "test/t1", M19_STEP_REQUIRED}, {"T2-unlock", "test/t2", M19_STEP_REQUIRED},
+        {"T0-extract", "test/t0", M19_STEP_REQUIRED}, {"T1-services", "test/t1", M19_STEP_REQUIRED}, {"T2-unlock", "test/t2", M19_STEP_REQUIRED | M19_STEP_OWNED},
         {"T5-mount", "test/t5", M19_STEP_REQUIRED}, {"T6-read", "test/t6", M19_STEP_REQUIRED}, {"T7-overlay", "test/t7", 0},
         {"T8-writes", "test/t8", M19_STEP_REQUIRED | M19_STEP_ALWAYS}};
     for (unsigned i = 0; i < 7; i++)
@@ -49,7 +59,7 @@ int main(int argc, char **argv)
     r.log_ms = 20000;
     r.beat_ms = 50;
     enum m19_run_end end = m19_run_main(&r);
-    printf("{\"end\":%d,\"all_ok\":%d,\"write_warning\":%d,\"link_lost\":%d,\"ran\":[", (int)end, r.all_ok, r.write_warning, r.link_lost);
+    printf("{\"end\":%d,\"all_ok\":%d,\"write_warning\":%d,\"link_lost\":%d,\"ownership_unresolved\":%d,\"ran\":[", (int)end, r.all_ok, r.write_warning, r.link_lost, r.ownership_unresolved);
     for (unsigned i = 0; i < 7; i++)
         printf("%s%d", i ? "," : "", r.ran[i]);
     printf("],\"results\":[");

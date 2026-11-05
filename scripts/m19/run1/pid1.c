@@ -10,7 +10,7 @@
 static const struct m19_step steps[] = {
     {"T0-extract", "/m19/t0-extract", 120000, M19_STEP_REQUIRED},
     {"T1-services", "/m19/t1-start", 150000, M19_STEP_REQUIRED},
-    {"T2-unlock", "/m19/t2-unlock", 90000, M19_STEP_REQUIRED},
+    {"T2-unlock", "/m19/t2-unlock", 90000, M19_STEP_REQUIRED | M19_STEP_OWNED},
     {"T5-mount", "/m19/t5-mount", 30000, M19_STEP_REQUIRED},
     {"T6-read", "/m19/t6-read", 30000, M19_STEP_REQUIRED},
     {"T7-overlay", "/m19/t7-overlay", 30000, 0},

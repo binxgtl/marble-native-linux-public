@@ -15,6 +15,8 @@ MUTANTS = (
     ('r1.c', 'if (run_step(r, i) && (step->flags & M19_STEP_REQUIRED)) {', 'if (run_step(r, i)) {'),
     ('r1.c', 'if (run_step(r, i) && (step->flags & M19_STEP_REQUIRED)) {', 'if (run_step(r, i) && 0) {'),
     ('r1.c', 'rc = status ? -1 : 0;', 'rc = 0;'),
+    ('r1.c', 'if (cancel && kill(-pid, SIGKILL) && errno != ESRCH)', 'if (0 && kill(-pid, SIGKILL) && errno != ESRCH)'),
+    ('r1.c', 'if (r->ownership_unresolved) {', 'if (0) {'),
     ('r1.c', 'if (now >= end) {\n            rc = -ETIMEDOUT;', 'if (0) {\n            rc = -ETIMEDOUT;'),
     ('r1.c', 'if (memmem(log_bytes + kernel, size - kernel,', 'if (memmem(log_bytes, 0,'),
     ('r1.c', 'if (strcmp(r->line, "CONNECTOR_READY"))', 'if (0)'),
@@ -32,7 +34,13 @@ MUTANTS = (
     ('t5-mount', 'ro,noatime,norecovery,inlinecrypt', 'ro,noatime,inlinecrypt'),
     ('t5-mount', '*[!0-9:]*|:*|*:|\'\') fail device-number;;', 'zz) fail device-number;;'),
     ('t6-read', '[ "${hash%% *}" = "$ROOTFS_PROBE_SHA256" ] || fail probe-hash', ':'),
-    ('t6-read', '|| fail os-release', '|| :'),
+    ('t6-read', '"$release" || fail os-release\n', '"$release" || :\n'),
+    ('t6-read', 'release=$root/etc/os-release', 'release=$root/usr/lib/os-release'),
+    ('t6-read', "case \"$R\" in ''|/*) ;; *) fail root;; esac", "[ -n \"$R\" ] || fail root"),
+    ('t6-read', '[ -z "$R" ] || [ ! -L "$R" ] || fail root', ':'),
+    ('t6-read', '../usr/lib/os-release|/usr/lib/os-release) ;;', '*) ;;'),
+    ('t6-read', '[ ! -L "$release" ] && [ -f "$release" ] || fail os-release-target', ':'),
+    ('t6-read', 'safe_dir "$root/etc" || fail os-release-parent', ':'),
     ('t7-overlay', 'upperdir=$base/upper', 'upperdir=$R/m19-data/upper'),
     ('t8-writes', '[ "$writes" = 0 ] && [ "$sectors" = 0 ] && [ "$discards" = 0 ] && [ "$discarded" = 0 ] || fail=1', '[ "$writes" = 0 ] || fail=1'),
     ('t8-writes', 'for name in userdata metadata recovery_a ssd; do', 'for name in metadata; do'),
@@ -58,7 +66,7 @@ def main():
             for item in ('core.h', 'hash.c'):
                 shutil.copy(HERE.parent / 'unlock' / item, root / 'unlock')
             (target / name).write_text(source.replace(old, new), encoding='utf-8')
-            built = subprocess.run(['gcc', '-std=c11', '-O1', '-w', '../unlock/hash.c', 'r1.c', 'test-r1.c', '-o', 'driver'], cwd=target, capture_output=True, timeout=120)
+            built = subprocess.run(['gcc', '-std=c11', '-O1', '-w', '../unlock/hash.c', 'r1.c', 'test-r1.c', '-Wl,--wrap=waitpid', '-o', 'driver'], cwd=target, capture_output=True, timeout=120)
             if built.returncode:
                 sys.exit(f'mutant {number} does not compile')
             result = subprocess.run([sys.executable, 'test.py', '--driver', 'driver'], cwd=target, capture_output=True, timeout=300)

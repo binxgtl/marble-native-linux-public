@@ -6,12 +6,14 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <signal.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/wait.h>
+#include <sys/prctl.h>
 #include <termios.h>
 #include <time.h>
 #include <unistd.h>
@@ -25,6 +27,7 @@
 #define LOG_CAP (2u * 1024u * 1024u)
 #define LOG_CHUNK 256u /* unpaced, M15 Run4 lost whole runs of 1536 bytes */
 #define LINE_MS 5000u
+#define REAP_MS 2000u
 
 static unsigned char log_bytes[LOG_CAP];
 
@@ -258,7 +261,69 @@ static int send_line(const struct m19_run *r, const char *format, ...)
     return send_paced(r, (const unsigned char *)text, (size_t)n, now_ms() + LINE_MS);
 }
 
-/* A child stuck in a driver is left alone: its step fails and the export still runs. */
+/* Only the unlock step owns a private group. T1 deliberately starts persistent
+ * services and is not subject to this cancellation contract. The pinned T2 and
+ * client do not detach/setsid; descendants inherit this group. */
+static pid_t spawn_owned(char *const argv[])
+{
+    if (prctl(PR_SET_CHILD_SUBREAPER, 1))
+        return -1;
+    pid_t parent = getpid(), pid = fork();
+    if (pid == 0) {
+        if (setpgid(0, 0) || prctl(PR_SET_PDEATHSIG, SIGKILL) || getppid() != parent)
+            _exit(126);
+        int fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
+        if (fd < 0 || dup2(fd, 0) < 0 || dup2(2, 1) < 0)
+            _exit(126);
+        close(fd);
+        execv(argv[0], argv);
+        _exit(127);
+    }
+    /* Parent establishes the group before a timeout can send a group signal.
+     * EACCES means exec already ran after the child's successful setpgid. */
+    if (pid > 0 && setpgid(pid, pid) && errno != EACCES) {
+        (void)kill(pid, SIGKILL);
+        /* Keep the PID in the ownership ledger; retirement must still reap it. */
+    }
+    return pid;
+}
+
+/* SIGKILL is local cancellation, not rollback of an in-flight ioctl/TEE call.
+ * Never advance even to T8 if terminal ownership cannot be established. */
+static int retire_owned(pid_t pid, int *status, int *reaped, int cancel)
+{
+    int abnormal = cancel, signal_error = 0;
+    if (cancel && kill(-pid, SIGKILL) && errno != ESRCH)
+        signal_error = 1;
+    unsigned long long end = now_ms() + REAP_MS;
+    for (;;) {
+        if (now_ms() >= end)
+            return -1;
+        int child_status;
+        pid_t got = waitpid(-pid, &child_status, WNOHANG);
+        if (got > 0) {
+            if (got == pid) { *status = child_status; *reaped = 1; }
+            else abnormal = 1;
+            continue;
+        }
+        if (got < 0 && errno != EINTR && errno != ECHILD)
+            return -1;
+        if (got < 0 && errno == ECHILD && *reaped &&
+            kill(-pid, 0) < 0 && errno == ESRCH)
+            return signal_error ? -1 : abnormal;
+        if (!cancel) {
+            /* The leader returned but left descendants behind. This is failure,
+             * never a successful unlock, even if they can now be retired. */
+            cancel = abnormal = 1;
+            if (kill(-pid, SIGKILL) && errno != ESRCH)
+                signal_error = 1;
+        }
+        if (now_ms() >= end)
+            return -1;
+        (void)poll(NULL, 0, 10);
+    }
+}
+
 static int run_step(struct m19_run *r, unsigned index)
 {
     const struct m19_step *step = &r->steps[index];
@@ -268,7 +333,8 @@ static int run_step(struct m19_run *r, unsigned index)
         r->link_lost = 1;
         return -1;
     }
-    pid_t pid = spawn_logged(argv);
+    int owned = !!(step->flags & M19_STEP_OWNED), reaped = 0;
+    pid_t pid = owned ? spawn_owned(argv) : spawn_logged(argv);
     if (pid < 0)
         return -1;
     r->ran[index] = 1;
@@ -277,6 +343,7 @@ static int run_step(struct m19_run *r, unsigned index)
     for (;;) {
         pid_t got = waitpid(pid, &status, WNOHANG);
         if (got == pid) {
+            reaped = 1;
             rc = status ? -1 : 0;
             break;
         }
@@ -295,6 +362,12 @@ static int run_step(struct m19_run *r, unsigned index)
         }
         (void)poll(NULL, 0, 10);
     }
+    if (owned) {
+        int retired = retire_owned(pid, &status, &reaped, !reaped);
+        r->ownership_unresolved = retired < 0;
+        if (retired || !reaped) rc = rc ? rc : -ECHILD;
+        diag(r, "owner step=%s reaped=%d retired=%d remote=UNKNOWN", step->name, reaped, retired);
+    }
     r->results[index] = rc;
     diag(r, "step %s rc=%d status=%d ms=%llu", step->name, rc, status, now_ms() - start);
     if (send_line(r, M19_DEVICE_STEP " %s %s %d %d", step->name, rc ? "FAIL" : "OK", rc, status))
@@ -307,6 +380,10 @@ static void run_steps(struct m19_run *r)
     int stopped = 0;
     r->all_ok = 1;
     for (unsigned i = 0; i < r->step_count && i < M19_STEPS_MAX; i++) {
+        if (r->ownership_unresolved) {
+            r->all_ok = 0;
+            break;
+        }
         const struct m19_step *step = &r->steps[i];
         if ((stopped || r->link_lost) && !(step->flags & M19_STEP_ALWAYS))
             continue;
@@ -381,6 +458,7 @@ enum m19_run_end m19_run_main(struct m19_run *r)
     int status = -1;
     r->tty_fd = r->connector_in = r->connector_out = -1;
     r->all_ok = r->write_warning = r->link_lost = 0;
+    r->ownership_unresolved = 0;
     diag(r, "start");
     char *argv[] = {(char *)r->bootstrap, NULL};
     pid_t pid = spawn_logged(argv);

@@ -8,7 +8,7 @@ for variant in normal sanitize; do
   if [[ $variant == sanitize ]]; then
     flags+=(-O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer)
   fi
-  gcc "${flags[@]}" "$hash" "$src/r1.c" "$src/test-r1.c" -o "$out/test-r1-$variant"
+  gcc "${flags[@]}" "$hash" "$src/r1.c" "$src/test-r1.c" -Wl,--wrap=waitpid -o "$out/test-r1-$variant"
   python3 "$src/test.py" --driver "$out/test-r1-$variant" 2>&1 | tee "$out/run-$variant.txt"
 done
 python3 "$src/mutate.py" | tee "$out/mutants.txt"

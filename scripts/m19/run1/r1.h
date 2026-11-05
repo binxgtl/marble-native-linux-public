@@ -14,6 +14,7 @@
 enum m19_step_flags {
     M19_STEP_REQUIRED = 1, /* a failure stops the steps that follow */
     M19_STEP_ALWAYS = 2,   /* runs even after a failure, so the evidence is complete */
+    M19_STEP_OWNED = 4,    /* isolated local process group; terminal ownership before advancing */
 };
 
 struct m19_step {
@@ -33,6 +34,7 @@ struct m19_run {
     char line[128];
     size_t line_at;
     long adsp_pid;
+    int ownership_unresolved;
 };
 
 enum m19_run_end { M19_END_PASS, M19_END_NOT_PASS, M19_END_LINK, M19_END_BOOTSTRAP };

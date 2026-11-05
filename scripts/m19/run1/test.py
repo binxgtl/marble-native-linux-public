@@ -66,7 +66,7 @@ class Bench:
         path = self.test / 'colours'
         return [line.split()[0] for line in path.read_text().splitlines()] if path.exists() else []
 
-    def run(self, link_ms=3000, step_ms=2000, hello=True, greeting=None):
+    def run(self, link_ms=3000, step_ms=2000, hello=True, greeting=None, fault_reap=False):
         lines, buffer, stop = [], bytearray(), threading.Event()
 
         def reader():
@@ -85,6 +85,8 @@ class Bench:
         thread = threading.Thread(target=reader)
         thread.start()
         env = dict(os.environ, ASAN_OPTIONS='detect_leaks=0')
+        if fault_reap:
+            env['M19_FAULT_REAP'] = '1'
         done = subprocess.run([ARGS.driver, str(self.root), self.path, str(link_ms), str(step_ms)], capture_output=True, text=True, timeout=60, env=env)
         time.sleep(0.1)
         stop.set()
@@ -182,6 +184,38 @@ class Run(unittest.TestCase):
         self.bench.script('t1', '#!/bin/sh\nsleep 0.3\nexit 0\n')
         self.bench.run()
         self.assertTrue(any(line.startswith(b'M19BEAT T1-services') for line in self.bench.step_lines()))
+
+    def test_unlock_timeout_cannot_run_late_local_work(self):
+        # A shell with a child models the real T2 command substitution/chroot.
+        self.bench.script('t2', '#!/bin/sh\ntrap "" TERM\nsleep 1\necho late > "$(dirname "$0")/late-dm"\n')
+        result = self.bench.run(step_ms=100)
+        time.sleep(1.1)
+        self.assertEqual(result['results'][2], -110)
+        self.assertEqual(result['ownership_unresolved'], 0)
+        self.assertFalse((self.bench.test / 'late-dm').exists())
+        self.assertEqual(result['ran'], [1, 1, 1, 0, 0, 0, 1])
+        self.assertIn(b'owner step=T2-unlock reaped=1 retired=1 remote=UNKNOWN', self.bench.log()[1])
+
+    def test_unlock_leader_exit_does_not_abandon_descendant(self):
+        self.bench.script('t2', '#!/bin/sh\n(sleep 1; echo late > "$(dirname "$0")/late-dm") &\nexit 0\n')
+        result = self.bench.run()
+        time.sleep(1.1)
+        self.assertNotEqual(result['results'][2], 0)
+        self.assertFalse((self.bench.test / 'late-dm').exists())
+        self.assertEqual(result['all_ok'], 0)
+
+    def test_unlock_crash_is_reaped_and_not_pass(self):
+        self.bench.script('t2', '#!/bin/sh\nkill -KILL $$\n')
+        result = self.bench.run()
+        self.assertEqual((result['all_ok'], result['ownership_unresolved']), (0, 0))
+        self.assertIn(b'owner step=T2-unlock reaped=1 retired=0 remote=UNKNOWN', self.bench.log()[1])
+
+    def test_unresolved_unlock_reap_blocks_even_final_counters(self):
+        result = self.bench.run(fault_reap=True)
+        self.assertEqual((result['all_ok'], result['ownership_unresolved']), (0, 1))
+        self.assertEqual(result['ran'], [1, 1, 1, 0, 0, 0, 0])
+        self.assertIn(b'M19LOG1', self.bench.wire)
+        self.assertNotEqual(self.bench.colours()[-1], GREEN)
 
     def test_bootstrap_failure_starts_nothing(self):
         self.bench.script('bootstrap', BAD)
@@ -365,17 +399,84 @@ class Scripts(unittest.TestCase):
         (self.root / 'run/m19/unlock.line').write_text('M19_UNLOCK status=OK detail=0 dev=253:0\n')
         self.assertEqual(self.run_script('t5-mount', M19_FAIL='mount').returncode, 1)
 
-    def fake_rootfs(self, version='24.04', probe=b'x'):
+    def fake_rootfs(self, version='24.04', probe=b'x', release='../usr/lib/os-release'):
+        """release is a link target, 'file' for a regular etc/os-release, or None for no etc entry."""
         root = self.root / 'm19-data/ubuntu'
         (root / 'usr/lib/systemd').mkdir(parents=True)
+        (root / 'etc').mkdir()
         (root / 'usr/lib/os-release').write_text(f'NAME="Ubuntu"\nVERSION_ID="{version}"\n')
+        if release == 'file':
+            (root / 'etc/os-release').write_text(f'NAME="Ubuntu"\nVERSION_ID="{version}"\n')
+        elif release:
+            os.symlink(release, root / 'etc/os-release')
         (root / 'usr/lib/systemd/systemd').write_bytes(probe)
         pins = self.root / 'm19/pins'
         pins.write_text(re.sub('ROOTFS_PROBE_SHA256=.*', 'ROOTFS_PROBE_SHA256=' + hashlib.sha256(b'x').hexdigest(), pins.read_text()))
+        return root
 
     def test_t6_passes_on_the_right_bytes(self):
         self.fake_rootfs()
-        self.assertEqual(self.run_script('t6-read').returncode, 0)
+        result = self.run_script('t6-read')
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_t6_accepts_each_accepted_form_of_etc_os_release(self):
+        for release in ('../usr/lib/os-release', '/usr/lib/os-release', 'file'):
+            with self.subTest(release=release):
+                shutil.rmtree(self.root / 'm19-data', ignore_errors=True)
+                self.fake_rootfs(release=release)
+                result = self.run_script('t6-read')
+                self.assertEqual(result.returncode, 0, result.stderr)
+                shutil.rmtree(self.root / 'm19-data')
+
+    def test_t6_requires_etc_os_release_itself(self):
+        self.fake_rootfs(release=None)
+        self.assertIn('os-release', self.run_script('t6-read').stderr)
+        self.assertEqual(self.run_script('t6-read').returncode, 1)
+
+    def test_t6_reads_etc_not_usr_lib_when_both_are_files(self):
+        root = self.fake_rootfs(release='file')
+        (root / 'etc/os-release').write_text('NAME="Ubuntu"\nVERSION_ID="22.04"\n')
+        self.assertEqual(self.run_script('t6-read').returncode, 1)
+
+    def test_t6_refuses_any_other_link(self):
+        for target in ('os-release.real', '../../../etc/os-release', '/etc/os-release', '../usr/lib/os-release/', '/proc/self/root/usr/lib/os-release'):
+            with self.subTest(target=target):
+                shutil.rmtree(self.root / 'm19-data', ignore_errors=True)
+                self.fake_rootfs(release=target)
+                self.assertEqual(self.run_script('t6-read').returncode, 1)
+                shutil.rmtree(self.root / 'm19-data')
+
+    def test_t6_accepts_the_empty_production_root(self):
+        # PID 1 never sets M19_ROOT, so a real run has R empty and must get past the root check.
+        env = {key: value for key, value in os.environ.items() if key != 'M19_ROOT'}
+        env.update(M19_BB=str(self.test / 'bb'), M19_TEST=str(self.test))
+        result = subprocess.run(['sh', str(HERE / 't6-read')], capture_output=True, text=True, env=env, timeout=30)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn('failed: root', result.stderr)
+
+    def test_t6_refuses_a_relative_or_linked_test_root(self):
+        self.fake_rootfs()
+        os.symlink(self.root, self.test / 'root-link')
+        for root in ('relative/root', str(self.test / 'root-link')):
+            with self.subTest(root=root):
+                env = dict(os.environ, M19_ROOT=root, M19_BB=str(self.test / 'bb'), M19_TEST=str(self.test))
+                result = subprocess.run(['sh', str(HERE / 't6-read')], capture_output=True, text=True, env=env, timeout=30)
+                self.assertIn('failed: root', result.stderr)
+
+    def test_t6_refuses_a_link_whose_target_is_a_link(self):
+        root = self.fake_rootfs()
+        (root / 'usr/lib/os-release').unlink()
+        (root / 'usr/lib/os-release.real').write_text('VERSION_ID="24.04"\n')
+        os.symlink('os-release.real', root / 'usr/lib/os-release')
+        self.assertEqual(self.run_script('t6-read').returncode, 1)
+
+    def test_t6_refuses_a_linked_parent(self):
+        root = self.fake_rootfs()
+        shutil.rmtree(root / 'etc')
+        (root / 'etc.real').mkdir()
+        (root / 'etc.real/os-release').write_text('VERSION_ID="24.04"\n')
+        os.symlink('etc.real', root / 'etc')
+        self.assertEqual(self.run_script('t6-read').returncode, 1)
 
     def test_t6_fails_on_wrong_version_or_hash(self):
         self.fake_rootfs(version='22.04')
@@ -434,6 +535,11 @@ class Scripts(unittest.TestCase):
 
 
 class Static(unittest.TestCase):
+    def test_no_t_script_requires_a_test_root(self):
+        for name in SCRIPTS:
+            if name.startswith('t'):
+                self.assertNotRegex((HERE / name).read_text(), r'\[ -n "\$R" \]', name)
+
     def test_pins_match_the_plan(self):
         pins = dict(line.split('=', 1) for line in (HERE / 'pins').read_text().splitlines() if '=' in line and not line.startswith('#'))
         self.assertEqual(pins['RECOVERY_SHA256'], plan.RECOVERY_SHA256)
