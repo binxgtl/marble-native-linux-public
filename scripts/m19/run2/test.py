@@ -852,7 +852,7 @@ esac
 XRANDR = '''#!/bin/sh
 d=$(dirname "$0")
 case "$1" in
- --query) cat "$d/xrandr";;
+ --query) cat "$d/xrandr-query";;
  *) echo verbose;;
 esac
 '''
@@ -870,7 +870,7 @@ class Desktop(ReportBase):
             (self.test / name).write_text(text)
             (self.test / name).chmod(0o755)
         (self.test / 'x-up').write_text('')
-        (self.test / 'xrandr').write_text('DSI-1 connected primary 1080x2400+0+0\n   1080x2400x60vid  60.00 +\n   1080x2400x120vid 120.00*\n')
+        (self.test / 'xrandr-query').write_text('DSI-1 connected primary 1080x2400+0+0\n   1080x2400x60vid  60.00 +\n   1080x2400x120vid 120.00*\n')
         (self.test / 'xinput-names').write_text('Virtual core pointer\ngoodix_ts\n')
         (self.test / 'xi2').write_text('EVENT type 22 (RawTouchBegin)\nEVENT type 18 (TouchBegin)\n')
         (self.root / 'interrupts').write_text(INTERRUPTS.format(290, 0))
@@ -913,7 +913,7 @@ class Desktop(ReportBase):
             self.assertIn(text, log)
 
     def test_sixty_hertz_fails_the_mode_and_vblank_checks(self):
-        (self.test / 'xrandr').write_text('DSI-1 connected\n   1080x2400x60vid  60.00*+\n   1080x2400x120vid 120.00\n')
+        (self.test / 'xrandr-query').write_text('DSI-1 connected\n   1080x2400x60vid  60.00*+\n   1080x2400x120vid 120.00\n')
         fields, log, _ = self.parse(self.run_desktop(hz='60')[0])
         d = self.desktop(log)
         self.assertEqual((fields[3], d['mode'], d['mode_ok'], d['vblank_ok']), ('0', '1080x2400x60vid', '0', '0'))
