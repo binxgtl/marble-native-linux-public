@@ -1,0 +1,188 @@
+/* The real handoff.c and report.c on synthetic trees. Never staged into an image.
+ * mount, umount2, chroot, chdir, execve and stat are wrapped at link time: the hand-off is
+ * recorded, never performed, and no real process is ever signalled. */
+#define _GNU_SOURCE
+#include <errno.h>
+#include <fcntl.h>
+#include <signal.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+#include "r2.h"
+
+static int record_fd = -1;
+static char proc_dir[4096], newroot_dir[4096];
+
+__attribute__((format(printf, 1, 2)))
+static void record(const char *format, ...)
+{
+    char text[1024];
+    va_list arguments;
+    va_start(arguments, format);
+    int n = vsnprintf(text, sizeof(text) - 1, format, arguments);
+    va_end(arguments);
+    if (n < 0 || record_fd < 0)
+        return;
+    if ((size_t)n > sizeof(text) - 2)
+        n = (int)sizeof(text) - 2;
+    text[n++] = '\n';
+    ssize_t put = write(record_fd, text, (size_t)n);
+    (void)put;
+}
+
+static int failing(const char *name)
+{
+    const char *fail = getenv("M19_FAIL");
+    return fail && !strcmp(fail, name);
+}
+
+int __real_stat(const char *path, struct stat *st);
+int __wrap_umount2(const char *target, int flags)
+{
+    record("umount2 %s %d", target, flags);
+    if (failing("umount2")) {
+        errno = EBUSY;
+        return -1;
+    }
+    return 0;
+}
+
+int __wrap_mount(const char *source, const char *target, const char *type, unsigned long flags, const void *data)
+{
+    (void)data;
+    record("mount %s %s %s %lu", source, target, type ? type : "-", flags);
+    if (failing("mount")) {
+        errno = EINVAL;
+        return -1;
+    }
+    return 0;
+}
+
+int __wrap_chroot(const char *path)
+{
+    record("chroot %s", path);
+    if (failing("chroot")) {
+        errno = EPERM;
+        return -1;
+    }
+    return 0;
+}
+
+int __wrap_chdir(const char *path)
+{
+    record("chdir %s", path);
+    return 0;
+}
+
+int __wrap_stat(const char *path, struct stat *st)
+{
+    int rc = __real_stat(path, st);
+    if (rc)
+        return rc;
+    char parent[4200];
+    snprintf(parent, sizeof(parent), "%s/..", newroot_dir);
+    /* The new root is a mount point unless the test says otherwise. */
+    if (!strcmp(path, newroot_dir))
+        st->st_dev = failing("newroot") ? 2 : 1;
+    else if (!strcmp(path, parent))
+        st->st_dev = 2;
+    return rc;
+}
+
+int __wrap_execve(const char *path, char *const argv[], char *const envp[])
+{
+    record("execve %s", path);
+    for (unsigned i = 0; argv[i]; i++)
+        record("argv %s", argv[i]);
+    for (unsigned i = 0; envp[i]; i++)
+        record("envp %s", envp[i]);
+    if (failing("execve")) {
+        errno = ENOENT;
+        return -1;
+    }
+    record("exec-done");
+    _exit(0);
+}
+
+/* Stands in for kill(2). A "killed" synthetic process disappears from the fake /proc. */
+static int fake_signal(pid_t pid, int number)
+{
+    record("signal %d %d", (int)pid, number);
+    if (!failing("survivor")) {
+        char path[4200];
+        snprintf(path, sizeof(path), "%s/%d/stat", proc_dir, (int)pid);
+        unlink(path);
+        snprintf(path, sizeof(path), "%s/%d", proc_dir, (int)pid);
+        rmdir(path);
+    }
+    return 0;
+}
+
+static int kthread_mode(void)
+{
+    char line[2048];
+    while (fgets(line, sizeof(line), stdin))
+        printf("%d\n", m19_stat_is_kthread(line));
+    return 0;
+}
+
+static int sweep_mode(char **argv)
+{
+    snprintf(proc_dir, sizeof(proc_dir), "%s", argv[2]);
+    record_fd = 1;
+    struct m19_handoff h = {.proc = proc_dir, .self = (pid_t)atoi(argv[3]), .signal = fake_signal};
+    int count = m19_sweep(&h, atoi(argv[4]));
+    printf("count %d\n", count);
+    return 0;
+}
+
+static int handoff_mode(char **argv)
+{
+    /* proc newroot android kmsg tty record */
+    snprintf(proc_dir, sizeof(proc_dir), "%s", argv[2]);
+    snprintf(newroot_dir, sizeof(newroot_dir), "%s", argv[3]);
+    record_fd = open(argv[7], O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+    int tty = m19_wire_open(argv[6]);
+    if (record_fd < 0 || tty < 0)
+        return 2;
+    struct m19_handoff h = {.proc = proc_dir, .kmsg = argv[5], .android = argv[4], .newroot = newroot_dir, .init = "/usr/lib/systemd/systemd",
+                            .self = getpid(), .settle_ms = 300, .poll_ms = 5, .pace_ms = 1, .signal = fake_signal};
+    int moved = -1;
+    int rc = m19_handoff(tty, &h, &moved);
+    record("returned %d moved %d", rc, moved);
+    return 0;
+}
+
+static int report_mode(char **argv)
+{
+    static char paths[12][4200];
+    const char *root = argv[2];
+    const char *names[] = {"test/kmsg", "proc1-exe", "block", "mountinfo", "test/systemctl", "test/journalctl", "test/analyze", "test/display"};
+    for (unsigned i = 0; i < sizeof(names) / sizeof(names[0]); i++)
+        snprintf(paths[i], sizeof(paths[i]), "%s/%s", root, names[i]);
+    struct m19_report c = {.tty = argv[3], .kmsg = paths[0], .proc1_exe = paths[1], .block = paths[2], .mountinfo = paths[3],
+                           .systemctl = paths[4], .journalctl = paths[5], .analyze = paths[6], .display = paths[7],
+                           .expected_init = "/usr/lib/systemd/systemd", .settle_ms = (unsigned)strtoul(argv[4], NULL, 10), .poll_ms = 5,
+                           .beat_ms = 40, .pace_ms = 1, .log_ms = 20000, .command_ms = (unsigned)strtoul(argv[5], NULL, 10),
+                           .final_ms = 1, .tty_wait_ms = 200};
+    return m19_report_main(&c);
+}
+
+int main(int argc, char **argv)
+{
+    setvbuf(stdout, NULL, _IOLBF, 0);
+    signal(SIGPIPE, SIG_IGN);
+    if (argc == 2 && !strcmp(argv[1], "kthread"))
+        return kthread_mode();
+    if (argc == 5 && !strcmp(argv[1], "sweep"))
+        return sweep_mode(argv);
+    if (argc == 8 && !strcmp(argv[1], "handoff"))
+        return handoff_mode(argv);
+    if (argc == 6 && !strcmp(argv[1], "report"))
+        return report_mode(argv);
+    return 64;
+}
