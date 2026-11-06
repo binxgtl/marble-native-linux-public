@@ -94,6 +94,14 @@ MUTANTS = (
     ('report.c', 'int guard_ok = guard_active && !tripped;', 'int guard_ok = 1;', ('Desktop',)),
     ('r3plan.py', 'm19-r3-guard.service marble-xorg.service', 'marble-xorg.service', ('Plan3',)),
     ('pid3.c', '.battery_limit = 420', '.battery_limit = 4200', ('Static',)),
+    ('r3plan.py', ', \'    Option "Monitor-Virtual-1" "writeback"\'', '', ('Plan3',)),
+    ('r3plan.py', ', \'    Option "Ignore" "true"\'', '', ('Plan3',)),
+    ('t9-desktop', ' printf off >"$R/sys/class/drm/$writeback/status" || fail writeback-off', ' :', ('DesktopScript',)),
+    ('t9-desktop', ' [ "$($BB cat "$R/sys/class/drm/$writeback/status")" = disconnected ] || fail writeback-still-connected', ' :', ('DesktopScript',)),
+    ('t9-desktop', 'case "$writeback" in card0-Virtual-[0-9]) ;; *) fail "writeback name $writeback";; esac', ':', ('DesktopScript',)),
+    ('r3plan.py', ', \'    Option "NoTrapSignals" "true"\'', '', ('Plan3',)),
+    ('r3plan.py', "'LimitCORE=0', ", '', ('Plan3',)),
+    ('r3plan.py', "              'sysctl.d/m19-r3.conf': SYSCTL,\n", '', ('Plan3',)),
 )
 
 

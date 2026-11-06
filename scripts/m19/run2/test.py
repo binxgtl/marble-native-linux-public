@@ -387,6 +387,9 @@ case "$command" in
    -t) if [ "$2" = tmpfs ]; then eval "last=\\${$#}"; find "$last" -mindepth 1 -delete; fi;;
   esac
   exit 0;;
+ cat)
+  case "$1" in */card0-Virtual-1/status) if [ "$(cat "$1")" = off ] && [ -z "${M19_WB_STUCK:-}" ]; then echo disconnected; exit 0; fi;; esac
+  exec cat "$@";;
  mknod)
   case "${M19_FAIL:-}" in mknod) exit 1;; esac
   : > "$3"; exit 0;;
@@ -689,8 +692,11 @@ class Static(unittest.TestCase):
     def test_t9_desktop_writes_nothing_outside_the_new_root(self):
         text = (HERE / 't9-desktop').read_text()
         self.assertNotRegex(text, r'\b(reboot|poweroff|mkfs|fsck|blkdiscard|fstrim|remount|setrw)\b|\bof=/dev')
+        # The one write outside the new root: the writeback connector's sysfs status, set to off.
+        sysfs = ' printf off >"$R/sys/class/drm/$writeback/status" || fail writeback-off'
+        self.assertEqual([line for line in text.splitlines() if '/sys/' in line and '>"' in line], [sysfs])
         for line in text.splitlines():
-            if re.search(r'\$BB (cp|mkdir|mknod|chmod)\b|>"', line):
+            if line != sysfs and re.search(r'\$BB (cp|mkdir|mknod|chmod)\b|>"', line):
                 self.assertRegex(line, r'"\$(new|home)[/"]', line)
         for word in ('.ssh', '.gnupg', '.gemini', 'shadow', 'spblob', '/data/media'):
             self.assertNotIn(word, text)
@@ -718,14 +724,19 @@ class Plan3(unittest.TestCase):
         for mode, conf in ((r3plan.MODE_120, r3plan.render()['m19/r3/xorg.conf']), (r3plan.MODE_60, r3plan.render()['m19/r3/xorg-60.conf'])):
             text = conf.decode()
             self.assertIn(f'Option "PreferredMode" "{mode}"', text)
+            self.assertIn('Section "Monitor"\n    Identifier "writeback"\n    Option "Ignore" "true"\nEndSection', text)
+            self.assertNotIn('ZaphodHeads', text)
             for option in ('"Driver "modesetting"', '"kmsdev" "/dev/dri/card0"', '"AccelMethod" "none"', '"BlankTime" "0"', '"OffTime" "0"',
-                           '"Monitor-DSI-1" "marble-panel"'):
+                           '"Monitor-DSI-1" "marble-panel"', '"Monitor-Virtual-1" "writeback"', '"NoTrapSignals" "true"'):
                 self.assertIn(option.lstrip('"'), text)
         self.assertEqual(r3plan.MODE_120, '1080x2400x120vid')
 
     def test_units(self):
         self.assertIn('OnFailure=marble-xorg-fallback.service\n', r3plan.XORG)
         self.assertNotIn('OnFailure', r3plan.XORG_60)
+        for text in (r3plan.XORG, r3plan.XORG_60):
+            self.assertIn('LimitCORE=0\n', text)
+        self.assertEqual(r3plan.FILES['sysctl.d/m19-r3.conf'], 'debug.exception-trace = 1\n')
         for text, conf in ((r3plan.XORG, '/run/m19/xorg.conf'), (r3plan.XORG_60, '/run/m19/xorg-60.conf')):
             self.assertIn(f'-config {conf} ', text)
             for flag in ('-nolisten tcp', '-noreset', '-novtswitch', '-s 0 -dpms'):
@@ -775,6 +786,9 @@ class DesktopScript(unittest.TestCase):
         panel.mkdir(parents=True)
         (panel / 'status').write_text('connected\n')
         (panel / 'modes').write_text('1080x2400x60vid\n1080x2400x120vid\n1080x2400x90vid\n1080x2400x30vid\n')
+        writeback = self.root / 'sys/class/drm/card0-Virtual-1'
+        writeback.mkdir(parents=True)
+        (writeback / 'status').write_text('connected\n')
         for name, device, number in (('event0', 'pmic_pwrkey', '13:64'), ('event4', 'gpio-keys', '13:68'), ('event7', 'goodix_ts', '13:71')):
             entry = self.root / 'sys/class/input' / name
             (entry / 'device').mkdir(parents=True)
@@ -814,10 +828,23 @@ class DesktopScript(unittest.TestCase):
         self.assertEqual(oct((self.new / 'run/m19/xdg').stat().st_mode & 0o777), '0o700')
         self.assertIn('M19 T9 desktop: touch=goodix_ts node=event7', result.stderr)
         self.assertIn('panel modes 1080x2400x60vid 1080x2400x120vid', result.stderr)
+        self.assertEqual((self.root / 'sys/class/drm/card0-Virtual-1/status').read_text(), 'off')
+        self.assertIn(' writeback=off\n', result.stderr)
 
     def test_a_missing_mode_stops(self):
         (self.root / 'sys/class/drm/card0-DSI-1/modes').write_text('1080x2400x60vid\n1080x2400x90vid\n')
         self.assertFails('panel mode 1080x2400x120vid')
+
+    def test_a_writeback_that_stays_connected_stops(self):
+        result = self.run_script(M19_WB_STUCK='1')
+        self.assertIn('M19 T9 desktop failed: writeback-still-connected\n', result.stderr)
+        self.assertFalse((self.new / 'run/m19/xorg.conf').exists())
+
+    def test_no_writeback_connector_is_recorded(self):
+        shutil.rmtree(self.root / 'sys/class/drm/card0-Virtual-1')
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(' writeback=absent\n', result.stderr)
 
     def test_a_disconnected_panel_stops(self):
         (self.root / 'sys/class/drm/card0-DSI-1/status').write_text('disconnected\n')
@@ -844,6 +871,7 @@ class DesktopScript(unittest.TestCase):
 
     def test_bad_plan_lines_stop(self):
         for name, text, reason in (('hidden', '../x\n', 'hidden name ../x'), ('touch', 'goodix ts\n', 'touch name goodix ts'),
+                                   ('writeback', 'card0-DSI-1\n', 'writeback name card0-DSI-1'),
                                    ('modes', '1080x2400x120vid;\n', 'mode name 1080x2400x120vid;')):
             with self.subTest(name=name):
                 self.setUp()

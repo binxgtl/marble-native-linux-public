@@ -28,6 +28,17 @@ while read -r mode; do
  modes=$((modes+1))
 done <"$plan/modes"
 [ "$modes" -eq 2 ] || fail mode-count
+# R3a: Xorg died with the writeback connector enabled as a second output. Forcing it off is a
+# display state in the kernel, gone at the next boot; nothing is written to storage.
+writeback=$($BB cat "$plan/writeback") || fail writeback-name
+case "$writeback" in card0-Virtual-[0-9]) ;; *) fail "writeback name $writeback";; esac
+if [ -e "$R/sys/class/drm/$writeback/status" ]; then
+ printf off >"$R/sys/class/drm/$writeback/status" || fail writeback-off
+ [ "$($BB cat "$R/sys/class/drm/$writeback/status")" = disconnected ] || fail writeback-still-connected
+ wb=off
+else
+ wb=absent
+fi
 $BB cp "$plan/xorg.conf" "$new/run/m19/xorg.conf" || fail xorg-conf
 $BB cp "$plan/xorg-60.conf" "$new/run/m19/xorg-60.conf" || fail xorg-conf
 offered=$($BB tr '\n' ' ' <"$panel/modes") || fail panel-modes
@@ -84,6 +95,6 @@ for tool in usr/lib/xorg/Xorg usr/lib/xorg/modules/drivers/modesetting_drv.so us
  usr/bin/xinput usr/bin/ps; do
  [ -e "$new/$tool" ] || fail "missing $tool"
 done
-printf 'M19 T9 desktop: panel modes %s\n' "$offered" >&2
+printf 'M19 T9 desktop: panel modes %s writeback=%s\n' "$offered" "$wb" >&2
 printf 'M19 T9 desktop: touch=%s node=%s xfce=%sK pruned=%s hidden=%s\n' "$touch" "$node" "$kb" "$pruned" "$hidden" >&2
 exit 0

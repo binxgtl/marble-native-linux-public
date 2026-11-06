@@ -32,12 +32,18 @@ MASKED = r2plan.MASKED + POWER_MASKED
 def xorg_conf(mode):
     assert mode in MODES
     return '\n'.join((
+        # NoTrapSignals: a crash reaches the kernel, which logs the faulting address and library (R3a had no backtrace).
         'Section "ServerFlags"', '    Option "AutoAddGPU" "false"', '    Option "DontVTSwitch" "true"', '    Option "BlankTime" "0"',
-        '    Option "StandbyTime" "0"', '    Option "SuspendTime" "0"', '    Option "OffTime" "0"', 'EndSection', '',
+        '    Option "StandbyTime" "0"', '    Option "SuspendTime" "0"', '    Option "OffTime" "0"', '    Option "NoTrapSignals" "true"',
+        'EndSection', '',
         'Section "Device"', '    Identifier "marble-kms"', '    Driver "modesetting"', '    Option "kmsdev" "/dev/dri/card0"',
         '    Option "AccelMethod" "none"', '    Option "PageFlip" "false"', '    Option "SWcursor" "true"',
-        '    Option "Monitor-DSI-1" "marble-panel"', 'EndSection', '',
-        'Section "Monitor"', '    Identifier "marble-panel"', f'    Option "PreferredMode" "{mode}"', 'EndSection', ''))
+        # R3a crashed with SDE's writeback connector Virtual-1 enabled as a second output. T9-desktop
+        # forces it off; Xorg also ignores it. ZaphodHeads would not do: modesetting reads it only for
+        # a shared, multi-screen entity.
+        '    Option "Monitor-DSI-1" "marble-panel"', '    Option "Monitor-Virtual-1" "writeback"', 'EndSection', '',
+        'Section "Monitor"', '    Identifier "marble-panel"', f'    Option "PreferredMode" "{mode}"', 'EndSection', '',
+        'Section "Monitor"', '    Identifier "writeback"', '    Option "Ignore" "true"', 'EndSection', ''))
 
 
 def xorg_unit(description, config, log, fallback):
@@ -46,7 +52,7 @@ def xorg_unit(description, config, log, fallback):
         lines.append('OnFailure=marble-xorg-fallback.service')
     lines += ['', '[Service]', 'Type=simple',
               f'ExecStart=/usr/lib/xorg/Xorg :0 -config {config} -logfile {log} -nolisten tcp -noreset -novtswitch -s 0 -dpms',
-              'Restart=no', '']
+              'LimitCORE=0', 'Restart=no', '']
     return '\n'.join(lines)
 
 
@@ -94,10 +100,18 @@ StandardError=journal
 '''
 
 FILES = {name: text for name, text in r2plan.FILES.items() if not name.startswith('systemd/system/m19-r2')}
+# arm64 logs an unhandled fault with its address and library only when exception tracing is on.
+SYSCTL = 'debug.exception-trace = 1\n'
+
 FILES.update({'systemd/system/m19-r3.target': TARGET, 'systemd/system/m19-r3-report.service': REPORT,
+              'sysctl.d/m19-r3.conf': SYSCTL,
               'systemd/system/m19-r3-guard.service': GUARD,
               'systemd/system/marble-xorg.service': XORG, 'systemd/system/marble-xorg-fallback.service': XORG_60,
               'systemd/system/marble-xfce.service': XFCE})
+
+
+# SDE's writeback connector, forced off by T9-desktop through its sysfs status.
+WRITEBACK = 'card0-Virtual-1'
 
 
 def render():
@@ -110,7 +124,7 @@ def render():
     out.update({f'm19/r2/etc/{name}': text.encode() for name, text in FILES.items()})
     out.update({'m19/r3/xorg.conf': xorg_conf(MODE_120).encode(), 'm19/r3/xorg-60.conf': xorg_conf(MODE_60).encode(),
                 'm19/r3/modes': ''.join(f'{mode}\n' for mode in MODES).encode(), 'm19/r3/touch': f'{TOUCH}\n'.encode(),
-                'm19/r3/hidden': ''.join(f'{name}\n' for name in HIDDEN).encode()})
+                'm19/r3/hidden': ''.join(f'{name}\n' for name in HIDDEN).encode(), 'm19/r3/writeback': f'{WRITEBACK}\n'.encode()})
     return out
 
 
