@@ -72,6 +72,8 @@ MUTANTS = (
     ('t9-desktop', 'safe_dir "$src/root" && safe_dir "$src/root/.config" && safe_dir "$src/root/.config/xfce4" || fail xfce-settings', ':', ('DesktopScript',)),
     ('t9-desktop', '$BB chmod 700 "$home" || fail home', ':', ('DesktopScript',)),
     ('t9-desktop', 'Hidden=true', 'Hidden=false', ('DesktopScript',)),
+    ('t9-desktop', '  $BB rm -f "$path" || fail "prune $path"', '  :', ('DesktopScript',)),
+    ('t9-desktop', 'for kind in l p s c b; do', 'for kind in p s c b; do', ('DesktopScript',)),
     ('t9-desktop', 'case "$touch" in \'\'|*[!a-z0-9_]*) fail "touch name $touch";; esac', ':', ('DesktopScript',)),
     ('t9-desktop', 'safe_dir "$new/run/m19" && safe_dir "$new/dev" || fail newroot', ':', ('DesktopScript',)),
     ('r3plan.py', "'light-locker', ", '', ('Plan3',)),
@@ -80,6 +82,18 @@ MUTANTS = (
     ('r3plan.py', 'TimeoutStartSec=150\n', '', ('Plan3',)),
     ('r3plan.py', 'i=$$((i+1)); [ "$$i" -lt 600 ]', 'i=$((i+1)); [ "$i" -lt 600 ]', ('Plan3',)),
     ('pid3.c', '{"T9-desktop", "/m19/t9-desktop", 60000, M19_STEP_REQUIRED},', '', ('Static',)),
+    ('report.c', 'if (battery != LONG_MIN && battery >= g->battery_limit)', 'if (0)', ('Guard',)),
+    ('report.c', 'else if (zone != LONG_MIN && zone >= g->zone_limit)', 'else if (0)', ('Guard',)),
+    ('report.c', 'else if (busy_since && now - busy_since >= g->busy_ms)', 'else if (0)', ('Guard',)),
+    ('report.c', 'else if (now - start >= g->session_ms)', 'else if (0)', ('Guard',)),
+    ('report.c', 'int status = capture(stop, out, sizeof(out), &taken, g->command_ms);', 'int status = 0;', ('Guard',)),
+    ('report.c', 'if (status)\n                (void)capture(kill_units', 'if (0)\n                (void)capture(kill_units', ('Guard',)),
+    ('report.c', 'execv(g->display, argv);\n            return 70;', 'return 70;', ('Guard',)),
+    ('report.c', '*busy = sum - field[3] - field[4]; /* idle and iowait */', '*busy = 0;', ('Guard',)),
+    ('report.c', 'if (read_long(path, &value) || value <= -40000 || value >= 200000)', 'if (read_long(path, &value))', ('Guard',)),
+    ('report.c', 'int guard_ok = guard_active && !tripped;', 'int guard_ok = 1;', ('Desktop',)),
+    ('r3plan.py', 'm19-r3-guard.service marble-xorg.service', 'marble-xorg.service', ('Plan3',)),
+    ('pid3.c', '.battery_limit = 420', '.battery_limit = 4200', ('Static',)),
 )
 
 

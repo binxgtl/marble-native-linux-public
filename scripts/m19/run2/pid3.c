@@ -41,6 +41,17 @@ static const struct m19_report report = {
     .xdpyinfo = "/usr/bin/xdpyinfo", .xrandr = "/usr/bin/xrandr", .xinput = "/usr/bin/xinput", .ps = "/usr/bin/ps", .proc = "/proc",
     .interrupts = "/proc/interrupts", .card = "/dev/dri/card0", .touch_name = "goodix_ts",
     .xorg_logs = {"/var/log/Xorg.0.log", "/var/log/Xorg.60.log"},
+    .guard_unit = "m19-r3-guard.service", .guard_marker = "/run/m19/guard-tripped",
+    .battery_temp = "/sys/class/power_supply/battery/temp", .thermal = "/sys/class/thermal",
+};
+
+/* Battery 42.0 C, any thermal zone 80 C, CPU 90 % busy for a minute, or fifteen minutes in all. */
+static const struct m19_guard guard = {
+    .battery_temp = "/sys/class/power_supply/battery/temp", .thermal = "/sys/class/thermal", .stat = "/proc/stat", .kmsg = "/dev/kmsg",
+    .systemctl = "/usr/bin/systemctl", .display = "/run/m19/m16-display", .marker = "/run/m19/guard-tripped",
+    .units = {"marble-xfce.service", "marble-xorg.service", "marble-xorg-fallback.service"},
+    .period_ms = 2000, .note_ms = 30000, .busy_limit = 90, .busy_ms = 60000, .session_ms = 900000, .run_ms = 0, .command_ms = 30000,
+    .final_ms = 600000, .battery_limit = 420, .zone_limit = 80000,
 };
 
 static void hold(void)
@@ -57,6 +68,8 @@ int main(int argc, char **argv)
 {
     if (argc == 2 && !strcmp(argv[1], "report"))
         return getpid() == 1 ? 64 : m19_report_main(&report);
+    if (argc == 2 && !strcmp(argv[1], "guard"))
+        return getpid() == 1 ? 64 : m19_guard_main(&guard);
     if (getpid() != 1 || argc != 1)
         return 64;
     signal(SIGPIPE, SIG_IGN);

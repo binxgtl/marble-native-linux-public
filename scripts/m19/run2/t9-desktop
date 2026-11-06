@@ -59,6 +59,16 @@ home=$new/run/m19/session
 $BB mkdir -p "$home/.config/autostart" || fail home
 $BB chmod 700 "$home" || fail home
 $BB cp -a "$src/root/.config/xfce4" "$home/.config/xfce4" || fail xfce-copy
+# cp -a keeps links as links, and an application would still follow one out of the copy. Only
+# regular files and directories stay; the count goes to the log.
+pruned=0
+for kind in l p s c b; do
+ for path in $($BB find "$home/.config/xfce4" -type "$kind"); do
+  $BB rm -f "$path" || fail "prune $path"
+  pruned=$((pruned+1))
+ done
+done
+[ -z "$($BB find "$home/.config/xfce4" ! -type f ! -type d)" ] || fail xfce-not-plain
 hidden=0
 while read -r item; do
  case "$item" in ''|'#'*) continue;; esac
@@ -75,5 +85,5 @@ for tool in usr/lib/xorg/Xorg usr/lib/xorg/modules/drivers/modesetting_drv.so us
  [ -e "$new/$tool" ] || fail "missing $tool"
 done
 printf 'M19 T9 desktop: panel modes %s\n' "$offered" >&2
-printf 'M19 T9 desktop: touch=%s node=%s xfce=%sK hidden=%s\n' "$touch" "$node" "$kb" "$hidden" >&2
+printf 'M19 T9 desktop: touch=%s node=%s xfce=%sK pruned=%s hidden=%s\n' "$touch" "$node" "$kb" "$pruned" "$hidden" >&2
 exit 0

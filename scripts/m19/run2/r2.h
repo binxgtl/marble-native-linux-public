@@ -41,7 +41,20 @@ struct m19_report {
     unsigned desktop, x_wait_ms, session_wait_ms, touch_ms;
     double want_hz;
     const char *xdpyinfo, *xrandr, *xinput, *ps, *proc, *interrupts, *card, *touch_name, *xorg_logs[2];
+    const char *guard_unit, *guard_marker, *battery_temp, *thermal;
 };
+
+/* R3's guard, a service of its own beside the desktop. It stops the desktop units and paints YELLOW
+ * when the battery or any thermal zone runs hot, when the CPU stays busy, or when the session runs
+ * long. It reads sensors and /proc only; its one action is stopping the desktop. */
+struct m19_guard {
+    const char *battery_temp, *thermal, *stat, *kmsg, *systemctl, *display, *marker, *units[3];
+    unsigned period_ms, note_ms, busy_limit, busy_ms, session_ms, run_ms, command_ms, final_ms;
+    long battery_limit; /* tenths of a degree, as power_supply reports */
+    long zone_limit;    /* thousandths of a degree, as thermal zones report */
+};
+
+int m19_guard_main(const struct m19_guard *g);
 
 /* Rate of vertical blanks on the first CRTC that answers, from the kernel's own timestamps. */
 int m19_vblank_rate(const char *card, double *hz);

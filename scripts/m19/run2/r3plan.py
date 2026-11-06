@@ -69,15 +69,33 @@ Restart=no
 TARGET = '''[Unit]
 Description=M19 R3: XFCE on the read-only Ubuntu root
 Requires=basic.target
-Wants=multi-user.target m19-r3-report.service marble-xorg.service marble-xfce.service
+Wants=multi-user.target m19-r3-report.service m19-r3-guard.service marble-xorg.service marble-xfce.service
 After=basic.target multi-user.target
 AllowIsolate=yes
 '''
 
 REPORT = r2plan.REPORT.replace('M19 R2 evidence over USB', 'M19 R3 evidence over USB')
 
+# Its own service, started with the first units and restarted if it dies. It stops the desktop
+# units and paints YELLOW on a hot battery or zone, a busy CPU or a long session.
+GUARD = '''[Unit]
+Description=M19 R3 thermal, load and time guard for the desktop
+DefaultDependencies=no
+IgnoreOnIsolate=yes
+
+[Service]
+Type=exec
+ExecStart=/run/m19/m19-report guard
+Restart=on-failure
+RestartSec=1
+StandardInput=null
+StandardOutput=journal
+StandardError=journal
+'''
+
 FILES = {name: text for name, text in r2plan.FILES.items() if not name.startswith('systemd/system/m19-r2')}
 FILES.update({'systemd/system/m19-r3.target': TARGET, 'systemd/system/m19-r3-report.service': REPORT,
+              'systemd/system/m19-r3-guard.service': GUARD,
               'systemd/system/marble-xorg.service': XORG, 'systemd/system/marble-xorg-fallback.service': XORG_60,
               'systemd/system/marble-xfce.service': XFCE})
 

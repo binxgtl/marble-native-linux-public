@@ -7,6 +7,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdarg.h>
@@ -539,6 +540,159 @@ static void desktop_sections(const struct m19_report *c)
     (void)add_file(c->interrupts, SECTION_CAP);
 }
 
+static int read_long(const char *path, long *value)
+{
+    char text[64], *end;
+    if (read_small(path, text, sizeof(text)))
+        return -1;
+    errno = 0;
+    long parsed = strtol(text, &end, 10);
+    if (end == text || errno)
+        return -1;
+    *value = parsed;
+    return 0;
+}
+
+/* The hottest thermal zone in thousandths of a degree, and how many zones answered. */
+static long hottest_zone(const char *thermal, int *zones)
+{
+    long hottest = LONG_MIN;
+    *zones = 0;
+    DIR *directory = opendir(thermal);
+    if (!directory)
+        return hottest;
+    struct dirent *entry;
+    while ((entry = readdir(directory))) {
+        if (strncmp(entry->d_name, "thermal_zone", 12))
+            continue;
+        char path[512];
+        long value;
+        snprintf(path, sizeof(path), "%s/%s/temp", thermal, entry->d_name);
+        if (read_long(path, &value) || value <= -40000 || value >= 200000)
+            continue;
+        (*zones)++;
+        if (value > hottest)
+            hottest = value;
+    }
+    closedir(directory);
+    return hottest;
+}
+
+static int cpu_times(const char *stat, unsigned long long *busy, unsigned long long *total)
+{
+    FILE *file = fopen(stat, "re");
+    char line[512];
+    if (!file)
+        return -1;
+    char *got = fgets(line, sizeof(line), file);
+    fclose(file);
+    if (!got || strncmp(line, "cpu ", 4))
+        return -1;
+    unsigned long long field[10] = {0}, sum = 0;
+    char *cursor = line + 4;
+    for (unsigned i = 0; i < 10; i++) {
+        char *end;
+        field[i] = strtoull(cursor, &end, 10);
+        if (end == cursor)
+            break;
+        sum += field[i];
+        cursor = end;
+    }
+    *total = sum;
+    *busy = sum - field[3] - field[4]; /* idle and iowait */
+    return 0;
+}
+
+__attribute__((format(printf, 2, 3)))
+static void kmsg_note(const char *kmsg, const char *format, ...)
+{
+    char text[240];
+    int at = snprintf(text, sizeof(text), "<4>M19: ");
+    va_list arguments;
+    va_start(arguments, format);
+    int n = vsnprintf(text + at, sizeof(text) - (size_t)at - 1, format, arguments);
+    va_end(arguments);
+    if (n < 0)
+        return;
+    size_t size = (size_t)at + ((size_t)n < sizeof(text) - (size_t)at - 1 ? (size_t)n : sizeof(text) - (size_t)at - 2);
+    text[size++] = '\n';
+    int fd = open(kmsg, O_WRONLY | O_APPEND | O_CLOEXEC);
+    if (fd < 0)
+        return;
+    ssize_t put = write(fd, text, size);
+    (void)put;
+    close(fd);
+}
+
+int m19_guard_main(const struct m19_guard *g)
+{
+    unsigned long long start = m19_now_ms(), busy_since = 0, note = start, last_busy = 0, last_total = 0;
+    int have_sample = !cpu_times(g->stat, &last_busy, &last_total);
+    kmsg_note(g->kmsg, "guard start battery_limit=%ld zone_limit=%ld busy_limit=%u busy_ms=%u session_ms=%u", g->battery_limit, g->zone_limit,
+              g->busy_limit, g->busy_ms, g->session_ms);
+    for (;;) {
+        (void)poll(NULL, 0, (int)g->period_ms);
+        unsigned long long now = m19_now_ms(), busy = 0, total = 0;
+        long battery = LONG_MIN;
+        int zones = 0;
+        (void)read_long(g->battery_temp, &battery);
+        long zone = hottest_zone(g->thermal, &zones);
+        unsigned percent = 0;
+        if (!cpu_times(g->stat, &busy, &total)) {
+            if (have_sample && total > last_total && busy >= last_busy)
+                percent = (unsigned)((busy - last_busy) * 100 / (total - last_total));
+            last_busy = busy;
+            last_total = total;
+            have_sample = 1;
+        }
+        if (percent >= g->busy_limit) {
+            if (!busy_since)
+                busy_since = now;
+        } else {
+            busy_since = 0;
+        }
+        const char *reason = NULL;
+        if (battery != LONG_MIN && battery >= g->battery_limit)
+            reason = "battery";
+        else if (zone != LONG_MIN && zone >= g->zone_limit)
+            reason = "zone";
+        else if (busy_since && now - busy_since >= g->busy_ms)
+            reason = "cpu";
+        else if (now - start >= g->session_ms)
+            reason = "time";
+        if (now >= note || reason) {
+            kmsg_note(g->kmsg, "guard battery=%ld zones=%d zone=%ld busy=%u elapsed=%llu", battery == LONG_MIN ? -1 : battery, zones,
+                      zone == LONG_MIN ? -1 : zone, percent, (now - start) / 1000);
+            note = now + g->note_ms;
+        }
+        if (reason) {
+            kmsg_note(g->kmsg, "guard trip reason=%s, stopping the desktop", reason);
+            int fd = open(g->marker, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+            if (fd >= 0) {
+                ssize_t put = write(fd, reason, strlen(reason));
+                (void)put;
+                close(fd);
+            }
+            unsigned char out[1024];
+            size_t taken;
+            char *stop[] = {(char *)g->systemctl, "stop", (char *)g->units[0], (char *)g->units[1], (char *)g->units[2], NULL};
+            int status = capture(stop, out, sizeof(out), &taken, g->command_ms);
+            char *kill_units[] = {(char *)g->systemctl, "kill", "--signal=SIGKILL", (char *)g->units[0], (char *)g->units[1],
+                                  (char *)g->units[2], NULL};
+            if (status)
+                (void)capture(kill_units, out, sizeof(out), &taken, g->command_ms);
+            kmsg_note(g->kmsg, "guard stopped the desktop status=%d", status);
+            char hold[16];
+            snprintf(hold, sizeof(hold), "%u", g->final_ms);
+            char *argv[] = {(char *)g->display, YELLOW, hold, NULL};
+            execv(g->display, argv);
+            return 70;
+        }
+        if (g->run_ms && now - start >= g->run_ms)
+            return 0;
+    }
+}
+
 static void paint(const struct m19_report *c, int all_ok)
 {
     char hold[16];
@@ -619,10 +773,19 @@ int m19_report_main(const struct m19_report *c)
     int desktop_ok = 1;
     if (c->desktop) {
         desktop_sections(c);
-        desktop_ok = d.x_ok && d.session_ok && d.mode_ok && d.vblank_ok && d.touch_ok;
+        /* The guard must be running and must not have tripped. The sensors it reads go into the evidence. */
+        char *guard[] = {(char *)c->systemctl, "is-active", (char *)c->guard_unit, NULL};
+        int guard_active = section(guard, SECTION_CAP / 16, c->command_ms) == 0, tripped = !access(c->guard_marker, F_OK);
+        long battery = LONG_MIN;
+        int zones = 0;
+        (void)read_long(c->battery_temp, &battery);
+        long hottest = hottest_zone(c->thermal, &zones);
+        int guard_ok = guard_active && !tripped;
+        desktop_ok = d.x_ok && d.session_ok && d.mode_ok && d.vblank_ok && d.touch_ok && guard_ok;
         addf("M19 R3 desktop x=%d session=%d mode=%s xrandr_hz=%.2f mode_ok=%d crtc=%d vblank_hz=%.2f vblank_ok=%d touch_device=%d "
-             "touch_irqs=%ld touch_events=%d touch_ok=%d\n", d.x_ok, d.session_ok, d.mode, d.xrandr_hz, d.mode_ok, d.crtc, d.vblank_hz, d.vblank_ok,
-             d.touch_device, d.irq_delta, d.events, d.touch_ok);
+             "touch_irqs=%ld touch_events=%d touch_ok=%d guard=%d tripped=%d battery=%ld zones=%d hottest=%ld\n", d.x_ok, d.session_ok, d.mode,
+             d.xrandr_hz, d.mode_ok, d.crtc, d.vblank_hz, d.vblank_ok, d.touch_device, d.irq_delta, d.events, d.touch_ok, guard_ok, tripped,
+             battery == LONG_MIN ? -1 : battery, zones, hottest == LONG_MIN ? -1 : hottest);
     }
     int all_ok = init_ok && state_ok && targets_ok && writes_ok && ro_ok && mounts_ok && !write_warning && desktop_ok;
     addf("M19 R2 verdict init=%d state=%s targets=%d writes=%d read_only=%d mounts=%d write_warning=%d all_ok=%d\n", init_ok, state, targets_ok,

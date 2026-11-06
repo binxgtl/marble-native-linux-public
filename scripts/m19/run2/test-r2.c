@@ -200,10 +200,11 @@ static int report_mode(char **argv)
 static int report_desktop_mode(char **argv)
 {
     /* root tty settle_ms command_ms touch_ms */
-    static char paths[20][4200];
+    static char paths[24][4200];
     const char *root = argv[2];
     const char *names[] = {"test/kmsg", "proc1-exe", "block", "mountinfo", "test/systemctl", "test/journalctl", "test/analyze", "test/display",
-                           "test/xdpyinfo", "test/xrandr", "test/xinput", "test/ps", "proc", "interrupts", "card", "xorg0.log", "xorg60.log"};
+                           "test/xdpyinfo", "test/xrandr", "test/xinput", "test/ps", "proc", "interrupts", "card", "xorg0.log", "xorg60.log",
+                           "guard-tripped", "battery-temp", "thermal"};
     for (unsigned i = 0; i < sizeof(names) / sizeof(names[0]); i++)
         snprintf(paths[i], sizeof(paths[i]), "%s/%s", root, names[i]);
     struct m19_report c = {.tty = argv[3], .kmsg = paths[0], .proc1_exe = paths[1], .block = paths[2], .mountinfo = paths[3],
@@ -213,8 +214,26 @@ static int report_desktop_mode(char **argv)
                            .final_ms = 1, .tty_wait_ms = 200, .desktop = 1, .x_wait_ms = 400, .session_wait_ms = 400,
                            .touch_ms = (unsigned)strtoul(argv[6], NULL, 10), .want_hz = 120.0, .xdpyinfo = paths[8], .xrandr = paths[9],
                            .xinput = paths[10], .ps = paths[11], .proc = paths[12], .interrupts = paths[13], .card = paths[14],
-                           .touch_name = "goodix_ts", .xorg_logs = {paths[15], paths[16]}};
+                           .touch_name = "goodix_ts", .xorg_logs = {paths[15], paths[16]}, .guard_unit = "m19-r3-guard.service",
+                           .guard_marker = paths[17], .battery_temp = paths[18], .thermal = paths[19]};
     return m19_report_main(&c);
+}
+
+static int guard_mode(char **argv)
+{
+    /* root session_ms run_ms busy_ms */
+    static char paths[8][4200];
+    const char *root = argv[2];
+    const char *names[] = {"battery-temp", "thermal", "stat", "test/kmsg", "test/systemctl", "test/display", "guard-tripped"};
+    for (unsigned i = 0; i < sizeof(names) / sizeof(names[0]); i++)
+        snprintf(paths[i], sizeof(paths[i]), "%s/%s", root, names[i]);
+    struct m19_guard g = {.battery_temp = paths[0], .thermal = paths[1], .stat = paths[2], .kmsg = paths[3], .systemctl = paths[4],
+                          .display = paths[5], .marker = paths[6],
+                          .units = {"marble-xfce.service", "marble-xorg.service", "marble-xorg-fallback.service"}, .period_ms = 10,
+                          .note_ms = 50, .busy_limit = 90, .busy_ms = (unsigned)strtoul(argv[5], NULL, 10),
+                          .session_ms = (unsigned)strtoul(argv[3], NULL, 10), .run_ms = (unsigned)strtoul(argv[4], NULL, 10),
+                          .command_ms = 5000, .final_ms = 1, .battery_limit = 420, .zone_limit = 80000};
+    return m19_guard_main(&g);
 }
 
 int main(int argc, char **argv)
@@ -231,5 +250,7 @@ int main(int argc, char **argv)
         return report_mode(argv);
     if (argc == 7 && !strcmp(argv[1], "report-desktop"))
         return report_desktop_mode(argv);
+    if (argc == 6 && !strcmp(argv[1], "guard"))
+        return guard_mode(argv);
     return 64;
 }

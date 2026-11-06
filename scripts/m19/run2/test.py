@@ -675,7 +675,10 @@ class Static(unittest.TestCase):
                          ['T0-extract', 'T1-services', 'T2-unlock', 'T5-mount', 'T6-read', 'T9-root', 'T9-desktop', 'T8-writes'])
         self.assertIn('{"T9-desktop", "/m19/t9-desktop", 60000, M19_STEP_REQUIRED}', text)
         self.assertIn('{"T8-writes", "/m19/t8-writes", 30000, M19_STEP_REQUIRED | M19_STEP_ALWAYS}', text)
-        for field in ('.desktop = 1', '.want_hz = 120.0', '.touch_name = "goodix_ts"', '.card = "/dev/dri/card0"', '.touch_ms = 60000'):
+        for field in ('.desktop = 1', '.want_hz = 120.0', '.touch_name = "goodix_ts"', '.card = "/dev/dri/card0"', '.touch_ms = 60000',
+                      '.battery_limit = 420', '.zone_limit = 80000', '.busy_limit = 90', '.busy_ms = 60000', '.session_ms = 900000', '.run_ms = 0',
+                      'if (argc == 2 && !strcmp(argv[1], "guard"))', '.guard_unit = "m19-r3-guard.service"',
+                      '.units = {"marble-xfce.service", "marble-xorg.service", "marble-xorg-fallback.service"}'):
             self.assertIn(field, text)
         self.assertNotRegex(text, r'\breboot\(|RB_AUTOBOOT|LINUX_REBOOT')
         steps = len(names)
@@ -729,7 +732,10 @@ class Plan3(unittest.TestCase):
         self.assertNotRegex(r3plan.XFCE.replace('$$', ''), r'\$[a-z(]')
         self.assertIn('TimeoutStartSec=150\n', r3plan.XFCE)
         self.assertIn('Environment=DISPLAY=:0 HOME=/run/m19/session XDG_RUNTIME_DIR=/run/m19/xdg', r3plan.XFCE)
-        self.assertIn('Wants=multi-user.target m19-r3-report.service marble-xorg.service marble-xfce.service\n', r3plan.TARGET)
+        self.assertIn('Wants=multi-user.target m19-r3-report.service m19-r3-guard.service marble-xorg.service marble-xfce.service\n', r3plan.TARGET)
+        self.assertEqual(r3plan.FILES['systemd/system/m19-r3-guard.service'], r3plan.GUARD)
+        for line in ('DefaultDependencies=no', 'IgnoreOnIsolate=yes', 'ExecStart=/run/m19/m19-report guard', 'Restart=on-failure'):
+            self.assertIn(line + '\n', r3plan.GUARD)
         for line in ('DefaultDependencies=no', 'IgnoreOnIsolate=yes', 'ExecStart=/run/m19/m19-report report'):
             self.assertIn(line + '\n', r3plan.REPORT)
 
@@ -759,6 +765,8 @@ class DesktopScript(unittest.TestCase):
         xfce = self.root / 'm19-data/ubuntu/root/.config/xfce4/xfconf'
         xfce.mkdir(parents=True)
         (xfce / 'xfwm4.xml').write_text('<channel/>\n')
+        os.symlink('/root/.ssh/id', xfce / 'latest.rc')
+        os.mkfifo(xfce / 'pipe')
         (self.root / 'm19-data/ubuntu/root/.ssh').mkdir()
         (self.root / 'm19-data/ubuntu/root/.ssh/id').write_text('secret\n')
         panel = self.root / 'sys/class/drm/card0-DSI-1'
@@ -794,6 +802,10 @@ class DesktopScript(unittest.TestCase):
         home = self.new / 'run/m19/session'
         self.assertEqual((home / '.config/xfce4/xfconf/xfwm4.xml').read_text(), '<channel/>\n')
         self.assertFalse((home / '.ssh').exists())
+        copied = home / '.config/xfce4/xfconf'
+        self.assertFalse(os.path.lexists(copied / 'latest.rc') or os.path.lexists(copied / 'pipe'))
+        self.assertTrue(all(p.is_file() or p.is_dir() for p in (home / '.config/xfce4').rglob('*')))
+        self.assertIn(' pruned=2 ', result.stderr)
         for name in r3plan.HIDDEN:
             self.assertEqual((home / f'.config/autostart/{name}.desktop').read_text(), '[Desktop Entry]\nHidden=true\n')
         self.assertEqual(oct(home.stat().st_mode & 0o777), '0o700')
@@ -880,6 +892,9 @@ class Desktop(ReportBase):
             (self.root / 'proc' / str(pid)).mkdir(parents=True)
             (self.root / 'proc' / str(pid) / 'comm').write_text(comm + '\n')
         (self.root / 'xorg0.log').write_text('(II) modeset(0): Output DSI-1 connected\n')
+        (self.root / 'battery-temp').write_text('341\n')
+        (self.root / 'thermal/thermal_zone0').mkdir(parents=True)
+        (self.root / 'thermal/thermal_zone0/temp').write_text('45000\n')
 
     def run_desktop(self, hz='120', touch_ms=300):
         wire = Wire()
@@ -906,6 +921,7 @@ class Desktop(ReportBase):
         self.assertEqual(d['xrandr_hz'], '120.00')
         self.assertAlmostEqual(float(d['vblank_hz']), 120.0, places=1)
         self.assertEqual(d['crtc'], '0')
+        self.assertEqual((d['guard'], d['tripped'], d['battery'], d['zones'], d['hottest']), ('1', '0', '341', '1', '45000'))
         self.assertIn('M19STEP T12-desktop OK 1 1', steps)
         self.assertIn('M19STEP T12-touch START 0', steps)
         self.assertIn('M19STEP T12-touch END 12 2', steps)
@@ -949,10 +965,131 @@ class Desktop(ReportBase):
                 fields, log, _ = self.parse(self.run_desktop()[0])
                 self.assertEqual((fields[3], self.desktop(log)['touch_ok']), ('0', '0'))
 
+    def test_a_tripped_or_stopped_guard_fails_the_run(self):
+        (self.root / 'guard-tripped').write_text('battery')
+        fields, log, _ = self.parse(self.run_desktop()[0])
+        self.assertEqual((fields[3], self.desktop(log)['guard'], self.desktop(log)['tripped']), ('0', '0', '1'))
+        self.setUp()
+        fields, log, _ = self.parse(self.run_desktop_env(M19_ACTIVE_RC='3')[0])
+        self.assertEqual((fields[3], self.desktop(log)['guard']), ('0', '0'))
+
+    def run_desktop_env(self, **extra):
+        wire = Wire()
+        environment = dict(os.environ, ASAN_OPTIONS='detect_leaks=0', M19_VBLANK_HZ='120', **extra)
+        subprocess.run([ARGS.driver, 'report-desktop', str(self.root), wire.path, '300', '5000', '300'], capture_output=True, timeout=60,
+                       env=environment)
+        data = wire.close()
+        return data, None
+
     def test_r2_failures_still_fail_the_desktop_run(self):
         self.counter('sda', 4)
         fields, log, _ = self.parse(self.run_desktop()[0])
         self.assertEqual((fields[3], self.verdict(log)['writes'], self.desktop(log)['touch_ok']), ('0', '0', '1'))
+
+
+GUARD_SYSTEMCTL = '''#!/bin/sh
+echo "$*" >> "$(dirname "$0")/systemctl.log"
+case "$1" in stop) exit "${M19_STOP_RC:-0}";; esac
+exit 0
+'''
+
+
+class Guard(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name)
+        self.test = self.root / 'test'
+        self.test.mkdir()
+        for name, text in (('systemctl', GUARD_SYSTEMCTL), ('display', DISPLAY)):
+            (self.test / name).write_text(text)
+            (self.test / name).chmod(0o755)
+        (self.test / 'kmsg').write_text('')
+        (self.root / 'battery-temp').write_text('341\n')
+        zone = self.root / 'thermal/thermal_zone0'
+        zone.mkdir(parents=True)
+        (zone / 'temp').write_text('45000\n')
+        (self.root / 'thermal/cooling_device0').mkdir()
+        self.stat(0)
+
+    def stat(self, busy):
+        (self.root / 'stat').write_text(f'cpu  {100 + busy} 0 100 800 0 0 0 0 0 0\ncpu0 1 0 0 0\n')
+
+    def run_guard(self, session_ms=100000, run_ms=300, busy_ms=60000, env=None, busy=False):
+        stop = threading.Event()
+
+        def burn():
+            step = 0
+            while not stop.is_set():
+                step += 100
+                self.stat(step)
+                time.sleep(0.002)
+
+        thread = threading.Thread(target=burn)
+        if busy:
+            thread.start()
+        environment = dict(os.environ, ASAN_OPTIONS='detect_leaks=0', **(env or {}))
+        done = subprocess.run([ARGS.driver, 'guard', str(self.root), str(session_ms), str(run_ms), str(busy_ms)], capture_output=True, text=True,
+                              timeout=60, env=environment)
+        stop.set()
+        if busy:
+            thread.join()
+        calls = (self.test / 'systemctl.log').read_text() if (self.test / 'systemctl.log').exists() else ''
+        colour = (self.test / 'colour').read_text().split()[0] if (self.test / 'colour').exists() else None
+        marker = (self.root / 'guard-tripped').read_text() if (self.root / 'guard-tripped').exists() else None
+        return done.returncode, calls, colour, marker, (self.test / 'kmsg').read_text()
+
+    def assertTripped(self, reason, **kwargs):
+        rc, calls, colour, marker, kmsg = self.run_guard(**kwargs)
+        self.assertIn('stop marble-xfce.service marble-xorg.service marble-xorg-fallback.service', calls)
+        self.assertEqual((colour, marker), (YELLOW, reason))
+        self.assertIn(f'M19: guard trip reason={reason}, stopping the desktop', kmsg)
+        return calls
+
+    def test_quiet_sensors_do_nothing(self):
+        rc, calls, colour, marker, kmsg = self.run_guard()
+        self.assertEqual((rc, calls, colour, marker), (0, '', None, None))
+        self.assertIn('M19: guard start battery_limit=420 zone_limit=80000', kmsg)
+        self.assertIn('guard battery=341 zones=1 zone=45000 busy=0', kmsg)
+
+    def test_a_hot_battery_trips_at_42_degrees(self):
+        (self.root / 'battery-temp').write_text('419\n')
+        self.assertEqual(self.run_guard()[1:4], ('', None, None))
+        (self.root / 'battery-temp').write_text('420\n')
+        self.assertTripped('battery')
+
+    def test_a_hot_zone_trips(self):
+        (self.root / 'thermal/thermal_zone0/temp').write_text('80000\n')
+        self.assertTripped('zone')
+
+    def test_implausible_zone_values_are_ignored(self):
+        (self.root / 'thermal/thermal_zone0/temp').write_text('250000\n')
+        rc, calls, colour, marker, kmsg = self.run_guard()
+        self.assertEqual((calls, marker), ('', None))
+        self.assertIn('zones=0 zone=-1', kmsg)
+
+    def test_a_long_session_trips(self):
+        self.assertTripped('time', session_ms=50)
+
+    def test_a_busy_cpu_trips(self):
+        self.assertTripped('cpu', busy_ms=50, run_ms=5000, busy=True)
+
+    def test_missing_sensors_leave_time_in_charge(self):
+        (self.root / 'battery-temp').unlink()
+        shutil.rmtree(self.root / 'thermal')
+        rc, calls, colour, marker, kmsg = self.run_guard()
+        self.assertEqual((calls, marker), ('', None))
+        self.assertIn('guard battery=-1 zones=0 zone=-1', kmsg)
+        self.assertTripped('time', session_ms=50)
+
+    def test_a_failed_stop_kills_the_units(self):
+        (self.root / 'battery-temp').write_text('500\n')
+        calls = self.assertTripped('battery', env={'M19_STOP_RC': '1'})
+        self.assertIn('kill --signal=SIGKILL marble-xfce.service marble-xorg.service marble-xorg-fallback.service', calls)
+
+    def test_a_clean_stop_kills_nothing(self):
+        (self.root / 'battery-temp').write_text('500\n')
+        self.assertNotIn('kill', self.assertTripped('battery'))
 
 
 def main():
