@@ -11,7 +11,10 @@ for variant in normal sanitize; do
   gcc "${flags[@]}" "$hash" "$src/r1.c" "$src/test-r1.c" -Wl,--wrap=waitpid -o "$out/test-r1-$variant"
   python3 "$src/test.py" --driver "$out/test-r1-$variant" 2>&1 | tee "$out/run-$variant.txt"
 done
-python3 "$src/mutate.py" | tee "$out/mutants.txt"
+# Mutants depend on the tests, not on the CPU: CI runs them once, in a job of their own.
+if [[ ${M19_MUTANTS:-1} == 1 ]]; then
+  python3 "$src/mutate.py" | tee "$out/mutants.txt"
+fi
 # Reviewable binaries only, never a boot image. Independent outputs must match.
 for copy in a b; do
   flags=(-std=c11 -Os -Wall -Wextra -Werror -static -Wl,--build-id=none)

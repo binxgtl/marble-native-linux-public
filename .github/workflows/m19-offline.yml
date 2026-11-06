@@ -27,10 +27,14 @@ jobs:
         run: python3 scripts/m19/mutate.py
       - name: Unlock core and ramdisk extractor, normal and ASan/UBSan, mutants, static binary (no device)
         run: bash scripts/m19/unlock/test.sh artifacts/m19/${{ runner.arch }}
-      - name: R1 PID 1 and T scripts on synthetic trees, normal and ASan/UBSan, mutants, static binaries (no device)
+      - name: R1 PID 1 and T scripts on synthetic trees, normal and ASan/UBSan, static binaries (no device)
         run: bash scripts/m19/run1/test.sh artifacts/m19/${{ runner.arch }}/run1
-      - name: R2 and R3 hand-off, reporter, T9 and desktop checks on synthetic trees, normal and ASan/UBSan, mutants, static PID 1 (no device)
+        env:
+          M19_MUTANTS: '0'
+      - name: R2 and R3 hand-off, reporter, T9 and desktop checks on synthetic trees, normal and ASan/UBSan, static PID 1 (no device)
         run: bash scripts/m19/run2/test.sh artifacts/m19/${{ runner.arch }}/run2
+        env:
+          M19_MUTANTS: '0'
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -49,3 +53,19 @@ jobs:
             artifacts/m19/**/load-heaps-a
             artifacts/m19/**/load-heaps-b
             artifacts/m19/**/*.txt
+  mutants:
+    # The slow mutation checks of R1 and R2/R3, once each and in parallel with the regression jobs.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suite: run1
+            script: scripts/m19/run1/mutate.py
+          - suite: run2
+            script: scripts/m19/run2/mutate.py
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Mutants of ${{ matrix.suite }} (no device)
+        run: python3 ${{ matrix.script }}

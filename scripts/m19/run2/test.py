@@ -587,7 +587,8 @@ class Script(unittest.TestCase):
         for name, text, reason in (('masks', 'foo/../bar.service\n', 'unit name foo/../bar.service'), ('masks', 'foo.device\n', 'unit type foo.device'),
                                    ('generators', '../x\n', 'generator name ../x'), ('files', '../passwd\n', 'plan file ../passwd'),
                                    ('tmpfs', 'var/x 0755 1m\n', 'tmpfs path var/x'), ('tmpfs', '/var/tmp 755 1m\n', 'tmpfs mode /var/tmp'),
-                                   ('nodes', 'sda block/sda 600\n', 'node class sda'), ('nodes', '../x mem/null 600\n', 'node name ../x')):
+                                   ('nodes', 'sda block/sda 600\n', 'node class sda'), ('nodes', '../x mem/null 600\n', 'node name ../x'),
+                                   ('default', 'graphical.target\n', 'default target graphical.target')):
             with self.subTest(name=name, text=text):
                 self.setUp()
                 (self.root / 'm19/r2' / name).write_text(text)
@@ -676,7 +677,8 @@ class Static(unittest.TestCase):
         self.assertIn('{"T9-desktop", "/m19/t9-desktop", 60000, M19_STEP_REQUIRED}', text)
         self.assertIn('{"T8-writes", "/m19/t8-writes", 30000, M19_STEP_REQUIRED | M19_STEP_ALWAYS}', text)
         for field in ('.desktop = 1', '.want_hz = 120.0', '.touch_name = "goodix_ts"', '.card = "/dev/dri/card0"', '.touch_ms = 60000',
-                      '.battery_limit = 420', '.zone_limit = 80000', '.busy_limit = 90', '.busy_ms = 60000', '.session_ms = 900000', '.run_ms = 0',
+                      '.battery_limit = 420, ', '.zone_limit = 80000,', '.busy_limit = 90, ', '.busy_ms = 60000, ', '.session_ms = 900000, ',
+                      '.run_ms = 0, ',
                       'if (argc == 2 && !strcmp(argv[1], "guard"))', '.guard_unit = "m19-r3-guard.service"',
                       '.units = {"marble-xfce.service", "marble-xorg.service", "marble-xorg-fallback.service"}'):
             self.assertIn(field, text)
@@ -882,7 +884,7 @@ class Desktop(ReportBase):
             (self.test / name).write_text(text)
             (self.test / name).chmod(0o755)
         (self.test / 'x-up').write_text('')
-        (self.test / 'xrandr-query').write_text('DSI-1 connected primary 1080x2400+0+0\n   1080x2400x60vid  60.00 +\n   1080x2400x120vid 120.00*\n')
+        (self.test / 'xrandr-query').write_text('DSI-1 connected primary 1080x2400+0+0\n   1080x2400x60vid  60.00 +\n   1080x2400x120vid 90.00   120.00*\n')
         (self.test / 'xinput-names').write_text('Virtual core pointer\ngoodix_ts\n')
         (self.test / 'xi2').write_text('EVENT type 22 (RawTouchBegin)\nEVENT type 18 (TouchBegin)\n')
         (self.root / 'interrupts').write_text(INTERRUPTS.format(290, 0))
