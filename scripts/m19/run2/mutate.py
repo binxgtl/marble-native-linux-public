@@ -61,7 +61,7 @@ MUTANTS = (
     ('report.c', 'd->touch_ok = d->touch_device && d->irq_delta > 0 && d->events > 0;', 'd->touch_ok = d->touch_device && d->events > 0;', ('Desktop',)),
     ('report.c', 'd->touch_ok = d->touch_device && d->irq_delta > 0 && d->events > 0;', 'd->touch_ok = d->irq_delta > 0 && d->events > 0;', ('Desktop',)),
     ('report.c', 'd->touch_ok = d->touch_device && d->irq_delta > 0 && d->events > 0;', 'd->touch_ok = d->touch_device && d->irq_delta > 0;', ('Desktop',)),
-    ('report.c', 'desktop_ok = d.x_ok && d.session_ok && d.mode_ok && d.vblank_ok && d.touch_ok;', 'desktop_ok = d.x_ok;', ('Desktop',)),
+    ('report.c', 'desktop_ok = d.x_ok && d.session_ok && d.mode_ok && d.vblank_ok && d.touch_ok && guard_ok;', 'desktop_ok = d.x_ok;', ('Desktop',)),
     ('report.c', 'if (c->desktop && d.x_ok)\n        return 0;', '', ('Desktop',)),
     ('report.c', "|| line[n - name - 1] != ' ')", '|| 0)', ('Desktop',)),
     ('report.c', 'return seen[0] && seen[1] && seen[2];', 'return seen[0];', ('Desktop',)),
