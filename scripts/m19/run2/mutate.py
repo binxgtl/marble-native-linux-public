@@ -52,6 +52,7 @@ MUTANTS = (
     ('r2plan.py', "'udisks2.service', ", '', ('Plan',)),
     ('r2plan.py', "('ttyGS0', 'tty/ttyGS0', '600'), ", "('ttyGS0', 'tty/ttyGS0', '600'), ('sg0', 'scsi_generic/sg0', '600'), ", ('Plan',)),
     ('r2plan.py', 'IgnoreOnIsolate=yes\n', '', ('Plan',)),
+    ('r2plan.py', 'ReadKMsg=no\n', '', ('Plan',)),
     ('r2plan.py', "'systemd-fstab-generator', ", '', ('Plan',)),
     ('pid2.c', '{"T9-root", "/m19/t9-root", 120000, M19_STEP_REQUIRED},', '{"T9-root", "/m19/t9-root", 120000, 0},', ('Static',)),
     ('pid2.c', 'if (m19_run_main(&run) == M19_END_PASS) {', 'if (m19_run_main(&run) != M19_END_BOOTSTRAP) {', ('Static',)),

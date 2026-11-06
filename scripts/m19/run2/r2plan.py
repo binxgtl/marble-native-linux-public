@@ -82,7 +82,11 @@ RebootWatchdogSec=off
 CrashReboot=no
 '''
 
+# R2a: journald reads each kernel record with a device and then that device's uevent. On the
+# wireless power supply a uevent read waits a second on the ADSP and logs a new record, so the
+# kmsg reader never finished and journald never reported ready. The reporter reads /dev/kmsg itself.
 JOURNAL = '''[Journal]
+ReadKMsg=no
 Storage=volatile
 RuntimeMaxUse=64M
 ForwardToConsole=no

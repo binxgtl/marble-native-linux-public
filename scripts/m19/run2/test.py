@@ -631,6 +631,8 @@ class Plan(unittest.TestCase):
         self.assertIn('Wants=multi-user.target m19-r2-report.service\n', r2plan.TARGET)
         self.assertIn('HandlePowerKey=ignore\n', r2plan.LOGIN)
         self.assertIn('Storage=volatile\n', r2plan.JOURNAL)
+        # R2a stalled with journald stuck reading kernel records; the reporter reads /dev/kmsg itself.
+        self.assertIn('ReadKMsg=no\n', r2plan.JOURNAL)
         self.assertNotRegex(r2plan.MANAGER, r'(?m)^(CrashReboot=yes|RuntimeWatchdogSec=[1-9])')
 
 
