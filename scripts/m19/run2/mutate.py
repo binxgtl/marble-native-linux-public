@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Mutation check for R2: every mutant of the hand-off, the reporter, T9, the plan or PID 1 must fail test.py."""
+import os
 import shutil
 import subprocess
 import sys
@@ -94,6 +95,13 @@ MUTANTS = (
     ('report.c', 'int guard_ok = guard_active && !tripped;', 'int guard_ok = 1;', ('Desktop',)),
     ('r3plan.py', 'm19-r3-guard.service marble-xorg.service', 'marble-xorg.service', ('Plan3',)),
     ('pid3.c', '.battery_limit = 420', '.battery_limit = 4200', ('Static',)),
+    ('xorg-shim.c', 'int keep = p && (p->flags & (M19_PROP_RANGE | M19_PROP_ENUM | M19_PROP_BLOB));', 'int keep = 1;', ('Shim',)),
+    ('xorg-shim.c', 'int keep = p && (p->flags & (M19_PROP_RANGE | M19_PROP_ENUM | M19_PROP_BLOB));', 'int keep = p && (p->flags & (M19_PROP_RANGE | M19_PROP_ENUM));', ('Shim',)),
+    ('xorg-shim.c', '                c->prop_values[kept] = c->prop_values[i];', '', ('Shim',)),
+    ('xorg-shim.c', '    c->count_props = kept;', '', ('Shim',)),
+    ('xorg-shim.c', 'if (guarded && act && trapped(number))', 'if (0)', ('Shim',)),
+    ('xorg-shim.c', 'real = (get_connector_fn)dlsym(RTLD_NEXT, "drmModeGetConnectorCurrent");\n    struct m19_connector *c = real ? real(fd, connector_id) : NULL;\n    filter(fd, c);', 'real = (get_connector_fn)dlsym(RTLD_NEXT, "drmModeGetConnectorCurrent");\n    struct m19_connector *c = real ? real(fd, connector_id) : NULL;', ('Shim',)),
+    ('xorg-shim.c', 'return number == SIGSEGV || number == SIGBUS', 'return number == SIGBUS', ('Shim',)),
     ('r3plan.py', ', \'    Option "Monitor-Virtual-1" "writeback"\'', '', ('Plan3',)),
     ('r3plan.py', ', \'    Option "Ignore" "true"\'', '', ('Plan3',)),
     ('t9-desktop', ' printf off >"$R/sys/class/drm/$writeback/status" || fail writeback-off', ' :', ('DesktopScript',)),
@@ -129,8 +137,18 @@ def main():
                                    cwd=target, capture_output=True, timeout=120)
             if built.returncode:
                 sys.exit(f'mutant {number} does not compile')
+            environment = dict(os.environ)
+            if 'Shim' in classes:
+                # The preload library on the fake libdrm, as test.sh builds them.
+                for command in (['gcc', '-std=c11', '-O2', '-w', '-shared', '-fPIC', 'fake-drm.c', '-o', 'libfakedrm.so'],
+                                ['gcc', '-std=c11', '-O2', '-w', '-shared', '-fPIC', 'xorg-shim.c', '-ldl', '-o', 'xorg-shim-test.so'],
+                                ['gcc', '-std=c11', '-O0', '-w', 'test-shim.c', '-L.', '-lfakedrm', f'-Wl,-rpath,{target}', '-o', 'test-shim']):
+                    if subprocess.run(command, cwd=target, capture_output=True, timeout=120).returncode:
+                        sys.exit(f'mutant {number} does not compile: {command[-1]}')
+                environment.update(M19_SHIM_LIB=str(target / 'xorg-shim-test.so'), M19_SHIM_DRIVER=str(target / 'test-shim'))
             try:
-                result = subprocess.run([sys.executable, 'test.py', '--driver', 'driver', *classes], cwd=target, capture_output=True, timeout=300)
+                result = subprocess.run([sys.executable, 'test.py', '--driver', 'driver', *classes], cwd=target, capture_output=True, timeout=300,
+                                        env=environment)
                 killed = result.returncode != 0
             except subprocess.TimeoutExpired:
                 killed = True

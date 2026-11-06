@@ -50,6 +50,8 @@ jobs:
             artifacts/m19/**/pid2-b
             artifacts/m19/**/pid3-a
             artifacts/m19/**/pid3-b
+            artifacts/m19/**/xorg-shim-a.so
+            artifacts/m19/**/xorg-shim-b.so
             artifacts/m19/**/load-heaps-a
             artifacts/m19/**/load-heaps-b
             artifacts/m19/**/*.txt

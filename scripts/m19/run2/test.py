@@ -736,6 +736,8 @@ class Plan3(unittest.TestCase):
         self.assertNotIn('OnFailure', r3plan.XORG_60)
         for text in (r3plan.XORG, r3plan.XORG_60):
             self.assertIn('LimitCORE=0\n', text)
+            self.assertIn('Environment=LD_PRELOAD=/run/m19/m19-xorg-shim.so\n', text)
+        self.assertNotIn('LD_PRELOAD', r3plan.XFCE + r3plan.REPORT + r3plan.GUARD)
         self.assertEqual(r3plan.FILES['sysctl.d/m19-r3.conf'], 'debug.exception-trace = 1\n')
         for text, conf in ((r3plan.XORG, '/run/m19/xorg.conf'), (r3plan.XORG_60, '/run/m19/xorg-60.conf')):
             self.assertIn(f'-config {conf} ', text)
@@ -762,6 +764,8 @@ class DesktopScript(unittest.TestCase):
         self.test.mkdir()
         (self.test / 'bb').write_text(FAKE_BB)
         (self.test / 'bb').chmod(0o755)
+        (self.root / 'm19').mkdir(parents=True, exist_ok=True)
+        (self.root / 'm19/m19-xorg-shim.so').write_bytes(b'\x7fELF shim')
         for name, data in r3plan.render().items():
             if name.startswith('m19/r3/'):
                 path = self.root / name
@@ -813,6 +817,8 @@ class DesktopScript(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual((self.new / 'run/m19/xorg.conf').read_bytes(), r3plan.render()['m19/r3/xorg.conf'])
         self.assertEqual((self.new / 'run/m19/xorg-60.conf').read_bytes(), r3plan.render()['m19/r3/xorg-60.conf'])
+        self.assertEqual((self.new / 'run/m19/m19-xorg-shim.so').read_bytes(), b'\x7fELF shim')
+        self.assertEqual(oct((self.new / 'run/m19/m19-xorg-shim.so').stat().st_mode & 0o777), '0o644')
         nodes = re.findall(r'mknod -m (\d+) (\S+) (\w) (\d+) (\d+)', self.bb_log())
         self.assertEqual(nodes, [('600', f'{self.new}/dev/input/event7', 'c', '13', '71')])
         home = self.new / 'run/m19/session'
@@ -864,6 +870,10 @@ class DesktopScript(unittest.TestCase):
         shutil.rmtree(self.root / 'm19-data/ubuntu/root/.config/xfce4')
         os.symlink('/etc', self.root / 'm19-data/ubuntu/root/.config/xfce4')
         self.assertFails('xfce-settings')
+
+    def test_a_missing_shim_stops(self):
+        (self.root / 'm19/m19-xorg-shim.so').unlink()
+        self.assertFails('xorg-shim')
 
     def test_a_missing_tool_stops(self):
         (self.new / 'usr/bin/xinput').unlink()
@@ -1120,6 +1130,52 @@ class Guard(unittest.TestCase):
     def test_a_clean_stop_kills_nothing(self):
         (self.root / 'battery-temp').write_text('500\n')
         self.assertNotIn('kill', self.assertTripped('battery'))
+
+
+
+class Shim(unittest.TestCase):
+    """xorg-shim.c preloaded into a driver linked against fake-drm.c. test.sh and mutate.py build them."""
+
+    def setUp(self):
+        self.lib, self.driver = os.environ.get('M19_SHIM_LIB'), os.environ.get('M19_SHIM_DRIVER')
+        if not self.lib or not self.driver:
+            self.skipTest('shim not built in this run')
+
+    def run_driver(self, mode, preload=True):
+        environment = {key: value for key, value in os.environ.items() if not key.startswith(('ASAN', 'UBSAN', 'LD_PRELOAD'))}
+        if preload:
+            environment['LD_PRELOAD'] = self.lib
+        return subprocess.run([self.driver, mode], capture_output=True, text=True, env=environment, timeout=30)
+
+    def test_only_range_enum_and_blob_properties_remain(self):
+        done = self.run_driver('filter')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        for name in ('get', 'current'):
+            self.assertIn(f'{name} count 4\n', done.stdout)
+            self.assertEqual(re.findall(rf'{name} prop (\d+) (\d+)', done.stdout), [('1', '101'), ('2', '102'), ('3', '103'), ('8', '108')])
+        for line in ('drops property 4 sde_bitmask flags=0x20', 'drops property 5 CRTC_ID flags=0x40',
+                     'drops property 6 signed_range flags=0x80', 'drops property 7 (unreadable) flags=0'):
+            self.assertEqual(done.stderr.count(line), 2, line)
+        self.assertIn('M19 SHIM loaded', done.stderr)
+
+    def test_nothing_changes_without_the_shim(self):
+        done = self.run_driver('filter', preload=False)
+        self.assertIn('get count 8\n', done.stdout)
+        self.assertNotIn('M19 SHIM', done.stderr)
+
+    def test_a_null_call_is_logged_and_ends_the_process(self):
+        done = self.run_driver('null-call')
+        self.assertEqual(done.returncode, -11, done.stdout + done.stderr)
+        self.assertIn('installed 0', done.stdout)
+        self.assertNotIn('own-handler', done.stdout)
+        self.assertRegex(done.stderr, r'M19 SHIM fault signal=11 code=\d+ addr=\(nil\) pc=0 ')
+        self.assertIn('M19 SHIM map ', done.stderr)
+
+    def test_a_null_read_is_logged(self):
+        done = self.run_driver('null-read')
+        self.assertEqual(done.returncode, -11, done.stdout + done.stderr)
+        self.assertNotIn('own-handler', done.stdout)
+        self.assertRegex(done.stderr, r'M19 SHIM fault signal=11 code=\d+ addr=\(nil\) pc=0x[0-9a-f]+ ')
 
 
 def main():

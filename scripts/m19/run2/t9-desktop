@@ -41,6 +41,10 @@ else
 fi
 $BB cp "$plan/xorg.conf" "$new/run/m19/xorg.conf" || fail xorg-conf
 $BB cp "$plan/xorg-60.conf" "$new/run/m19/xorg-60.conf" || fail xorg-conf
+# The preload library both Xorg units load: it drops connector properties modesetting cannot handle.
+[ -f "$R/m19/m19-xorg-shim.so" ] || fail xorg-shim
+$BB cp "$R/m19/m19-xorg-shim.so" "$new/run/m19/m19-xorg-shim.so" || fail xorg-shim
+$BB chmod 644 "$new/run/m19/m19-xorg-shim.so" || fail xorg-shim
 offered=$($BB tr '\n' ' ' <"$panel/modes") || fail panel-modes
 
 # 2. Exactly one input node: the touchscreen.

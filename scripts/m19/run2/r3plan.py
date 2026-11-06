@@ -46,11 +46,15 @@ def xorg_conf(mode):
         'Section "Monitor"', '    Identifier "writeback"', '    Option "Ignore" "true"', 'EndSection', ''))
 
 
+SHIM = '/run/m19/m19-xorg-shim.so'
+
+
 def xorg_unit(description, config, log, fallback):
     lines = ['[Unit]', f'Description={description}', 'After=systemd-udev-trigger.service systemd-udevd.service']
     if fallback:
         lines.append('OnFailure=marble-xorg-fallback.service')
-    lines += ['', '[Service]', 'Type=simple',
+    # R3b: modesetting reads NULL atoms for SDE connector properties; the shim drops those properties.
+    lines += ['', '[Service]', 'Type=simple', f'Environment=LD_PRELOAD={SHIM}',
               f'ExecStart=/usr/lib/xorg/Xorg :0 -config {config} -logfile {log} -nolisten tcp -noreset -novtswitch -s 0 -dpms',
               'LimitCORE=0', 'Restart=no', '']
     return '\n'.join(lines)
