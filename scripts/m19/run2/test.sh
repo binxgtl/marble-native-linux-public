@@ -3,7 +3,7 @@ set -euo pipefail
 out=${1:?output}; mkdir -p "$out"
 src=scripts/m19/run2
 hash=scripts/m19/unlock/hash.c
-wraps=-Wl,--wrap=umount2,--wrap=mount,--wrap=chroot,--wrap=chdir,--wrap=execve,--wrap=stat
+wraps=-Wl,--wrap=umount2,--wrap=mount,--wrap=chroot,--wrap=chdir,--wrap=execve,--wrap=stat,--wrap=ioctl
 for variant in normal sanitize; do
   flags=(-std=c11 -O2 -Wall -Wextra -Werror)
   if [[ $variant == sanitize ]]; then
@@ -16,7 +16,11 @@ python3 "$src/mutate.py" | tee "$out/mutants.txt"
 # Reviewable binaries only, never a boot image. Independent outputs must match.
 for copy in a b; do
   flags=(-std=c11 -Os -Wall -Wextra -Werror -static -Wl,--build-id=none)
-  gcc "${flags[@]}" "$hash" scripts/m19/run1/r1.c "$src/wire.c" "$src/handoff.c" "$src/report.c" "$src/pid2.c" -o "$out/pid2-$copy"
+  for pid in pid2 pid3; do
+    gcc "${flags[@]}" "$hash" scripts/m19/run1/r1.c "$src/wire.c" "$src/handoff.c" "$src/report.c" "$src/$pid.c" -o "$out/$pid-$copy"
+  done
 done
-cmp "$out/pid2-a" "$out/pid2-b"
-sha256sum "$out/pid2-a" | tee "$out/run2-binaries.txt"
+for pid in pid2 pid3; do
+  cmp "$out/$pid-a" "$out/$pid-b"
+  sha256sum "$out/$pid-a"
+done | tee "$out/run2-binaries.txt"

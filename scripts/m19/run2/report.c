@@ -14,6 +14,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -309,6 +310,235 @@ static int check_mounts(const char *mountinfo)
     return ok && root && lines > 0;
 }
 
+/* DRM_IOCTL_WAIT_VBLANK, from include/uapi/drm/drm.h: stable ABI, defined here so no libdrm is needed. */
+union m19_wait_vblank {
+    struct { uint32_t type, sequence; unsigned long signal; } request;
+    struct { uint32_t type, sequence; long sec, usec; } reply;
+};
+#define M19_WAIT_VBLANK _IOWR('d', 0x3a, union m19_wait_vblank)
+#define M19_VBLANK_RELATIVE 0x1u
+#define M19_VBLANK_HIGH_CRTC_SHIFT 1
+#define M19_VBLANK_FRAMES 60u
+
+int m19_vblank_rate(const char *card, double *hz)
+{
+    int fd = open(card, O_RDWR | O_CLOEXEC);
+    if (fd < 0)
+        return -1;
+    for (unsigned crtc = 0; crtc < 2; crtc++) {
+        union m19_wait_vblank v;
+        memset(&v, 0, sizeof(v));
+        v.request.type = M19_VBLANK_RELATIVE | (crtc << M19_VBLANK_HIGH_CRTC_SHIFT);
+        v.request.sequence = 1;
+        if (ioctl(fd, M19_WAIT_VBLANK, &v))
+            continue;
+        uint32_t first = v.reply.sequence;
+        double start = (double)v.reply.sec + (double)v.reply.usec / 1e6;
+        memset(&v, 0, sizeof(v));
+        v.request.type = M19_VBLANK_RELATIVE | (crtc << M19_VBLANK_HIGH_CRTC_SHIFT);
+        v.request.sequence = M19_VBLANK_FRAMES;
+        if (ioctl(fd, M19_WAIT_VBLANK, &v))
+            continue;
+        double stop = (double)v.reply.sec + (double)v.reply.usec / 1e6;
+        if (v.reply.sequence > first && stop > start) {
+            *hz = (double)(v.reply.sequence - first) / (stop - start);
+            close(fd);
+            return (int)crtc;
+        }
+    }
+    close(fd);
+    return -1;
+}
+
+struct desktop {
+    int x_ok, session_ok, mode_ok, vblank_ok, touch_ok, touch_device, events, crtc;
+    long irq_delta;
+    double xrandr_hz, vblank_hz;
+    char mode[48];
+};
+
+static int run_quiet(const struct m19_report *c, char *const argv[], unsigned char *out, size_t cap, size_t *taken)
+{
+    size_t ignored;
+    return capture(argv, out, cap, taken ? taken : &ignored, c->command_ms);
+}
+
+static int x_alive(const struct m19_report *c)
+{
+    unsigned char out[256];
+    char *argv[] = {(char *)c->xdpyinfo, "-queryExtensions", NULL};
+    return run_quiet(c, argv, out, sizeof(out), NULL) == 0;
+}
+
+/* The three XFCE pieces a desktop needs, found by comm in /proc. */
+static int session_alive(const struct m19_report *c)
+{
+    static const char *const want[] = {"xfwm4", "xfce4-panel", "xfdesktop"};
+    int seen[3] = {0, 0, 0};
+    DIR *directory = opendir(c->proc);
+    if (!directory)
+        return 0;
+    struct dirent *entry;
+    while ((entry = readdir(directory))) {
+        if (entry->d_name[0] < '1' || entry->d_name[0] > '9')
+            continue;
+        char path[512], comm[32];
+        snprintf(path, sizeof(path), "%s/%s/comm", c->proc, entry->d_name);
+        if (read_small(path, comm, sizeof(comm)))
+            continue;
+        comm[strcspn(comm, "\n")] = 0;
+        for (unsigned i = 0; i < 3; i++)
+            seen[i] |= !strcmp(comm, want[i]);
+    }
+    closedir(directory);
+    return seen[0] && seen[1] && seen[2];
+}
+
+/* The current mode of xrandr's first connected output: the line whose rate carries '*'. */
+static void xrandr_mode(const struct m19_report *c, struct desktop *d)
+{
+    static char out[16384];
+    size_t taken = 0;
+    char *argv[] = {(char *)c->xrandr, "--query", NULL};
+    d->xrandr_hz = 0;
+    snprintf(d->mode, sizeof(d->mode), "none");
+    if (run_quiet(c, argv, (unsigned char *)out, sizeof(out) - 1, &taken))
+        return;
+    out[taken] = 0;
+    for (char *line = strtok(out, "\n"); line; line = strtok(NULL, "\n")) {
+        if (line[0] != ' ' || !strchr(line, '*'))
+            continue;
+        char name[48] = "";
+        if (sscanf(line, " %47s", name) != 1)
+            continue;
+        for (char *token = line + strspn(line, " ") + strlen(name); *token;) {
+            char *end;
+            double rate = strtod(token, &end);
+            if (end == token) {
+                token++;
+                continue;
+            }
+            if (*end == '*') {
+                d->xrandr_hz = rate;
+                snprintf(d->mode, sizeof(d->mode), "%s", name);
+                return;
+            }
+            token = end;
+        }
+    }
+}
+
+/* Interrupts counted on every CPU for the line whose name is the touch device's. */
+static long touch_irqs(const struct m19_report *c)
+{
+    FILE *file = fopen(c->interrupts, "re");
+    if (!file)
+        return -1;
+    char line[4096];
+    long total = -1;
+    size_t name = strlen(c->touch_name);
+    while (fgets(line, sizeof(line), file)) {
+        size_t n = strcspn(line, "\n");
+        line[n] = 0;
+        if (n <= name || strcmp(line + n - name, c->touch_name) || line[n - name - 1] != ' ')
+            continue;
+        char *cursor = strchr(line, ':');
+        if (!cursor)
+            continue;
+        total = 0;
+        for (cursor++;;) {
+            char *end;
+            long value = strtol(cursor, &end, 10);
+            if (end == cursor)
+                break;
+            total += value;
+            cursor = end;
+        }
+        break;
+    }
+    fclose(file);
+    return total;
+}
+
+static int count_text(const char *text, const char *needle)
+{
+    int count = 0;
+    for (const char *at = text; (at = strstr(at, needle)); at += strlen(needle))
+        count++;
+    return count;
+}
+
+static void desktop_phase(const struct m19_report *c, int tty, struct desktop *d)
+{
+    memset(d, 0, sizeof(*d));
+    d->crtc = -1;
+    unsigned long long start = m19_now_ms(), end = start + c->x_wait_ms, beat = start + c->beat_ms;
+    while (!(d->x_ok = x_alive(c)) && m19_now_ms() < end) {
+        if (m19_now_ms() >= beat) {
+            (void)m19_wire_line(tty, c->pace_ms, M19_DEVICE_BEAT " T12-desktop %llu x", (m19_now_ms() - start) / 1000);
+            beat = m19_now_ms() + c->beat_ms;
+        }
+        (void)poll(NULL, 0, (int)c->poll_ms);
+    }
+    end = m19_now_ms() + c->session_wait_ms;
+    while (d->x_ok && !(d->session_ok = session_alive(c)) && m19_now_ms() < end) {
+        if (m19_now_ms() >= beat) {
+            (void)m19_wire_line(tty, c->pace_ms, M19_DEVICE_BEAT " T12-desktop %llu session", (m19_now_ms() - start) / 1000);
+            beat = m19_now_ms() + c->beat_ms;
+        }
+        (void)poll(NULL, 0, (int)c->poll_ms);
+    }
+    (void)m19_wire_line(tty, c->pace_ms, M19_DEVICE_STEP " T12-desktop %s %d %d", d->x_ok && d->session_ok ? "OK" : "FAIL", d->x_ok,
+                        d->session_ok);
+    if (!d->x_ok)
+        return;
+    xrandr_mode(c, d);
+    d->mode_ok = d->xrandr_hz > c->want_hz - 1.0 && d->xrandr_hz < c->want_hz + 1.0;
+    d->crtc = m19_vblank_rate(c->card, &d->vblank_hz);
+    d->vblank_ok = d->crtc >= 0 && d->vblank_hz > c->want_hz * 0.96 && d->vblank_hz < c->want_hz * 1.04;
+
+    static char list[8192], events[65536];
+    size_t taken = 0;
+    char *names[] = {(char *)c->xinput, "list", "--name-only", NULL};
+    if (!run_quiet(c, names, (unsigned char *)list, sizeof(list) - 1, &taken)) {
+        list[taken] = 0;
+        for (char *line = strtok(list, "\n"); line; line = strtok(NULL, "\n"))
+            d->touch_device |= !strcmp(line, c->touch_name);
+    }
+    /* The operator touches the screen in this window. Events are counted twice: by the
+     * touch controller's interrupt line and by X itself. */
+    long before = touch_irqs(c);
+    (void)m19_wire_line(tty, c->pace_ms, M19_DEVICE_STEP " T12-touch START %u", c->touch_ms / 1000);
+    char *watch[] = {(char *)c->xinput, "test-xi2", "--root", NULL};
+    taken = 0;
+    (void)capture(watch, (unsigned char *)events, sizeof(events) - 1, &taken, c->touch_ms);
+    events[taken] = 0;
+    long after = touch_irqs(c);
+    d->irq_delta = before >= 0 && after >= 0 ? after - before : -1;
+    d->events = count_text(events, "(TouchBegin)") + count_text(events, "(RawTouchBegin)") + count_text(events, "(ButtonPress)") +
+                count_text(events, "(RawButtonPress)");
+    d->touch_ok = d->touch_device && d->irq_delta > 0 && d->events > 0;
+    (void)m19_wire_line(tty, c->pace_ms, M19_DEVICE_STEP " T12-touch END %ld %d", d->irq_delta, d->events);
+}
+
+static void desktop_sections(const struct m19_report *c)
+{
+    char *verbose[] = {(char *)c->xrandr, "--verbose", NULL};
+    char *inputs[] = {(char *)c->xinput, "list", NULL};
+    char *display[] = {(char *)c->xdpyinfo, NULL};
+    char *processes[] = {(char *)c->ps, "-eo", "pid,comm,pcpu,rss", "--sort=-pcpu", NULL};
+    (void)section(verbose, SECTION_CAP, c->command_ms);
+    (void)section(inputs, SECTION_CAP, c->command_ms);
+    (void)section(display, SECTION_CAP / 4, c->command_ms);
+    (void)section(processes, SECTION_CAP / 4, c->command_ms);
+    for (unsigned i = 0; i < 2; i++) {
+        addf("M19 %s\n", c->xorg_logs[i]);
+        (void)add_file(c->xorg_logs[i], 2 * SECTION_CAP);
+    }
+    addf("M19 %s\n", c->interrupts);
+    (void)add_file(c->interrupts, SECTION_CAP);
+}
+
 static void paint(const struct m19_report *c, int all_ok)
 {
     char hold[16];
@@ -343,6 +573,13 @@ int m19_report_main(const struct m19_report *c)
         (void)poll(NULL, 0, (int)c->poll_ms);
     }
     addf("M19 R2 report\nM19 R2 state %s after %llu ms\n", state, m19_now_ms() - start);
+    struct desktop d;
+    memset(&d, 0, sizeof(d));
+    if (c->desktop) {
+        /* X clients find the server here; Xorg runs without an authority file. */
+        setenv("DISPLAY", ":0", 1);
+        desktop_phase(c, tty, &d);
+    }
 
     char exe[256];
     ssize_t n = readlink(c->proc1_exe, exe, sizeof(exe) - 1);
@@ -379,7 +616,15 @@ int m19_report_main(const struct m19_report *c)
     char *journal[] = {(char *)c->journalctl, "-b", "-o", "short-monotonic", "--no-pager", "-q", NULL};
     (void)section(journal, JOURNAL_CAP, c->command_ms);
 
-    int all_ok = init_ok && state_ok && targets_ok && writes_ok && ro_ok && mounts_ok && !write_warning;
+    int desktop_ok = 1;
+    if (c->desktop) {
+        desktop_sections(c);
+        desktop_ok = d.x_ok && d.session_ok && d.mode_ok && d.vblank_ok && d.touch_ok;
+        addf("M19 R3 desktop x=%d session=%d mode=%s xrandr_hz=%.2f mode_ok=%d crtc=%d vblank_hz=%.2f vblank_ok=%d touch_device=%d "
+             "touch_irqs=%ld touch_events=%d touch_ok=%d\n", d.x_ok, d.session_ok, d.mode, d.xrandr_hz, d.mode_ok, d.crtc, d.vblank_hz, d.vblank_ok,
+             d.touch_device, d.irq_delta, d.events, d.touch_ok);
+    }
+    int all_ok = init_ok && state_ok && targets_ok && writes_ok && ro_ok && mounts_ok && !write_warning && desktop_ok;
     addf("M19 R2 verdict init=%d state=%s targets=%d writes=%d read_only=%d mounts=%d write_warning=%d all_ok=%d\n", init_ok, state, targets_ok,
          writes_ok, ro_ok, mounts_ok, write_warning, all_ok);
 
@@ -394,6 +639,9 @@ int m19_report_main(const struct m19_report *c)
         (void)m19_wire_put(tty, report, used, c->pace_ms, log_end);
     if (tty >= 0)
         close(tty);
+    /* A running X server owns the panel: leave the desktop on it. */
+    if (c->desktop && d.x_ok)
+        return 0;
     paint(c, all_ok);
     return 70;
 }

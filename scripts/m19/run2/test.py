@@ -18,6 +18,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 sys.path.insert(0, str(HERE))
 import r2plan  # noqa: E402
+import r3plan  # noqa: E402
 import rootfs  # noqa: E402
 
 ARGS = None
@@ -207,7 +208,7 @@ MOUNTINFO = ('22 1 254:0 /ubuntu / ro,noatime - f2fs /dev/m19-dm ro,lazytime\n'
              '26 22 0:31 / /sys/fs/cgroup rw shared:4 - cgroup2 cgroup2 rw\n')
 
 
-class Report(unittest.TestCase):
+class ReportBase(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
@@ -255,6 +256,13 @@ class Report(unittest.TestCase):
     def verdict(self, log):
         return dict(item.split('=') for item in re.search(r'M19 R2 verdict (.*)\n', log).group(1).split())
 
+    def counter(self, name, index):
+        values = ['0'] * 17
+        values[index] = '1'
+        (self.root / 'block' / name / 'stat').write_text(' '.join(values) + '\n')
+
+
+class Report(ReportBase):
     def test_pass_running(self):
         data, colour = self.run_report()
         fields, log, steps = self.parse(data)
@@ -299,11 +307,6 @@ class Report(unittest.TestCase):
     def test_inactive_targets_fail(self):
         fields, log, _ = self.parse(self.run_report(env={'M19_ACTIVE_RC': '3'})[0])
         self.assertEqual((fields[3], self.verdict(log)['targets']), ('0', '0'))
-
-    def counter(self, name, index):
-        values = ['0'] * 17
-        values[index] = '1'
-        (self.root / 'block' / name / 'stat').write_text(' '.join(values) + '\n')
 
     def test_any_write_or_discard_counter_fails(self):
         for name, index in (('sda', 4), ('sdb', 6), ('dm-0', 11), ('sda', 13)):
@@ -662,7 +665,294 @@ class Static(unittest.TestCase):
             self.assertNotIn(word, text)
 
     def test_scripts_parse(self):
-        self.assertEqual(subprocess.run(['sh', '-n', str(HERE / 't9-root')]).returncode, 0)
+        for name in ('t9-root', 't9-desktop'):
+            self.assertEqual(subprocess.run(['sh', '-n', str(HERE / name)]).returncode, 0, name)
+
+    def test_pid3_adds_t9_desktop_and_reports_the_desktop(self):
+        text = (HERE / 'pid3.c').read_text()
+        names = re.findall(r'\{"(T\d+-[a-z]+)", "/m19/(t\d-[a-z]+)"', text)
+        self.assertEqual([name for name, _ in names],
+                         ['T0-extract', 'T1-services', 'T2-unlock', 'T5-mount', 'T6-read', 'T9-root', 'T9-desktop', 'T8-writes'])
+        self.assertIn('{"T9-desktop", "/m19/t9-desktop", 60000, M19_STEP_REQUIRED}', text)
+        self.assertIn('{"T8-writes", "/m19/t8-writes", 30000, M19_STEP_REQUIRED | M19_STEP_ALWAYS}', text)
+        for field in ('.desktop = 1', '.want_hz = 120.0', '.touch_name = "goodix_ts"', '.card = "/dev/dri/card0"', '.touch_ms = 60000'):
+            self.assertIn(field, text)
+        self.assertNotRegex(text, r'\breboot\(|RB_AUTOBOOT|LINUX_REBOOT')
+        steps = len(names)
+        self.assertLessEqual(steps, int(re.search(r'#define M19_STEPS_MAX (\d+)', (HERE.parent / 'run1/r1.h').read_text()).group(1)))
+
+    def test_t9_desktop_writes_nothing_outside_the_new_root(self):
+        text = (HERE / 't9-desktop').read_text()
+        self.assertNotRegex(text, r'\b(reboot|poweroff|mkfs|fsck|blkdiscard|fstrim|remount|setrw)\b|\bof=/dev')
+        for line in text.splitlines():
+            if re.search(r'\$BB (cp|mkdir|mknod|chmod)\b|>"', line):
+                self.assertRegex(line, r'"\$(new|home)[/"]', line)
+        for word in ('.ssh', '.gnupg', '.gemini', 'shadow', 'spblob', '/data/media'):
+            self.assertNotIn(word, text)
+
+
+class Plan3(unittest.TestCase):
+    def test_render_carries_r2_and_the_desktop(self):
+        files = r3plan.render()
+        self.assertEqual(files['m19/r2/default'], b'm19-r3.target\n')
+        self.assertEqual(r2plan.render()['m19/r2/default'], b'm19-r2.target\n')
+        self.assertEqual(files['m19/r2/files'].decode().split(), list(r3plan.FILES))
+        self.assertFalse([name for name in files if name.startswith('m19/r2/etc/systemd/system/m19-r2')])
+        self.assertIn('ReadKMsg=no\n', r3plan.FILES['systemd/journald.conf.d/m19-r2.conf'])
+        self.assertEqual(files['m19/r3/modes'], b'1080x2400x120vid\n1080x2400x60vid\n')
+        self.assertEqual(files['m19/r3/touch'], b'goodix_ts\n')
+
+    def test_power_targets_and_lockers_are_gone(self):
+        for unit in ('poweroff.target', 'reboot.target', 'halt.target', 'systemd-poweroff.service', 'systemd-reboot.service',
+                     'udisks2.service', 'ModemManager.service', 'serial-getty@ttyGS0.service'):
+            self.assertIn(unit, r3plan.MASKED)
+        for name in ('light-locker', 'xscreensaver', 'xfce4-power-manager', 'pulseaudio'):
+            self.assertIn(name, r3plan.HIDDEN)
+
+    def test_xorg_configurations(self):
+        for mode, conf in ((r3plan.MODE_120, r3plan.render()['m19/r3/xorg.conf']), (r3plan.MODE_60, r3plan.render()['m19/r3/xorg-60.conf'])):
+            text = conf.decode()
+            self.assertIn(f'Option "PreferredMode" "{mode}"', text)
+            for option in ('"Driver "modesetting"', '"kmsdev" "/dev/dri/card0"', '"AccelMethod" "none"', '"BlankTime" "0"', '"OffTime" "0"',
+                           '"Monitor-DSI-1" "marble-panel"'):
+                self.assertIn(option.lstrip('"'), text)
+        self.assertEqual(r3plan.MODE_120, '1080x2400x120vid')
+
+    def test_units(self):
+        self.assertIn('OnFailure=marble-xorg-fallback.service\n', r3plan.XORG)
+        self.assertNotIn('OnFailure', r3plan.XORG_60)
+        for text, conf in ((r3plan.XORG, '/run/m19/xorg.conf'), (r3plan.XORG_60, '/run/m19/xorg-60.conf')):
+            self.assertIn(f'-config {conf} ', text)
+            for flag in ('-nolisten tcp', '-noreset', '-novtswitch', '-s 0 -dpms'):
+                self.assertIn(flag, text)
+        self.assertIn("i=$$((i+1)); [ \"$$i\" -lt 600 ]", r3plan.XFCE)
+        self.assertNotRegex(r3plan.XFCE.replace('$$', ''), r'\$[a-z(]')
+        self.assertIn('TimeoutStartSec=150\n', r3plan.XFCE)
+        self.assertIn('Environment=DISPLAY=:0 HOME=/run/m19/session XDG_RUNTIME_DIR=/run/m19/xdg', r3plan.XFCE)
+        self.assertIn('Wants=multi-user.target m19-r3-report.service marble-xorg.service marble-xfce.service\n', r3plan.TARGET)
+        for line in ('DefaultDependencies=no', 'IgnoreOnIsolate=yes', 'ExecStart=/run/m19/m19-report report'):
+            self.assertIn(line + '\n', r3plan.REPORT)
+
+
+class DesktopScript(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name) / 'root'
+        self.test = Path(self.directory.name) / 'test'
+        self.test.mkdir()
+        (self.test / 'bb').write_text(FAKE_BB)
+        (self.test / 'bb').chmod(0o755)
+        for name, data in r3plan.render().items():
+            if name.startswith('m19/r3/'):
+                path = self.root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(data)
+        self.new = self.root / 'newroot'
+        for name in ('run/m19', 'dev'):
+            (self.new / name).mkdir(parents=True)
+        for tool in ('usr/lib/xorg/Xorg', 'usr/lib/xorg/modules/drivers/modesetting_drv.so', 'usr/lib/xorg/modules/input/libinput_drv.so',
+                     'usr/bin/startxfce4', 'usr/bin/dbus-run-session', 'usr/bin/xfwm4', 'usr/bin/xfce4-panel', 'usr/bin/xfdesktop',
+                     'usr/bin/xdpyinfo', 'usr/bin/xrandr', 'usr/bin/xinput', 'usr/bin/ps'):
+            (self.new / tool).parent.mkdir(parents=True, exist_ok=True)
+            (self.new / tool).write_text('x\n')
+        xfce = self.root / 'm19-data/ubuntu/root/.config/xfce4/xfconf'
+        xfce.mkdir(parents=True)
+        (xfce / 'xfwm4.xml').write_text('<channel/>\n')
+        (self.root / 'm19-data/ubuntu/root/.ssh').mkdir()
+        (self.root / 'm19-data/ubuntu/root/.ssh/id').write_text('secret\n')
+        panel = self.root / 'sys/class/drm/card0-DSI-1'
+        panel.mkdir(parents=True)
+        (panel / 'status').write_text('connected\n')
+        (panel / 'modes').write_text('1080x2400x60vid\n1080x2400x120vid\n1080x2400x90vid\n1080x2400x30vid\n')
+        for name, device, number in (('event0', 'pmic_pwrkey', '13:64'), ('event4', 'gpio-keys', '13:68'), ('event7', 'goodix_ts', '13:71')):
+            entry = self.root / 'sys/class/input' / name
+            (entry / 'device').mkdir(parents=True)
+            (entry / 'device/name').write_text(device + '\n')
+            (entry / 'dev').write_text(number + '\n')
+
+    def run_script(self, **env):
+        environment = dict(os.environ, M19_ROOT=str(self.root), M19_BB=str(self.test / 'bb'), M19_TEST=str(self.test), **env)
+        return subprocess.run(['sh', str(HERE / 't9-desktop')], capture_output=True, text=True, env=environment, timeout=60)
+
+    def bb_log(self):
+        path = self.test / 'bb.log'
+        return path.read_text() if path.exists() else ''
+
+    def assertFails(self, reason):
+        result = self.run_script()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(f'M19 T9 desktop failed: {reason}\n', result.stderr)
+
+    def test_prepares_the_desktop(self):
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.new / 'run/m19/xorg.conf').read_bytes(), r3plan.render()['m19/r3/xorg.conf'])
+        self.assertEqual((self.new / 'run/m19/xorg-60.conf').read_bytes(), r3plan.render()['m19/r3/xorg-60.conf'])
+        nodes = re.findall(r'mknod -m (\d+) (\S+) (\w) (\d+) (\d+)', self.bb_log())
+        self.assertEqual(nodes, [('600', f'{self.new}/dev/input/event7', 'c', '13', '71')])
+        home = self.new / 'run/m19/session'
+        self.assertEqual((home / '.config/xfce4/xfconf/xfwm4.xml').read_text(), '<channel/>\n')
+        self.assertFalse((home / '.ssh').exists())
+        for name in r3plan.HIDDEN:
+            self.assertEqual((home / f'.config/autostart/{name}.desktop').read_text(), '[Desktop Entry]\nHidden=true\n')
+        self.assertEqual(oct(home.stat().st_mode & 0o777), '0o700')
+        self.assertEqual(oct((self.new / 'run/m19/xdg').stat().st_mode & 0o777), '0o700')
+        self.assertIn('M19 T9 desktop: touch=goodix_ts node=event7', result.stderr)
+        self.assertIn('panel modes 1080x2400x60vid 1080x2400x120vid', result.stderr)
+
+    def test_a_missing_mode_stops(self):
+        (self.root / 'sys/class/drm/card0-DSI-1/modes').write_text('1080x2400x60vid\n1080x2400x90vid\n')
+        self.assertFails('panel mode 1080x2400x120vid')
+
+    def test_a_disconnected_panel_stops(self):
+        (self.root / 'sys/class/drm/card0-DSI-1/status').write_text('disconnected\n')
+        self.assertFails('panel-status')
+
+    def test_touch_must_exist_once(self):
+        shutil.rmtree(self.root / 'sys/class/input/event7')
+        self.assertFails('touch missing')
+        self.setUp()
+        entry = self.root / 'sys/class/input/event9'
+        (entry / 'device').mkdir(parents=True)
+        (entry / 'device/name').write_text('goodix_ts\n')
+        (entry / 'dev').write_text('13:73\n')
+        self.assertFails('touch duplicate')
+
+    def test_xfce_settings_must_be_a_real_directory(self):
+        shutil.rmtree(self.root / 'm19-data/ubuntu/root/.config/xfce4')
+        os.symlink('/etc', self.root / 'm19-data/ubuntu/root/.config/xfce4')
+        self.assertFails('xfce-settings')
+
+    def test_a_missing_tool_stops(self):
+        (self.new / 'usr/bin/xinput').unlink()
+        self.assertFails('missing usr/bin/xinput')
+
+    def test_bad_plan_lines_stop(self):
+        for name, text, reason in (('hidden', '../x\n', 'hidden name ../x'), ('touch', 'goodix ts\n', 'touch name goodix ts'),
+                                   ('modes', '1080x2400x120vid;\n', 'mode name 1080x2400x120vid;')):
+            with self.subTest(name=name):
+                self.setUp()
+                (self.root / 'm19/r3' / name).write_text(text)
+                self.assertFails(reason)
+
+    def test_without_the_new_root_nothing_happens(self):
+        shutil.rmtree(self.new / 'run')
+        self.assertFails('newroot')
+        self.assertEqual(self.bb_log(), '')
+
+
+XINPUT = '''#!/bin/sh
+d=$(dirname "$0")
+case "$1" in
+ list) if [ "$2" = --name-only ]; then cat "$d/xinput-names"; else echo "Virtual core pointer"; fi;;
+ test-xi2) [ ! -e "$d/interrupts-after" ] || cp "$d/interrupts-after" "$d/../interrupts"; cat "$d/xi2"; exec sleep 30;;
+esac
+'''
+XRANDR = '''#!/bin/sh
+d=$(dirname "$0")
+case "$1" in
+ --query) cat "$d/xrandr";;
+ *) echo verbose;;
+esac
+'''
+INTERRUPTS = ('           CPU0       CPU1\n'
+              ' 299:          5          0   msmgpio  20 Edge      xgoodix_ts\n'
+              ' 300:        {0}          {1}   msmgpio  21 Edge      goodix_ts\n'
+              ' 301:          7          0   msmgpio  22 Edge      goodix_ts_extra\n')
+
+
+class Desktop(ReportBase):
+    def setUp(self):
+        super().setUp()
+        for name, text in (('xdpyinfo', '#!/bin/sh\n[ -e "$(dirname "$0")/x-up" ]\n'), ('xrandr', XRANDR), ('xinput', XINPUT),
+                           ('ps', '#!/bin/sh\necho "PID COMMAND"\n')):
+            (self.test / name).write_text(text)
+            (self.test / name).chmod(0o755)
+        (self.test / 'x-up').write_text('')
+        (self.test / 'xrandr').write_text('DSI-1 connected primary 1080x2400+0+0\n   1080x2400x60vid  60.00 +\n   1080x2400x120vid 120.00*\n')
+        (self.test / 'xinput-names').write_text('Virtual core pointer\ngoodix_ts\n')
+        (self.test / 'xi2').write_text('EVENT type 22 (RawTouchBegin)\nEVENT type 18 (TouchBegin)\n')
+        (self.root / 'interrupts').write_text(INTERRUPTS.format(290, 0))
+        (self.test / 'interrupts-after').write_text(INTERRUPTS.format(300, 2))
+        (self.root / 'card').write_text('')
+        for pid, comm in ((101, 'xfwm4'), (102, 'xfce4-panel'), (103, 'xfdesktop'), (104, 'Xorg')):
+            (self.root / 'proc' / str(pid)).mkdir(parents=True)
+            (self.root / 'proc' / str(pid) / 'comm').write_text(comm + '\n')
+        (self.root / 'xorg0.log').write_text('(II) modeset(0): Output DSI-1 connected\n')
+
+    def run_desktop(self, hz='120', touch_ms=300):
+        wire = Wire()
+        environment = dict(os.environ, ASAN_OPTIONS='detect_leaks=0')
+        if hz:
+            environment['M19_VBLANK_HZ'] = hz
+        subprocess.run([ARGS.driver, 'report-desktop', str(self.root), wire.path, '300', '5000', str(touch_ms)], capture_output=True, timeout=60,
+                       env=environment)
+        data = wire.close()
+        colour = (self.test / 'colour').read_text().split()[0] if (self.test / 'colour').exists() else None
+        return data, colour
+
+    def desktop(self, log):
+        return dict(item.split('=') for item in re.search(r'M19 R3 desktop (.*)\n', log).group(1).split())
+
+    def test_desktop_pass_leaves_the_panel_to_x(self):
+        data, colour = self.run_desktop()
+        fields, log, steps = self.parse(data)
+        self.assertEqual(fields[3:], ['1', '0'])
+        self.assertIsNone(colour)
+        d = self.desktop(log)
+        self.assertEqual((d['x'], d['session'], d['mode'], d['mode_ok'], d['vblank_ok'], d['touch_device'], d['touch_irqs'], d['touch_ok']),
+                         ('1', '1', '1080x2400x120vid', '1', '1', '1', '12', '1'))
+        self.assertEqual(d['xrandr_hz'], '120.00')
+        self.assertAlmostEqual(float(d['vblank_hz']), 120.0, places=1)
+        self.assertEqual(d['crtc'], '0')
+        self.assertIn('M19STEP T12-desktop OK 1 1', steps)
+        self.assertIn('M19STEP T12-touch START 0', steps)
+        self.assertIn('M19STEP T12-touch END 12 2', steps)
+        for text in ('Output DSI-1 connected', 'goodix_ts', 'M19 $', 'verbose'):
+            self.assertIn(text, log)
+
+    def test_sixty_hertz_fails_the_mode_and_vblank_checks(self):
+        (self.test / 'xrandr').write_text('DSI-1 connected\n   1080x2400x60vid  60.00*+\n   1080x2400x120vid 120.00\n')
+        fields, log, _ = self.parse(self.run_desktop(hz='60')[0])
+        d = self.desktop(log)
+        self.assertEqual((fields[3], d['mode'], d['mode_ok'], d['vblank_ok']), ('0', '1080x2400x60vid', '0', '0'))
+
+    def test_no_vblank_fails(self):
+        fields, log, _ = self.parse(self.run_desktop(hz=None)[0])
+        d = self.desktop(log)
+        self.assertEqual((fields[3], d['crtc'], d['vblank_ok']), ('0', '-1', '0'))
+
+    def test_no_x_paints_yellow_and_skips_the_touch_window(self):
+        (self.test / 'x-up').unlink()
+        data, colour = self.run_desktop()
+        fields, log, steps = self.parse(data)
+        self.assertEqual((fields[3], colour, self.desktop(log)['x']), ('0', YELLOW, '0'))
+        self.assertIn('M19STEP T12-desktop FAIL 0 0', steps)
+        self.assertFalse([line for line in steps if 'T12-touch' in line])
+
+    def test_a_missing_xfce_piece_fails_the_session(self):
+        shutil.rmtree(self.root / 'proc/103')
+        fields, log, _ = self.parse(self.run_desktop()[0])
+        self.assertEqual((fields[3], self.desktop(log)['session']), ('0', '0'))
+
+    def test_touch_needs_the_device_interrupts_and_x_events(self):
+        for change in ('device', 'irq', 'events'):
+            with self.subTest(change=change):
+                self.setUp()
+                if change == 'device':
+                    (self.test / 'xinput-names').write_text('Virtual core pointer\ngoodix_ts_extra\n')
+                elif change == 'irq':
+                    (self.test / 'interrupts-after').unlink()
+                else:
+                    (self.test / 'xi2').write_text('EVENT type 6 (Motion)\n')
+                fields, log, _ = self.parse(self.run_desktop()[0])
+                self.assertEqual((fields[3], self.desktop(log)['touch_ok']), ('0', '0'))
+
+    def test_r2_failures_still_fail_the_desktop_run(self):
+        self.counter('sda', 4)
+        fields, log, _ = self.parse(self.run_desktop()[0])
+        self.assertEqual((fields[3], self.verdict(log)['writes'], self.desktop(log)['touch_ok']), ('0', '0', '1'))
 
 
 def main():

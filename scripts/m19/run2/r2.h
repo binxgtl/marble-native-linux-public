@@ -37,7 +37,14 @@ int m19_handoff(int tty_fd, const struct m19_handoff *h, int *moved);
 struct m19_report {
     const char *tty, *kmsg, *proc1_exe, *block, *mountinfo, *systemctl, *journalctl, *analyze, *display, *expected_init;
     unsigned settle_ms, poll_ms, beat_ms, pace_ms, log_ms, command_ms, final_ms, tty_wait_ms;
+    /* R3 only, when desktop is set: Xorg and XFCE, the refresh rate and a touch window. */
+    unsigned desktop, x_wait_ms, session_wait_ms, touch_ms;
+    double want_hz;
+    const char *xdpyinfo, *xrandr, *xinput, *ps, *proc, *interrupts, *card, *touch_name, *xorg_logs[2];
 };
+
+/* Rate of vertical blanks on the first CRTC that answers, from the kernel's own timestamps. */
+int m19_vblank_rate(const char *card, double *hz);
 
 /* Runs under systemd, never as PID 1. Waits for the boot to settle, sends the evidence, then
  * execs the display: GREEN when every check passed, YELLOW otherwise. */

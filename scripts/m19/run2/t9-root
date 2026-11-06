@@ -117,8 +117,10 @@ while read -r file; do
  $BB chmod 644 "$new/etc/$file" || fail "plan file $file"
  files=$((files+1))
 done <"$plan/files"
+default_unit=$($BB cat "$plan/default") || fail default-target
+case "$default_unit" in m19-r[0-9].target) ;; *) fail "default target $default_unit";; esac
 $BB rm -f "$new/etc/systemd/system/default.target" || fail default-target
-$BB ln -s m19-r2.target "$new/etc/systemd/system/default.target" || fail default-target
+$BB ln -s "$default_unit" "$new/etc/systemd/system/default.target" || fail default-target
 
 # 4. tmpfs where systemd writes. Each mount point must already exist: the tree cannot grow one.
 tmpfs=0

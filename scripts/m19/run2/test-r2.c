@@ -6,6 +6,7 @@
 #include <fcntl.h>
 #include <signal.h>
 #include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -41,6 +42,30 @@ static int failing(const char *name)
 }
 
 int __real_stat(const char *path, struct stat *st);
+int __real_ioctl(int fd, unsigned long request, void *arg);
+
+/* DRM_IOCTL_WAIT_VBLANK answered from M19_VBLANK_HZ: one frame, then sixty frames later.
+ * Without it the ioctl fails as on a CRTC that is off. Every other request is real. */
+int __wrap_ioctl(int fd, unsigned long request, void *arg)
+{
+    static unsigned calls;
+    if ((request & 0xff) != 0x3a || ((request >> 8) & 0xff) != 'd')
+        return __real_ioctl(fd, request, arg);
+    const char *rate = getenv("M19_VBLANK_HZ");
+    if (!rate) {
+        errno = EINVAL;
+        return -1;
+    }
+    unsigned char *reply = arg;
+    uint32_t sequence = 1000u + (calls % 2 ? 60u : 0u);
+    double at = 100.0 + (calls % 2 ? 60.0 / strtod(rate, NULL) : 0.0);
+    long sec = (long)at, usec = (long)((at - (double)sec) * 1e6);
+    memcpy(reply + 4, &sequence, 4);
+    memcpy(reply + 8, &sec, 8);
+    memcpy(reply + 16, &usec, 8);
+    calls++;
+    return 0;
+}
 int __wrap_umount2(const char *target, int flags)
 {
     record("umount2 %s %d", target, flags);
@@ -172,6 +197,26 @@ static int report_mode(char **argv)
     return m19_report_main(&c);
 }
 
+static int report_desktop_mode(char **argv)
+{
+    /* root tty settle_ms command_ms touch_ms */
+    static char paths[20][4200];
+    const char *root = argv[2];
+    const char *names[] = {"test/kmsg", "proc1-exe", "block", "mountinfo", "test/systemctl", "test/journalctl", "test/analyze", "test/display",
+                           "test/xdpyinfo", "test/xrandr", "test/xinput", "test/ps", "proc", "interrupts", "card", "xorg0.log", "xorg60.log"};
+    for (unsigned i = 0; i < sizeof(names) / sizeof(names[0]); i++)
+        snprintf(paths[i], sizeof(paths[i]), "%s/%s", root, names[i]);
+    struct m19_report c = {.tty = argv[3], .kmsg = paths[0], .proc1_exe = paths[1], .block = paths[2], .mountinfo = paths[3],
+                           .systemctl = paths[4], .journalctl = paths[5], .analyze = paths[6], .display = paths[7],
+                           .expected_init = "/usr/lib/systemd/systemd", .settle_ms = (unsigned)strtoul(argv[4], NULL, 10), .poll_ms = 5,
+                           .beat_ms = 40, .pace_ms = 1, .log_ms = 20000, .command_ms = (unsigned)strtoul(argv[5], NULL, 10),
+                           .final_ms = 1, .tty_wait_ms = 200, .desktop = 1, .x_wait_ms = 400, .session_wait_ms = 400,
+                           .touch_ms = (unsigned)strtoul(argv[6], NULL, 10), .want_hz = 120.0, .xdpyinfo = paths[8], .xrandr = paths[9],
+                           .xinput = paths[10], .ps = paths[11], .proc = paths[12], .interrupts = paths[13], .card = paths[14],
+                           .touch_name = "goodix_ts", .xorg_logs = {paths[15], paths[16]}};
+    return m19_report_main(&c);
+}
+
 int main(int argc, char **argv)
 {
     setvbuf(stdout, NULL, _IOLBF, 0);
@@ -184,5 +229,7 @@ int main(int argc, char **argv)
         return handoff_mode(argv);
     if (argc == 6 && !strcmp(argv[1], "report"))
         return report_mode(argv);
+    if (argc == 7 && !strcmp(argv[1], "report-desktop"))
+        return report_desktop_mode(argv);
     return 64;
 }

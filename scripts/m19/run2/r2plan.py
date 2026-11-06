@@ -129,7 +129,7 @@ def render():
            'm19/r2/generators': ''.join(f'{name}\n' for name in GENERATORS),
            'm19/r2/tmpfs': ''.join(f'{point} {mode} {size}\n' for point, mode, size in TMPFS),
            'm19/r2/nodes': ''.join(f'{name} {kind} {mode}\n' for name, kind, mode in NODES),
-           'm19/r2/files': ''.join(f'{name}\n' for name in FILES)}
+           'm19/r2/files': ''.join(f'{name}\n' for name in FILES), 'm19/r2/default': 'm19-r2.target\n'}
     out.update({f'm19/r2/etc/{name}': text for name, text in FILES.items()})
     return {name: text.encode() for name, text in out.items()}
 

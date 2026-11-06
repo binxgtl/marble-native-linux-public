@@ -40,7 +40,8 @@ MUTANTS = (
     ('t9-root', '  safe_dir "$at" || return 1', '  :', ('Script',)),
     ('t9-root', 'machine=uninitialized; : >"$new/etc/machine-id" || fail machine-id', 'machine=uninitialized', ('Script',)),
     ('t9-root', 'selinux=hidden; $BB rm -f "$new/etc/selinux/config" || fail selinux-config', 'selinux=hidden', ('Script',)),
-    ('t9-root', '$BB ln -s m19-r2.target "$new/etc/systemd/system/default.target" || fail default-target', ':', ('Script',)),
+    ('t9-root', '$BB ln -s "$default_unit" "$new/etc/systemd/system/default.target" || fail default-target', ':', ('Script',)),
+    ('t9-root', 'case "$default_unit" in m19-r[0-9].target) ;; *) fail "default target $default_unit";; esac', ':', ('Script',)),
     ('t9-root', '$BB ln -s /dev/null "$path" || fail "mask $unit"', ':', ('Script',)),
     ('t9-root', '$BB ln -s /dev/null "$path" || fail "mask generator $name"', ':', ('Script',)),
     ('t9-root', 'case "$class" in mem/*|tty/*|drm/*) ;; *) fail "node class $name";; esac', ':', ('Script',)),
@@ -55,7 +56,30 @@ MUTANTS = (
     ('r2plan.py', 'ReadKMsg=no\n', '', ('Plan',)),
     ('r2plan.py', "'systemd-fstab-generator', ", '', ('Plan',)),
     ('pid2.c', '{"T9-root", "/m19/t9-root", 120000, M19_STEP_REQUIRED},', '{"T9-root", "/m19/t9-root", 120000, 0},', ('Static',)),
-    ('pid2.c', 'if (m19_run_main(&run) == M19_END_PASS) {', 'if (m19_run_main(&run) != M19_END_BOOTSTRAP) {', ('Static',)),
+    ('pid2.c', 'if (m19_run_main(&run) == M19_END_PASS) {', 'if (m19_run_main(&run) != M19_END_BOOTSTRAP) {', ('Static',)),    ('report.c', 'd->mode_ok = d->xrandr_hz > c->want_hz - 1.0 && d->xrandr_hz < c->want_hz + 1.0;', 'd->mode_ok = 1;', ('Desktop',)),
+    ('report.c', 'd->vblank_ok = d->crtc >= 0 && d->vblank_hz > c->want_hz * 0.96 && d->vblank_hz < c->want_hz * 1.04;', 'd->vblank_ok = d->crtc >= 0;', ('Desktop',)),
+    ('report.c', 'd->touch_ok = d->touch_device && d->irq_delta > 0 && d->events > 0;', 'd->touch_ok = d->touch_device && d->events > 0;', ('Desktop',)),
+    ('report.c', 'd->touch_ok = d->touch_device && d->irq_delta > 0 && d->events > 0;', 'd->touch_ok = d->irq_delta > 0 && d->events > 0;', ('Desktop',)),
+    ('report.c', 'd->touch_ok = d->touch_device && d->irq_delta > 0 && d->events > 0;', 'd->touch_ok = d->touch_device && d->irq_delta > 0;', ('Desktop',)),
+    ('report.c', 'desktop_ok = d.x_ok && d.session_ok && d.mode_ok && d.vblank_ok && d.touch_ok;', 'desktop_ok = d.x_ok;', ('Desktop',)),
+    ('report.c', 'if (c->desktop && d.x_ok)\n        return 0;', '', ('Desktop',)),
+    ('report.c', "|| line[n - name - 1] != ' ')", '|| 0)', ('Desktop',)),
+    ('report.c', 'return seen[0] && seen[1] && seen[2];', 'return seen[0];', ('Desktop',)),
+    ('report.c', "if (*end == '*') {", 'if (1) {', ('Desktop',)),
+    ('t9-desktop', '$BB grep -qx "$mode" "$panel/modes" || fail "panel mode $mode"', ':', ('DesktopScript',)),
+    ('t9-desktop', '[ -z "$found" ] || fail "touch duplicate"', ':', ('DesktopScript',)),
+    ('t9-desktop', '[ "$($BB cat "$panel/status")" = connected ] || fail panel-status', ':', ('DesktopScript',)),
+    ('t9-desktop', 'safe_dir "$src/root" && safe_dir "$src/root/.config" && safe_dir "$src/root/.config/xfce4" || fail xfce-settings', ':', ('DesktopScript',)),
+    ('t9-desktop', '$BB chmod 700 "$home" || fail home', ':', ('DesktopScript',)),
+    ('t9-desktop', 'Hidden=true', 'Hidden=false', ('DesktopScript',)),
+    ('t9-desktop', 'case "$touch" in \'\'|*[!a-z0-9_]*) fail "touch name $touch";; esac', ':', ('DesktopScript',)),
+    ('t9-desktop', 'safe_dir "$new/run/m19" && safe_dir "$new/dev" || fail newroot', ':', ('DesktopScript',)),
+    ('r3plan.py', "'light-locker', ", '', ('Plan3',)),
+    ('r3plan.py', "'poweroff.target', ", '', ('Plan3',)),
+    ('r3plan.py', "lines.append('OnFailure=marble-xorg-fallback.service')", 'pass', ('Plan3',)),
+    ('r3plan.py', 'TimeoutStartSec=150\n', '', ('Plan3',)),
+    ('r3plan.py', 'i=$$((i+1)); [ "$$i" -lt 600 ]', 'i=$((i+1)); [ "$i" -lt 600 ]', ('Plan3',)),
+    ('pid3.c', '{"T9-desktop", "/m19/t9-desktop", 60000, M19_STEP_REQUIRED},', '', ('Static',)),
 )
 
 
@@ -79,7 +103,7 @@ def main():
                 shutil.copy(HERE.parent / 'run1' / item, root / 'run1')
             (target / name).write_text(source.replace(old, new), encoding='utf-8', newline='\n')
             built = subprocess.run(['gcc', '-std=c11', '-O1', '-w', '../unlock/hash.c', 'wire.c', 'handoff.c', 'report.c', 'test-r2.c',
-                                    '-Wl,--wrap=umount2,--wrap=mount,--wrap=chroot,--wrap=chdir,--wrap=execve,--wrap=stat', '-o', 'driver'],
+                                    '-Wl,--wrap=umount2,--wrap=mount,--wrap=chroot,--wrap=chdir,--wrap=execve,--wrap=stat,--wrap=ioctl', '-o', 'driver'],
                                    cwd=target, capture_output=True, timeout=120)
             if built.returncode:
                 sys.exit(f'mutant {number} does not compile')

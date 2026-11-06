@@ -1,0 +1,79 @@
+#!/bin/busybox sh
+# T9-desktop: what R3's Xorg and XFCE need, all in RAM under the new root. The panel must offer the
+# 120 Hz and 60 Hz modes the two Xorg configurations name. /dev gains one input node, the touchscreen,
+# found by name; no key ever gets a node. The session home holds a copy of the tree's XFCE settings
+# only, with lockers and the power manager hidden.
+set -eu
+R=${M19_ROOT:-}
+BB=${M19_BB:-/bin/busybox}
+fail() { printf 'M19 T9 desktop failed: %s\n' "$*" >&2 || :; exit 1; }
+# Production runs with an empty R, the real root. A test root must be absolute and not a link.
+case "$R" in ''|/*) ;; *) fail root;; esac
+[ -z "$R" ] || [ ! -L "$R" ] || fail root
+plan=$R/m19/r3
+src=$R/m19-data/ubuntu
+new=$R/newroot
+safe_dir() { [ ! -L "$1" ] && [ -d "$1" ]; }
+number_ok() { case "$1" in *[!0-9:]*|:*|*:|*:*:*|'') return 1;; esac; }
+safe_dir "$new/run/m19" && safe_dir "$new/dev" || fail newroot
+
+# 1. The panel and both modes.
+panel=$R/sys/class/drm/card0-DSI-1
+[ "$($BB cat "$panel/status")" = connected ] || fail panel-status
+modes=0
+while read -r mode; do
+ case "$mode" in ''|'#'*) continue;; esac
+ case "$mode" in *[!0-9a-z]*) fail "mode name $mode";; esac
+ $BB grep -qx "$mode" "$panel/modes" || fail "panel mode $mode"
+ modes=$((modes+1))
+done <"$plan/modes"
+[ "$modes" -eq 2 ] || fail mode-count
+$BB cp "$plan/xorg.conf" "$new/run/m19/xorg.conf" || fail xorg-conf
+$BB cp "$plan/xorg-60.conf" "$new/run/m19/xorg-60.conf" || fail xorg-conf
+offered=$($BB tr '\n' ' ' <"$panel/modes") || fail panel-modes
+
+# 2. Exactly one input node: the touchscreen.
+touch=$($BB cat "$plan/touch") || fail touch-name
+case "$touch" in ''|*[!a-z0-9_]*) fail "touch name $touch";; esac
+found=
+for entry in "$R"/sys/class/input/event*; do
+ [ -e "$entry/device/name" ] || continue
+ [ "$($BB cat "$entry/device/name")" = "$touch" ] || continue
+ [ -z "$found" ] || fail "touch duplicate"
+ found=$entry
+done
+[ -n "$found" ] || fail "touch missing"
+node=${found##*/}
+case "$node" in event|event*[!0-9]*) fail "touch node $node";; esac
+number=$($BB cat "$found/dev") || fail "touch number"
+number_ok "$number" || fail "touch number"
+$BB mkdir -p "$new/dev/input" || fail input-directory
+$BB mknod -m 600 "$new/dev/input/$node" c "${number%%:*}" "${number#*:}" || fail "touch node $node"
+
+# 3. The session home: XFCE settings only, copied, never the rest of /root.
+safe_dir "$src/root" && safe_dir "$src/root/.config" && safe_dir "$src/root/.config/xfce4" || fail xfce-settings
+kb=$($BB du -sk "$src/root/.config/xfce4" | $BB awk '{ print $1 }') || fail xfce-size
+case "$kb" in ''|*[!0-9]*) fail xfce-size;; esac
+[ "$kb" -le 65536 ] || fail "xfce-size $kb"
+home=$new/run/m19/session
+$BB mkdir -p "$home/.config/autostart" || fail home
+$BB chmod 700 "$home" || fail home
+$BB cp -a "$src/root/.config/xfce4" "$home/.config/xfce4" || fail xfce-copy
+hidden=0
+while read -r item; do
+ case "$item" in ''|'#'*) continue;; esac
+ case "$item" in .*|*[!A-Za-z0-9._-]*) fail "hidden name $item";; esac
+ printf '[Desktop Entry]\nHidden=true\n' >"$home/.config/autostart/$item.desktop" || fail "hide $item"
+ hidden=$((hidden+1))
+done <"$plan/hidden"
+$BB mkdir -m 700 "$new/run/m19/xdg" || fail xdg-runtime
+
+# 4. What the units run, seen through the new root.
+for tool in usr/lib/xorg/Xorg usr/lib/xorg/modules/drivers/modesetting_drv.so usr/lib/xorg/modules/input/libinput_drv.so \
+ usr/bin/startxfce4 usr/bin/dbus-run-session usr/bin/xfwm4 usr/bin/xfce4-panel usr/bin/xfdesktop usr/bin/xdpyinfo usr/bin/xrandr \
+ usr/bin/xinput usr/bin/ps; do
+ [ -e "$new/$tool" ] || fail "missing $tool"
+done
+printf 'M19 T9 desktop: panel modes %s\n' "$offered" >&2
+printf 'M19 T9 desktop: touch=%s node=%s xfce=%sK hidden=%s\n' "$touch" "$node" "$kb" "$hidden" >&2
+exit 0
