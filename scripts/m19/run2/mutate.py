@@ -102,6 +102,7 @@ MUTANTS = (
     ('xorg-shim.c', 'if (guarded && act && trapped(number))', 'if (0)', ('Shim',)),
     ('xorg-shim.c', 'real = (get_connector_fn)dlsym(RTLD_NEXT, "drmModeGetConnectorCurrent");\n    struct m19_connector *c = real ? real(fd, connector_id) : NULL;\n    filter(fd, c);', 'real = (get_connector_fn)dlsym(RTLD_NEXT, "drmModeGetConnectorCurrent");\n    struct m19_connector *c = real ? real(fd, connector_id) : NULL;', ('Shim',)),
     ('xorg-shim.c', 'return number == SIGSEGV || number == SIGBUS', 'return number == SIGBUS', ('Shim',)),
+    ('xorg-shim.c', '    sigprocmask(SIG_UNBLOCK, &only, NULL);\n', '', ('Shim',)),
     ('r3plan.py', ', \'    Option "Monitor-Virtual-1" "writeback"\'', '', ('Plan3',)),
     ('r3plan.py', ', \'    Option "Ignore" "true"\'', '', ('Plan3',)),
     ('t9-desktop', ' printf off >"$R/sys/class/drm/$writeback/status" || fail writeback-off', ' :', ('DesktopScript',)),

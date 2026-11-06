@@ -183,6 +183,12 @@ static void fault(int number, siginfo_t *info, void *context)
     plain.sa_handler = SIG_DFL;
     if (real_sigaction)
         real_sigaction(number, &plain, NULL);
+    /* The handler runs with this signal blocked; unblocked, raise delivers it at once with the default
+     * action, so the process ends by the signal itself and systemd records it as one. */
+    sigset_t only;
+    sigemptyset(&only);
+    sigaddset(&only, number);
+    sigprocmask(SIG_UNBLOCK, &only, NULL);
     raise(number);
     _exit(128 + number);
 }
