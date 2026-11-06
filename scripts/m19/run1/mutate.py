@@ -69,7 +69,10 @@ def main():
             built = subprocess.run(['gcc', '-std=c11', '-O1', '-w', '../unlock/hash.c', 'r1.c', 'test-r1.c', '-Wl,--wrap=waitpid', '-o', 'driver'], cwd=target, capture_output=True, timeout=120)
             if built.returncode:
                 sys.exit(f'mutant {number} does not compile')
-            result = subprocess.run([sys.executable, 'test.py', '--driver', 'driver'], cwd=target, capture_output=True, timeout=300)
+            # Only the classes that exercise the mutated file: the pty bench is the slow part and
+            # sees no T script. Static runs for both and costs nothing.
+            classes = ('Run', 'Static') if name == 'r1.c' else ('Scripts', 'Static')
+            result = subprocess.run([sys.executable, 'test.py', '--driver', 'driver', *classes], cwd=target, capture_output=True, timeout=300)
         if result.returncode == 0:
             survivors.append((number, name, old))
     print(f'{len(MUTANTS) - len(survivors)} of {len(MUTANTS)} R1 mutants killed')

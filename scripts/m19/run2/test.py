@@ -523,7 +523,8 @@ class Script(unittest.TestCase):
     def assertFails(self, reason, **env):
         result = self.run_script(**env)
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn(f'M19 T9 failed: {reason}', result.stderr)
+        # The whole line: 'root' must not match 'root-read-only-check'.
+        self.assertIn(f'M19 T9 failed: {reason}\n', result.stderr)
         return result
 
     def test_read_only_that_did_not_take_stops(self):
@@ -595,7 +596,7 @@ class Script(unittest.TestCase):
         for root in ('relative/root', str(link)):
             environment = dict(os.environ, M19_ROOT=root, M19_BB=str(self.test / 'bb'), M19_TEST=str(self.test))
             done = subprocess.run(['sh', str(HERE / 't9-root')], capture_output=True, text=True, env=environment, timeout=30)
-            self.assertIn('M19 T9 failed: root', done.stderr)
+            self.assertIn('M19 T9 failed: root\n', done.stderr)
 
 
 class Plan(unittest.TestCase):
