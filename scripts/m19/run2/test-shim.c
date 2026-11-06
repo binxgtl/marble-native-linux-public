@@ -2,6 +2,7 @@
  *   filter     print what drmModeGetConnector and drmModeGetConnectorCurrent return
  *   null-call  install its own SIGSEGV handler, as Xorg does, then call a NULL function pointer
  *   null-read  the same, then read address 0 */
+#define _POSIX_C_SOURCE 200809L
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
