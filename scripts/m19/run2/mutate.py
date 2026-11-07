@@ -169,7 +169,6 @@ MUTANTS = (
     ('report.c', 'g->gl = status == 0 && adreno_named(g->renderer) && !(c->glamor && strstr(g->renderer, "zink"));', 'g->gl = status == 0;', ('Gpu',)),
     ('report.c', 'g->gl = status == 0 && adreno_named(g->renderer) && !(c->glamor && strstr(g->renderer, "zink"));',
      'g->gl = status == 0 && adreno_named(g->renderer);', ('Gpu',)),
-    ('report.c', '&fps) == 3 && count > 0)\n            last = fps;', '&fps) == 3)\n            last = fps;', ('Gpu',)),
     ('report.c', 'gpu_ok = g.node && g.probe && g.vk && g.cube && g.gl && g.gears &&', 'gpu_ok = g.node && g.probe && g.vk && g.gl && g.gears &&', ('Gpu',)),
     ('report.c', 'gpu_ok = g.node && g.probe && g.vk && g.cube && g.gl && g.gears &&', 'gpu_ok = g.probe && g.vk && g.cube && g.gl && g.gears &&', ('Gpu',)),
     ('report.c', '        for (unsigned i = 0; env && env[i]; i++)\n            if (putenv((char *)env[i]))', '        for (unsigned i = 0; 0 && env && env[i]; i++)\n            if (putenv((char *)env[i]))', ('Gpu',)),

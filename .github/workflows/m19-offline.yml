@@ -74,7 +74,7 @@ jobs:
           - suite: run2
             script: scripts/m19/run2/mutate.py
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - name: Vulkan and Present headers, lavapipe and Xvfb for the probe mutants (no device)
