@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Mutation check for R2: every mutant of the hand-off, the reporter, T9, the plan or PID 1 must fail test.py."""
+"""Mutation check for R2 to R4: every mutant of the hand-off, the reporter, T9, the plans, PID 1 or the GPU probe must fail test.py."""
 import os
 import shutil
 import subprocess
@@ -111,6 +111,39 @@ MUTANTS = (
     ('r3plan.py', ', \'    Option "NoTrapSignals" "true"\'', '', ('Plan3',)),
     ('r3plan.py', "'LimitCORE=0', ", '', ('Plan3',)),
     ('r3plan.py', "              'sysctl.d/m19-r3.conf': SYSCTL,\n", '', ('Plan3',)),
+    ('t9-gpu', 'printf \'%s\' /run/m19/firmware >"$param" || fail firmware-path', ':', ('GpuScript',)),
+    ('t9-gpu', '[ "$count" -eq 7 ] || fail "firmware count $count"', ':', ('GpuScript',)),
+    ('t9-gpu', '[ "$before" -eq 102 ] || fail "module count $before"', ':', ('GpuScript',)),
+    ('t9-gpu', '[ "$after" -eq 110 ] || fail "module count $after"', ':', ('GpuScript',)),
+    ('t9-gpu', '[ "$#" -eq 8 ] || fail "module list $#"', ':', ('GpuScript',)),
+    ('t9-gpu', '"$LOAD" "$@" || fail module-load', '"$LOAD" "$@" || :', ('GpuScript',)),
+    ('t9-gpu', 'for directory in "$R/run/m19/firmware" "$new/run/m19/firmware"; do', 'for directory in "$new/run/m19/firmware"; do', ('GpuScript',)),
+    ('t9-gpu', '$BB mknod -m 600 "$3" c', '$BB mknod -m 666 "$3" c', ('GpuScript',)),
+    ('t9-gpu', 'make_node dma_heap system "$new/dev/dma_heap/system"', ':', ('GpuScript',)),
+    ('t9-gpu', ' number_ok "$number" || fail "$2 number"', ' :', ('GpuScript',)),
+    ('t9-gpu', ' [ -e "$new/$tool" ] || fail "missing $tool"', ' :', ('GpuScript',)),
+    ('t9-gpu', ' case "$module" in ?*.ko) ;; *) fail "module name $module";; esac', ' :', ('GpuScript',)),
+    ('report.c', 'g->probe = status == 0 && strstr(text, "M19 GPU vulkan fill ok") != NULL && adreno_named(g->probe_device);', 'g->probe = status == 0 && adreno_named(g->probe_device);', ('Gpu',)),
+    ('report.c', 'g->probe = status == 0 && strstr(text, "M19 GPU vulkan fill ok") != NULL && adreno_named(g->probe_device);', 'g->probe = status == 0 && strstr(text, "M19 GPU vulkan fill ok") != NULL;', ('Gpu',)),
+    ('report.c', 'g->vk = status == 0 && strstr(text, "DRIVER_ID_MESA_TURNIP") != NULL && adreno_named(g->device);', 'g->vk = status == 0;', ('Gpu',)),
+    ('report.c', '    g->cube = status == 0;\n', '    g->cube = 1;\n', ('Gpu',)),
+    ('report.c', 'g->gl = status == 0 && adreno_named(g->renderer);', 'g->gl = status == 0;', ('Gpu',)),
+    ('report.c', '&fps) == 3 && count > 0) {', '&fps) == 3) {', ('Gpu',)),
+    ('report.c', 'gpu_ok = g.node && g.probe && g.vk && g.cube && g.gl && g.gears;', 'gpu_ok = g.node && g.probe && g.vk && g.gl && g.gears;', ('Gpu',)),
+    ('report.c', 'gpu_ok = g.node && g.probe && g.vk && g.cube && g.gl && g.gears;', 'gpu_ok = g.probe && g.vk && g.cube && g.gl && g.gears;', ('Gpu',)),
+    ('report.c', '        for (unsigned i = 0; env && env[i]; i++)\n            if (putenv((char *)env[i]))', '        for (unsigned i = 0; 0 && env && env[i]; i++)\n            if (putenv((char *)env[i]))', ('Gpu',)),
+    ('report.c', '        if (c->gpu && d.x_ok)\n            gpu_phase(c, tty, &g);', '        if (c->gpu)\n            gpu_phase(c, tty, &g);', ('Gpu',)),
+    ('report.c', '!write_warning && desktop_ok && gpu_ok;', '!write_warning && desktop_ok;', ('Gpu',)),
+    ('report.c', "if (*at == ' ' || *at == '\\t' || *at == '=')", "if (*at == '\\t' || *at == '=')", ('Gpu',)),
+    ('report.c', 'g->node = !stat(c->kgsl_node, &node) && S_ISCHR(node.st_mode);', 'g->node = !stat(c->kgsl_node, &node);', ('Gpu',)),
+    ('pid4.c', '"MESA_LOADER_DRIVER_OVERRIDE=zink", "LIBGL_KOPPER_DRI2=1", NULL};', '"MESA_LOADER_DRIVER_OVERRIDE=zink", NULL};', ('Static',)),
+    ('pid4.c', '    {"T9-gpu", "/m19/t9-gpu", 90000, M19_STEP_REQUIRED},\n', '', ('Static',)),
+    ('pid4.c', '.gpu = 1, ', '.gpu = 0, ', ('Static',)),
+    ('r4plan.py', "GL_ENV = VK_ENV + ('MESA_LOADER_DRIVER_OVERRIDE=zink', 'LIBGL_KOPPER_DRI2=1')", "GL_ENV = VK_ENV + ('MESA_LOADER_DRIVER_OVERRIDE=zink',)", ('Static', 'Plan4')),
+    ('r4plan.py', "_SESSION, _SESSION + 'Environment=' + ' '.join(GL_ENV) + '\\n')", '_SESSION, _SESSION)', ('Plan4',)),
+    ('r4plan.py', "VK_ENV = (f'VK_DRIVER_FILES={VK_ICD}', 'MESA_VK_WSI_DEBUG=sw')", "VK_ENV = (f'VK_DRIVER_FILES={VK_ICD}',)", ('Static', 'Plan4')),
+    ('gpu-probe.c', '    if (p->deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU)\n        return allow_cpu;', '    if (p->deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU)\n        return 1;', ('GpuProbe',)),
+    ('gpu-probe.c', '    vkCmdFillBuffer(commands, buffer, 0, VK_WHOLE_SIZE, FILL_WORD);\n', '', ('GpuProbe',)),
 )
 
 
@@ -139,6 +172,13 @@ def main():
             if built.returncode:
                 sys.exit(f'mutant {number} does not compile')
             environment = dict(os.environ)
+            if 'GpuProbe' in classes:
+                # The probe on lavapipe, as test.sh builds and runs it.
+                icds = sorted(Path('/usr/share/vulkan/icd.d').glob('lvp_icd*.json'))
+                if not icds or subprocess.run(['gcc', '-std=c11', '-O2', '-w', 'gpu-probe.c', '-ldl', '-o', 'gpu-probe-test'], cwd=target,
+                                              capture_output=True, timeout=120).returncode:
+                    sys.exit(f'mutant {number}: no lavapipe or the probe does not compile')
+                environment.update(M19_GPU_PROBE=str(target / 'gpu-probe-test'), M19_LVP_ICD=str(icds[0]))
             if 'Shim' in classes:
                 # The preload library on the fake libdrm, as test.sh builds them.
                 for command in (['gcc', '-std=c11', '-O2', '-w', '-shared', '-fPIC', 'fake-drm.c', '-o', 'libfakedrm.so'],

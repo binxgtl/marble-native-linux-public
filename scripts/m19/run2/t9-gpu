@@ -1,0 +1,85 @@
+#!/bin/busybox sh
+# T9-gpu: the Adreno for R4. It loads the GPU layer the M9 closure proved (msm_kgsl and the suppliers M19
+# lacked), points the kernel's firmware loader at a RAM copy of the GPU firmware, and gives the new root
+# /dev/kgsl-3d0, the system dma-heap and the GPU probe. Nothing here opens the GPU: Ubuntu's Mesa does,
+# after the hand-off, and that first open boots it.
+#
+# The firmware loader reads paths from PID 1's root, which the hand-off changes. The same path therefore
+# holds the same files in both roots: /run/m19/firmware here, and /run/m19/firmware in the new root.
+set -eu
+R=${M19_ROOT:-}
+BB=${M19_BB:-/bin/busybox}
+LOAD=${M19_LOAD:-/sbin/m19-load-heaps}
+WAIT=${M19_GPU_WAIT:-300}
+fail() { printf 'M19 T9 gpu failed: %s\n' "$*" >&2 || :; exit 1; }
+# Production runs with an empty R, the real root. A test root must be absolute and not a link.
+case "$R" in ''|/*) ;; *) fail root;; esac
+[ -z "$R" ] || [ ! -L "$R" ] || fail root
+case "$WAIT" in ''|*[!0-9]*) fail wait;; esac
+plan=$R/m19/r4
+new=$R/newroot
+safe_dir() { [ ! -L "$1" ] && [ -d "$1" ]; }
+number_ok() { case "$1" in *[!0-9:]*|:*|*:|*:*:*|'') return 1;; esac; }
+safe_dir "$new/run/m19" && safe_dir "$new/dev" && safe_dir "$R/run/m19" || fail newroot
+
+# 1. The GPU firmware, the set M9 Run-2W booted with, copied into RAM in both roots.
+$BB mkdir -p "$R/run/m19/firmware" "$new/run/m19/firmware" || fail firmware-directory
+count=0
+while read -r name; do
+ case "$name" in ''|'#'*) continue;; esac
+ case "$name" in .*|*[!A-Za-z0-9._-]*) fail "firmware name $name";; esac
+ [ -f "$R/m19/gpu-firmware/$name" ] && [ ! -L "$R/m19/gpu-firmware/$name" ] || fail "firmware missing $name"
+ for directory in "$R/run/m19/firmware" "$new/run/m19/firmware"; do
+  $BB cp "$R/m19/gpu-firmware/$name" "$directory/$name" || fail "firmware copy $name"
+  $BB chmod 644 "$directory/$name" || fail "firmware mode $name"
+ done
+ count=$((count+1))
+done <"$plan/firmware"
+[ "$count" -eq 7 ] || fail "firmware count $count"
+param=$R/sys/module/firmware_class/parameters/path
+printf '%s' /run/m19/firmware >"$param" || fail firmware-path
+[ "$($BB cat "$param")" = /run/m19/firmware ] || fail firmware-path-readback
+
+# 2. The GPU layer, in the plan's order, on top of the 102 modules the bootstrap loaded.
+before=$($BB wc -l <"$R/proc/modules") || fail module-count
+[ "$before" -eq 102 ] || fail "module count $before"
+set --
+while read -r module; do
+ case "$module" in ''|'#'*) continue;; esac
+ case "$module" in .*|*[!A-Za-z0-9_.-]*) fail "module name $module";; esac
+ case "$module" in ?*.ko) ;; *) fail "module name $module";; esac
+ set -- "$@" "$module"
+done <"$plan/modules"
+[ "$#" -eq 8 ] || fail "module list $#"
+"$LOAD" "$@" || fail module-load
+after=$($BB wc -l <"$R/proc/modules") || fail module-count
+[ "$after" -eq 110 ] || fail "module count $after"
+
+# 3. The nodes, by class and name, once the driver has registered them.
+make_node() {
+ i=0
+ while [ ! -r "$R/sys/class/$1/$2/dev" ]; do
+  [ "$i" -lt "$WAIT" ] || fail "$2 missing"
+  $BB sleep 0.1 || fail "$2 wait"
+  i=$((i+1))
+ done
+ number=$($BB cat "$R/sys/class/$1/$2/dev") || fail "$2 number"
+ number_ok "$number" || fail "$2 number"
+ $BB mknod -m 600 "$3" c "${number%%:*}" "${number#*:}" || fail "$2 node"
+}
+make_node kgsl kgsl-3d0 "$new/dev/kgsl-3d0"
+kgsl=$number
+$BB mkdir -p "$new/dev/dma_heap" || fail dma-heap-directory
+make_node dma_heap system "$new/dev/dma_heap/system"
+heap=$number
+
+# 4. The probe that proves GPU execution, run by the reporter in the new root.
+[ -f "$R/m19/m19-gpu-probe" ] && [ ! -L "$R/m19/m19-gpu-probe" ] || fail gpu-probe
+$BB cp "$R/m19/m19-gpu-probe" "$new/run/m19/m19-gpu-probe" || fail gpu-probe
+$BB chmod 755 "$new/run/m19/m19-gpu-probe" || fail gpu-probe
+for tool in usr/lib/aarch64-linux-gnu/libvulkan.so.1 usr/share/vulkan/icd.d/freedreno_icd.aarch64.json usr/bin/vulkaninfo usr/bin/vkcube \
+ usr/bin/glxinfo usr/bin/glxgears usr/bin/eglinfo; do
+ [ -e "$new/$tool" ] || fail "missing $tool"
+done
+printf 'M19 T9 gpu: modules=%s firmware=%s kgsl=%s heap=%s path=/run/m19/firmware\n' "$after" "$count" "$kgsl" "$heap" >&2
+exit 0

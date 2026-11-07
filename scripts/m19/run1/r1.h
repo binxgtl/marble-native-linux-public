@@ -8,7 +8,7 @@
 #define M19_DEVICE_STEP "M19STEP"
 #define M19_DEVICE_BEAT "M19BEAT"
 #define M19_DEVICE_LOG "M19LOG1"
-#define M19_STEPS_MAX 8
+#define M19_STEPS_MAX 10
 #define M19_WRITE_WARNING "Trying to write to read-only block-device"
 
 enum m19_step_flags {

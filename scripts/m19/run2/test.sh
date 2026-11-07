@@ -9,6 +9,11 @@ gcc -std=c11 -O2 -Wall -Wextra -Werror -shared -fPIC "$src/fake-drm.c" -o "$out/
 gcc -std=c11 -O2 -Wall -Wextra -Werror -shared -fPIC "$src/xorg-shim.c" -ldl -o "$out/xorg-shim-test.so"
 gcc -std=c11 -O0 -Wall -Wextra -Werror "$src/test-shim.c" -L"$out" -lfakedrm -Wl,-rpath,"$(cd "$out" && pwd)" -o "$out/test-shim"
 export M19_SHIM_LIB="$(cd "$out" && pwd)/xorg-shim-test.so" M19_SHIM_DRIVER="$(cd "$out" && pwd)/test-shim"
+# The GPU probe needs Vulkan's headers to build. Lavapipe, the runner's only Vulkan device, runs it.
+gcc -std=c11 -O2 -Wall -Wextra -Werror "$src/gpu-probe.c" -ldl -o "$out/gpu-probe-test"
+lvp=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json 2>/dev/null | head -n 1 || true)
+[[ -n $lvp ]] || { echo "lavapipe ICD missing: install mesa-vulkan-drivers" >&2; exit 1; }
+export M19_GPU_PROBE="$(cd "$out" && pwd)/gpu-probe-test" M19_LVP_ICD="$lvp"
 for variant in normal sanitize; do
   flags=(-std=c11 -O2 -Wall -Wextra -Werror)
   if [[ $variant == sanitize ]]; then
@@ -24,11 +29,11 @@ fi
 # Reviewable binaries only, never a boot image. Independent outputs must match.
 for copy in a b; do
   flags=(-std=c11 -Os -Wall -Wextra -Werror -static -Wl,--build-id=none)
-  for pid in pid2 pid3; do
+  for pid in pid2 pid3 pid4; do
     gcc "${flags[@]}" "$hash" scripts/m19/run1/r1.c "$src/wire.c" "$src/handoff.c" "$src/report.c" "$src/$pid.c" -o "$out/$pid-$copy"
   done
 done
-for pid in pid2 pid3; do
+for pid in pid2 pid3 pid4; do
   cmp "$out/$pid-a" "$out/$pid-b"
   sha256sum "$out/$pid-a"
 done | tee "$out/run2-binaries.txt"
@@ -37,3 +42,9 @@ for copy in a b; do
 done
 cmp "$out/xorg-shim-a.so" "$out/xorg-shim-b.so"
 sha256sum "$out/xorg-shim-a.so" | tee -a "$out/run2-binaries.txt"
+# Dynamic on purpose: it opens the tree's own Vulkan loader. Built on the tree's Ubuntu release.
+for copy in a b; do
+  gcc -std=c11 -Os -Wall -Wextra -Werror -Wl,--build-id=none "$src/gpu-probe.c" -ldl -o "$out/gpu-probe-$copy"
+done
+cmp "$out/gpu-probe-a" "$out/gpu-probe-b"
+sha256sum "$out/gpu-probe-a" | tee -a "$out/run2-binaries.txt"

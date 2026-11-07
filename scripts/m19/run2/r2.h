@@ -42,6 +42,11 @@ struct m19_report {
     double want_hz;
     const char *xdpyinfo, *xrandr, *xinput, *ps, *proc, *interrupts, *card, *touch_name, *xorg_logs[2];
     const char *guard_unit, *guard_marker, *battery_temp, *thermal;
+    /* R4 only, when gpu is set: the Adreno through the tree's own Mesa on KGSL. Each tool gets its
+     * environment added in its own process; the reporter's environment never changes. */
+    unsigned gpu, gpu_ms, gears_ms, cube_frames;
+    const char *kgsl_node, *kgsl_model, *gpu_probe, *vulkaninfo, *vkcube, *glxinfo, *glxgears, *eglinfo;
+    const char *const *vk_env, *const *gl_env, *const *egl_env;
 };
 
 /* R3's guard, a service of its own beside the desktop. It stops the desktop units and paints YELLOW

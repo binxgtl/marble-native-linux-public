@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -51,9 +52,10 @@ static void addf(const char *format, ...)
         add(text, (size_t)n < sizeof(text) ? (size_t)n : sizeof(text) - 1);
 }
 
-/* Runs argv with stdout and stderr into out, keeping at most cap bytes and draining the rest.
- * Returns the wait status, or -1 when it could not run or overran ms and was killed. */
-static int capture(char *const argv[], unsigned char *out, size_t cap, size_t *taken, unsigned ms)
+/* Runs argv with stdout and stderr into out, keeping at most cap bytes and draining the rest. env, when
+ * set, adds NAME=value strings in the child only. Returns the wait status, or -1 when it could not run or
+ * overran ms and was killed. */
+static int capture_env(char *const argv[], const char *const env[], unsigned char *out, size_t cap, size_t *taken, unsigned ms)
 {
     int pipe_fd[2];
     *taken = 0;
@@ -64,6 +66,9 @@ static int capture(char *const argv[], unsigned char *out, size_t cap, size_t *t
         int null = open("/dev/null", O_RDONLY);
         if (null < 0 || dup2(null, 0) < 0 || dup2(pipe_fd[1], 1) < 0 || dup2(pipe_fd[1], 2) < 0)
             _exit(126);
+        for (unsigned i = 0; env && env[i]; i++)
+            if (putenv((char *)env[i]))
+                _exit(126);
         execv(argv[0], argv);
         _exit(127);
     }
@@ -82,7 +87,9 @@ static int capture(char *const argv[], unsigned char *out, size_t cap, size_t *t
         if (m19_now_ms() >= end) {
             if (!exited) {
                 (void)kill(pid, SIGKILL);
-                (void)waitpid(pid, NULL, 0);
+                /* A child stuck in the kernel, as a GPU call can be, cannot die at once. Wait a while, never forever. */
+                for (unsigned i = 0; i < 200 && waitpid(pid, NULL, WNOHANG) == 0; i++)
+                    (void)poll(NULL, 0, 10);
             }
             status = -1;
             break;
@@ -109,20 +116,37 @@ static int capture(char *const argv[], unsigned char *out, size_t cap, size_t *t
     return status;
 }
 
-/* A section of the report: the command line, then what it printed, then its status. */
-static int section(char *const argv[], size_t cap, unsigned ms)
+static int capture(char *const argv[], unsigned char *out, size_t cap, size_t *taken, unsigned ms)
+{
+    return capture_env(argv, NULL, out, cap, taken, ms);
+}
+
+/* A section of the report: the environment it adds and the command line, then what it printed, then its
+ * status. *start and *length, when wanted, say where the output sits in the report. */
+static int section_env(char *const argv[], const char *const env[], size_t cap, unsigned ms, size_t *start, size_t *length)
 {
     addf("M19 $");
+    for (unsigned i = 0; env && env[i]; i++)
+        addf(" %s", env[i]);
     for (unsigned i = 0; argv[i]; i++)
         addf(" %s", argv[i]);
     addf("\n");
     size_t room = REPORT_CAP - used, limit = cap < room ? cap : room, taken = 0;
-    int status = capture(argv, report + used, limit, &taken, ms);
+    if (start)
+        *start = used;
+    int status = capture_env(argv, env, report + used, limit, &taken, ms);
     used += taken;
+    if (length)
+        *length = taken;
     if (taken == limit)
         addf("\nM19 output truncated at %zu bytes", limit);
     addf("\nM19 status %d\n", status);
     return status;
+}
+
+static int section(char *const argv[], size_t cap, unsigned ms)
+{
+    return section_env(argv, NULL, cap, ms, NULL, NULL);
 }
 
 static size_t add_file(const char *path, size_t cap)
@@ -522,6 +546,118 @@ static void desktop_phase(const struct m19_report *c, int tty, struct desktop *d
     (void)m19_wire_line(tty, c->pace_ms, M19_DEVICE_STEP " T12-touch END %ld %d", d->irq_delta, d->events);
 }
 
+struct gpu {
+    int node, probe, vk, cube, gl, gears, egl;
+    long cube_ms;
+    double cube_fps, gears_fps;
+    char model[64], probe_device[96], device[96], renderer[160], egl_renderer[160];
+};
+
+/* A copy of a section's output, as text. */
+static char *section_text(size_t start, size_t length)
+{
+    static char text[SECTION_CAP + 1];
+    size_t n = length < SECTION_CAP ? length : SECTION_CAP;
+    memcpy(text, report + start, n);
+    text[n] = 0;
+    return text;
+}
+
+/* The value after key on the first line holding it, past any spaces, '=' and ':'. */
+static void line_value(const char *text, const char *key, char *value, size_t room)
+{
+    const char *at = strstr(text, key);
+    value[0] = 0;
+    if (!at)
+        return;
+    at += strlen(key);
+    at += strspn(at, " \t=:");
+    size_t n = strcspn(at, "\r\n");
+    if (n >= room)
+        n = room - 1;
+    memcpy(value, at, n);
+    value[n] = 0;
+}
+
+/* One token for the verdict line: no spaces and no '='. */
+static const char *token(char *text)
+{
+    if (!text[0])
+        return "none";
+    for (char *at = text; *at; at++)
+        if (*at == ' ' || *at == '\t' || *at == '=')
+            *at = '_';
+    return text;
+}
+
+/* An Adreno, by Turnip or freedreno, and never a CPU renderer. */
+static int adreno_named(const char *name)
+{
+    return (strstr(name, "Adreno") || strstr(name, "Turnip") || strstr(name, "FD7")) && !strstr(name, "llvmpipe") && !strstr(name, "softpipe") &&
+           !strstr(name, "lavapipe");
+}
+
+/* The GPU, after the desktop and touch checks so they run exactly as in R3. The probe fills a buffer on
+ * the GPU and checks every word; vkcube and glxgears draw on the GPU and show the frames on the X desktop. */
+static void gpu_phase(const struct m19_report *c, int tty, struct gpu *g)
+{
+    size_t start = 0, length = 0;
+    memset(g, 0, sizeof(*g));
+    (void)m19_wire_line(tty, c->pace_ms, M19_DEVICE_STEP " T12-gpu START");
+    struct stat node;
+    g->node = !stat(c->kgsl_node, &node) && S_ISCHR(node.st_mode);
+    if (read_small(c->kgsl_model, g->model, sizeof(g->model)))
+        snprintf(g->model, sizeof(g->model), "unreadable");
+    g->model[strcspn(g->model, "\n")] = 0;
+
+    char *probe[] = {(char *)c->gpu_probe, "vulkan", NULL};
+    int status = section_env(probe, c->vk_env, SECTION_CAP / 4, c->gpu_ms, &start, &length);
+    char *text = section_text(start, length);
+    line_value(text, "M19 GPU vulkan device=", g->probe_device, sizeof(g->probe_device));
+    g->probe = status == 0 && strstr(text, "M19 GPU vulkan fill ok") != NULL && adreno_named(g->probe_device);
+
+    char *summary[] = {(char *)c->vulkaninfo, "--summary", NULL};
+    status = section_env(summary, c->vk_env, SECTION_CAP, c->gpu_ms, &start, &length);
+    text = section_text(start, length);
+    line_value(text, "deviceName", g->device, sizeof(g->device));
+    g->vk = status == 0 && strstr(text, "DRIVER_ID_MESA_TURNIP") != NULL && adreno_named(g->device);
+
+    char frames[16];
+    snprintf(frames, sizeof(frames), "%u", c->cube_frames);
+    char *cube[] = {(char *)c->vkcube, "--c", frames, NULL};
+    unsigned long long began = m19_now_ms();
+    status = section_env(cube, c->vk_env, SECTION_CAP / 4, c->gpu_ms, NULL, NULL);
+    g->cube_ms = (long)(m19_now_ms() - began);
+    g->cube = status == 0;
+    g->cube_fps = g->cube && g->cube_ms > 0 ? c->cube_frames * 1000.0 / (double)g->cube_ms : 0;
+
+    char *info[] = {(char *)c->glxinfo, "-B", NULL};
+    status = section_env(info, c->gl_env, SECTION_CAP / 4, c->gpu_ms, &start, &length);
+    line_value(section_text(start, length), "OpenGL renderer string", g->renderer, sizeof(g->renderer));
+    g->gl = status == 0 && adreno_named(g->renderer);
+
+    /* glxgears runs until its window closes: the time limit ends it, and its FPS lines are the result. */
+    char *gears[] = {(char *)c->glxgears, NULL};
+    (void)section_env(gears, c->gl_env, SECTION_CAP / 4, c->gears_ms, &start, &length);
+    text = section_text(start, length);
+    for (char *line = strtok(text, "\n"); line; line = strtok(NULL, "\n")) {
+        int count;
+        double seconds, fps;
+        if (sscanf(line, "%d frames in %lf seconds = %lf FPS", &count, &seconds, &fps) == 3 && count > 0) {
+            g->gears = 1;
+            g->gears_fps = fps;
+        }
+    }
+
+    /* freedreno itself on KGSL, without X: the driver a GPU X server would need. Recorded, not judged. */
+    char *egl[] = {(char *)c->eglinfo, "-B", "-p", "surfaceless", NULL};
+    status = section_env(egl, c->egl_env, SECTION_CAP / 4, c->gpu_ms, &start, &length);
+    line_value(section_text(start, length), "renderer", g->egl_renderer, sizeof(g->egl_renderer));
+    g->egl = status == 0 && adreno_named(g->egl_renderer);
+    (void)m19_wire_line(tty, c->pace_ms, M19_DEVICE_STEP " T12-gpu END %d %d %d %d %d %d %d", g->node, g->probe, g->vk, g->cube, g->gl, g->gears,
+                        g->egl);
+}
+
 static void desktop_sections(const struct m19_report *c)
 {
     char *verbose[] = {(char *)c->xrandr, "--verbose", NULL};
@@ -728,11 +864,15 @@ int m19_report_main(const struct m19_report *c)
     }
     addf("M19 R2 report\nM19 R2 state %s after %llu ms\n", state, m19_now_ms() - start);
     struct desktop d;
+    struct gpu g;
     memset(&d, 0, sizeof(d));
+    memset(&g, 0, sizeof(g));
     if (c->desktop) {
         /* X clients find the server here; Xorg runs without an authority file. */
         setenv("DISPLAY", ":0", 1);
         desktop_phase(c, tty, &d);
+        if (c->gpu && d.x_ok)
+            gpu_phase(c, tty, &g);
     }
 
     char exe[256];
@@ -787,7 +927,16 @@ int m19_report_main(const struct m19_report *c)
              d.xrandr_hz, d.mode_ok, d.crtc, d.vblank_hz, d.vblank_ok, d.touch_device, d.irq_delta, d.events, d.touch_ok, guard_ok, tripped,
              battery == LONG_MIN ? -1 : battery, zones, hottest == LONG_MIN ? -1 : hottest);
     }
-    int all_ok = init_ok && state_ok && targets_ok && writes_ok && ro_ok && mounts_ok && !write_warning && desktop_ok;
+    int gpu_ok = 1;
+    if (c->gpu) {
+        gpu_ok = g.node && g.probe && g.vk && g.cube && g.gl && g.gears;
+        /* Three lines, each well inside addf's buffer however long the names run. */
+        addf("M19 R4 gpu node=%d probe=%d vk=%d cube=%d cube_ms=%ld cube_fps=%.1f gl=%d gears=%d gears_fps=%.1f egl=%d gpu_ok=%d\n", g.node, g.probe,
+             g.vk, g.cube, g.cube_ms, g.cube_fps, g.gl, g.gears, g.gears_fps, g.egl, gpu_ok);
+        addf("M19 R4 gpu-names model=%s probe_device=%s device=%s\n", token(g.model), token(g.probe_device), token(g.device));
+        addf("M19 R4 gpu-renderers renderer=%s egl_renderer=%s\n", token(g.renderer), token(g.egl_renderer));
+    }
+    int all_ok = init_ok && state_ok && targets_ok && writes_ok && ro_ok && mounts_ok && !write_warning && desktop_ok && gpu_ok;
     addf("M19 R2 verdict init=%d state=%s targets=%d writes=%d read_only=%d mounts=%d write_warning=%d all_ok=%d\n", init_ok, state, targets_ok,
          writes_ok, ro_ok, mounts_ok, write_warning, all_ok);
 
