@@ -19,7 +19,8 @@ case "$WAIT" in ''|*[!0-9]*) fail wait;; esac
 plan=$R/m19/r4
 new=$R/newroot
 safe_dir() { [ ! -L "$1" ] && [ -d "$1" ]; }
-number_ok() { case "$1" in *[!0-9:]*|:*|*:|*:*:*|'') return 1;; esac; }
+# MAJOR:MINOR exactly: digits, one colon, digits.
+number_ok() { case "$1" in *[!0-9:]*|:*|*:|*:*:*|'') return 1;; *:*) return 0;; esac; return 1; }
 safe_dir "$new/run/m19" && safe_dir "$new/dev" && safe_dir "$R/run/m19" || fail newroot
 
 # 1. The GPU firmware, the set M9 Run-2W booted with, copied into RAM in both roots.
