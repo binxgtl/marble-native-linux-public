@@ -715,12 +715,14 @@ class Static(unittest.TestCase):
                       '.cube_frames = 300, ', '.kgsl_node = "/dev/kgsl-3d0"', '.kgsl_model = "/sys/class/kgsl/kgsl-3d0/gpu_model"',
                       '.gpu_probe = "/run/m19/m19-gpu-probe"', '.vulkaninfo = "/usr/bin/vulkaninfo"', '.vkcube = "/usr/bin/vkcube"',
                       '.glxinfo = "/usr/bin/glxinfo"', '.glxgears = "/usr/bin/glxgears"', '.eglinfo = "/usr/bin/eglinfo"',
-                      '.vk_env = vk_env, .gl_env = gl_env, .egl_env = egl_env', '.battery_limit = 420, ', '.session_ms = 900000, ',
+                      '.vk_env = dri3_env, .gl_env = dri3_env, .egl_env = dri3_env, .glamor = 1, .xorg_unit = "marble-xorg.service"',
+                      '.gpu_profile = "/run/m19/gpu-profile", .glmark2 = "/usr/bin/glmark2", .copy_env = copy_env',
+                      '.xorg_logs = {"/var/log/Xorg.0.log", "/var/log/Xorg.cpu.log"}', '.battery_limit = 420, ', '.session_ms = 900000, ',
                       '.guard_unit = "m19-r3-guard.service"', '.units = {"marble-xfce.service", "marble-xorg.service", "marble-xorg-fallback.service"}'):
             self.assertIn(field, text)
-        # The reporter tests with exactly the variables the session carries.
+        # The reporter tests with exactly the variables the session's profiles carry.
         icd = re.search(r'#define M19_VK_ICD "([^"]+)"', text).group(1)
-        for name, want in (('vk_env', r4plan.VK_ENV), ('gl_env', r4plan.GL_ENV), ('egl_env', r4plan.EGL_ENV)):
+        for name, want in (('dri3_env', r4plan.DRI3_ENV), ('copy_env', r4plan.COPY_ENV)):
             body = re.search(rf'static const char \*const {name}\[\] = \{{(.*?)\}};', text).group(1)
             items = [icd if item.strip() == 'M19_VK_ICD' else item.strip().strip('"') for item in body.split(',')]
             self.assertEqual(items[-1], 'NULL')
@@ -804,24 +806,112 @@ class Plan4(unittest.TestCase):
         self.assertEqual(files['m19/r2/default'], b'm19-r4.target\n')
         self.assertEqual(files['m19/r2/files'].decode().split(), list(r4plan.FILES))
         for name in ('m19/r3/xorg.conf', 'm19/r3/xorg-60.conf', 'm19/r3/modes', 'm19/r3/touch', 'm19/r3/hidden', 'm19/r3/writeback',
-                     'm19/r2/masks', 'm19/r2/etc/systemd/system/marble-xorg.service', 'm19/r2/etc/systemd/system/marble-xorg-fallback.service',
-                     'm19/r2/etc/systemd/system/m19-r3-guard.service', 'm19/r2/etc/sysctl.d/m19-r3.conf'):
+                     'm19/r2/masks', 'm19/r2/etc/systemd/system/m19-r3-guard.service', 'm19/r2/etc/sysctl.d/m19-r3.conf'):
             self.assertEqual(files[name], r3[name], name)
         self.assertFalse([name for name in files if re.search(r'm19-r3(-report\.service|\.target)$', name)])
         self.assertEqual(files['m19/r4/modules'].decode().split(), list(r4plan.GPU_MODULES))
         self.assertEqual(files['m19/r4/firmware'].decode().split(), list(r4plan.FIRMWARE))
+        for name, env in r4plan.PROFILES.items():
+            self.assertEqual(files[f'm19/r2/etc/m19/gpu-{name}.env'].decode().splitlines(), list(env))
 
-    def test_session_carries_the_gpu_variables(self):
-        self.assertIn('Environment=' + ' '.join(r4plan.GL_ENV) + '\n', r4plan.XFCE)
-        self.assertEqual(r4plan.GL_ENV, r4plan.VK_ENV + ('MESA_LOADER_DRIVER_OVERRIDE=zink', 'LIBGL_KOPPER_DRI2=1'))
-        self.assertIn('VK_DRIVER_FILES=/usr/share/vulkan/icd.d/freedreno_icd.aarch64.json', r4plan.VK_ENV)
-        self.assertIn('MESA_VK_WSI_DEBUG=sw', r4plan.VK_ENV)
-        self.assertEqual(r4plan.XFCE.replace('Environment=' + ' '.join(r4plan.GL_ENV) + '\n', '').replace(
-            'M19 R4 XFCE session as root, GL and Vulkan on the GPU', 'M19 R3 XFCE session as root'), r3plan.XFCE)
+    def test_glamor_configuration_is_r3c_with_glamor(self):
+        glamor = r4plan.render()['m19/r4/xorg-glamor.conf'].decode()
+        cpu = r3plan.xorg_conf(r3plan.MODE_120)
+        self.assertIn('    Option "AccelMethod" "glamor"\n    Option "DRI" "3"\n', glamor)
+        self.assertEqual(glamor.replace('    Option "AccelMethod" "glamor"\n    Option "DRI" "3"\n', '    Option "AccelMethod" "none"\n'), cpu)
+        for line in ('Option "PreferredMode" "1080x2400x120vid"', 'Option "Monitor-Virtual-1" "writeback"', 'Option "Ignore" "true"',
+                     'Option "PageFlip" "false"'):
+            self.assertIn(line, glamor)
+
+    def test_xorg_units(self):
+        self.assertIn('-config /run/m19/xorg-glamor.conf -logfile /var/log/Xorg.0.log ', r4plan.XORG)
+        self.assertIn('OnFailure=marble-xorg-fallback.service\n', r4plan.XORG)
+        self.assertIn('Environment=LD_PRELOAD=/run/m19/m19-xorg-shim.so\n', r4plan.XORG)
+        self.assertIn('Environment=M19_SHIM_GBM=1 MESA_LOADER_DRIVER_OVERRIDE=kgsl FD_FORCE_KGSL=1 FD_KGSL_ENABLE_DMABUF=1\n', r4plan.XORG)
+        # The fallback is R3c's proven CPU Xorg at 120 Hz, with the shim but without the bridge.
+        self.assertIn('-config /run/m19/xorg.conf -logfile /var/log/Xorg.cpu.log ', r4plan.XORG_FALLBACK)
+        self.assertNotIn('OnFailure', r4plan.XORG_FALLBACK)
+        self.assertNotIn('M19_SHIM_GBM', r4plan.XORG_FALLBACK)
+        self.assertNotIn('MESA', r4plan.XORG_FALLBACK)
+        self.assertEqual(r4plan.FILES['systemd/system/marble-xorg.service'], r4plan.XORG)
+        self.assertEqual(r4plan.FILES['systemd/system/marble-xorg-fallback.service'], r4plan.XORG_FALLBACK)
+        self.assertEqual(r4plan.GLAMOR_ENV, ('MESA_LOADER_DRIVER_OVERRIDE=kgsl', 'FD_FORCE_KGSL=1', 'FD_KGSL_ENABLE_DMABUF=1'))
+        self.assertEqual(r4plan.DRI3_ENV, r4plan.GLAMOR_ENV + ('VK_DRIVER_FILES=/usr/share/vulkan/icd.d/freedreno_icd.aarch64.json',))
+        self.assertEqual(r4plan.COPY_ENV, ('VK_DRIVER_FILES=/usr/share/vulkan/icd.d/freedreno_icd.aarch64.json', 'MESA_VK_WSI_DEBUG=sw',
+                                           'MESA_LOADER_DRIVER_OVERRIDE=zink', 'LIBGL_KOPPER_DRI2=1'))
+
+    def test_session_unit(self):
+        self.assertIn('ExecStart=/bin/sh /etc/m19/gpu-session\n', r4plan.XFCE)
+        self.assertIn('Restart=on-failure\nRestartSec=2\n', r4plan.XFCE)
+        self.assertNotIn('MESA', r4plan.XFCE)
+        self.assertIn('Environment=DISPLAY=:0 HOME=/run/m19/session XDG_RUNTIME_DIR=/run/m19/xdg', r4plan.XFCE)
         self.assertIn('Wants=multi-user.target m19-r4-report.service m19-r3-guard.service marble-xorg.service marble-xfce.service\n', r4plan.TARGET)
         self.assertIn('ExecStart=/run/m19/m19-report report\n', r4plan.REPORT)
-        self.assertNotIn('MESA', r4plan.REPORT + r4plan.TARGET + r3plan.XORG + r3plan.GUARD)
+        self.assertNotIn('MESA', r4plan.REPORT + r4plan.TARGET + r3plan.GUARD)
+        self.assertEqual(r4plan.FILES['m19/gpu-session'], r4plan.SESSION)
 
+
+SESSION_FAKES = (('xdpyinfo', '#!/bin/sh\n[ -e "$(dirname "$0")/x-up" ]\n'),
+                 ('systemctl', '#!/bin/sh\n[ "$1 $2" = "is-active marble-xorg.service" ] || exit 9\ncat "$(dirname "$0")/xorg-state"\n'),
+                 ('startxfce4', '#!/bin/sh\nenv | grep -E "^(MESA|FD_|VK_|LIBGL)" | sort\n'))
+
+
+class SessionScript(unittest.TestCase):
+    """r4plan.SESSION with its absolute paths pointed into a temporary tree."""
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name)
+        for name, text in SESSION_FAKES:
+            (self.root / name).write_text(text)
+            (self.root / name).chmod(0o755)
+        (self.root / 'etc').mkdir()
+        for name, env in r4plan.PROFILES.items():
+            (self.root / 'etc' / f'gpu-{name}.env').write_text(''.join(f'{item}\n' for item in env))
+        (self.root / 'x-up').write_text('')
+        (self.root / 'xorg-state').write_text('active\n')
+        (self.root / 'Xorg.0.log').write_text('(II) modeset(0): glamor X acceleration enabled on FD725\n(II) modeset(0): glamor initialized\n')
+        script = r4plan.SESSION
+        for old, new in (('/usr/bin/xdpyinfo', f'{self.root}/xdpyinfo'), ('/usr/bin/systemctl', f'{self.root}/systemctl'),
+                         ('/usr/bin/grep', 'grep'), ('/var/log/Xorg.0.log', f'{self.root}/Xorg.0.log'), ('/etc/m19/', f'{self.root}/etc/'),
+                         ('/run/m19/gpu-profile', f'{self.root}/gpu-profile'), ('/usr/bin/dbus-run-session -- /usr/bin/startxfce4', f'{self.root}/startxfce4'),
+                         ('sleep 0.2', 'sleep 0.01')):
+            self.assertIn(old, script)
+            script = script.replace(old, new)
+        (self.root / 'session').write_text(script)
+
+    def run_session(self):
+        environment = {key: value for key, value in os.environ.items() if not key.startswith(('MESA', 'FD_', 'VK_', 'LIBGL'))}
+        done = subprocess.run(['sh', str(self.root / 'session')], capture_output=True, text=True, env=environment, timeout=60)
+        profile = (self.root / 'gpu-profile').read_text() if (self.root / 'gpu-profile').exists() else None
+        return done, profile
+
+    def test_glamor_gives_every_program_the_dri3_profile(self):
+        done, profile = self.run_session()
+        self.assertEqual((done.returncode, profile), (0, 'dri3\n'), done.stderr)
+        self.assertEqual(done.stdout.splitlines(), sorted(r4plan.DRI3_ENV))
+
+    def test_without_glamor_the_session_takes_the_copy_profile(self):
+        for change in ('log', 'inactive', 'missing-log'):
+            with self.subTest(change=change):
+                self.setUp()
+                if change == 'log':
+                    (self.root / 'Xorg.0.log').write_text('(II) modeset(0): glamor initialization failed\n')
+                elif change == 'inactive':
+                    (self.root / 'xorg-state').write_text('failed\n')
+                else:
+                    (self.root / 'Xorg.0.log').unlink()
+                done, profile = self.run_session()
+                self.assertEqual((done.returncode, profile), (0, 'copy\n'), done.stderr)
+                self.assertEqual(done.stdout.splitlines(), sorted(r4plan.COPY_ENV))
+
+    def test_no_x_server_no_session(self):
+        (self.root / 'x-up').unlink()
+        done, profile = self.run_session()
+        self.assertNotEqual(done.returncode, 0)
+        self.assertIsNone(profile)
+        self.assertEqual(done.stdout, '')
 
 
 class DesktopScript(unittest.TestCase):
@@ -1109,25 +1199,39 @@ cat "$d/probe-out"; exit "$(cat "$d/probe-rc")"
 d=$(dirname "$0")
 [ "$1" = --summary ] || exit 2
 if [ "$VK_DRIVER_FILES" = /usr/share/vulkan/icd.d/freedreno_icd.aarch64.json ]; then cat "$d/vulkaninfo-out"; else
- printf 'GPU0:\n\tdeviceName = llvmpipe (LLVM 20.1.0, 128 bits)\n\tdriverID = DRIVER_ID_MESA_LLVMPIPE\n'; fi
+ printf 'GPU0:\\n\\tdeviceName = llvmpipe (LLVM 20.1.0, 128 bits)\\n\\tdriverID = DRIVER_ID_MESA_LLVMPIPE\\n'; fi
 '''), ('vkcube', '''#!/bin/sh
-[ "$1 $2" = "--c 300" ] && [ "$MESA_VK_WSI_DEBUG" = sw ] || { echo "vulkan: No DRI3 support detected"; exit 1; }
+[ "$1 $2" = "--c 300" ] && [ -n "$VK_DRIVER_FILES" ] && [ "$MESA_LOADER_DRIVER_OVERRIDE" = kgsl ] || { echo "vulkan: no device"; exit 1; }
 [ ! -e "$(dirname "$0")/vkcube-hang" ] || exec sleep 30
 exit "$(cat "$(dirname "$0")/vkcube-rc")"
 '''), ('glxinfo', '''#!/bin/sh
 [ "$1" = -B ] || exit 2
-if [ "$MESA_LOADER_DRIVER_OVERRIDE" = zink ] && [ "$LIBGL_KOPPER_DRI2" = 1 ] && [ "$MESA_VK_WSI_DEBUG" = sw ]; then cat "$(dirname "$0")/glxinfo-out"
+if [ "$MESA_LOADER_DRIVER_OVERRIDE" = kgsl ] && [ "$FD_FORCE_KGSL" = 1 ] && [ "$FD_KGSL_ENABLE_DMABUF" = 1 ]; then cat "$(dirname "$0")/glxinfo-out"
+elif [ "$MESA_LOADER_DRIVER_OVERRIDE" = zink ] && [ "$LIBGL_KOPPER_DRI2" = 1 ] && [ "$MESA_VK_WSI_DEBUG" = sw ]; then
+ echo "OpenGL renderer string: zink Vulkan 1.4(Turnip Adreno (TM) 725 (MESA_TURNIP))"
 else echo "OpenGL renderer string: llvmpipe (LLVM 20.1.0, 128 bits)"; fi
 '''), ('glxgears', '''#!/bin/sh
-[ "$MESA_LOADER_DRIVER_OVERRIDE" = zink ] || { echo "1 frames in 5.0 seconds = 0.2 FPS"; exit 1; }
-cat "$(dirname "$0")/gears-out"
+d=$(dirname "$0")
+[ "$MESA_LOADER_DRIVER_OVERRIDE" = kgsl ] || { echo "1 frames in 5.0 seconds = 0.2 FPS"; exit 1; }
+cat "$d/gears-out"
+# The X server worked meanwhile: 60 more ticks of CPU time.
+echo "104 (Xorg) S 1 104 104 0 -1 4194560 100 0 0 0 310 30 0 0 20 0 2 0 5 0 0" > "$d/../proc/104/stat"
 exec sleep 30
+'''), ('glmark2', '''#!/bin/sh
+[ "$*" = "-b build:duration=2.0 -b texture:duration=2.0 -b shading:duration=2.0" ] && [ "$MESA_LOADER_DRIVER_OVERRIDE" = kgsl ] || exit 2
+cat "$(dirname "$0")/glmark2-out"; exit "$(cat "$(dirname "$0")/glmark2-rc")"
 '''), ('eglinfo', '''#!/bin/sh
 [ "$*" = "-B -p surfaceless" ] && [ "$MESA_LOADER_DRIVER_OVERRIDE" = kgsl ] || { echo "OpenGL ES profile renderer: llvmpipe"; exit 0; }
 cat "$(dirname "$0")/eglinfo-out"; exit "$(cat "$(dirname "$0")/eglinfo-rc")"
 '''))
 TURNIP = 'Turnip Adreno (TM) 725'
 ZINK = 'zink Vulkan 1.4(Turnip Adreno (TM) 725 (MESA_TURNIP))'
+GLAMOR_LOG = ('(II) modeset(0): glamor X acceleration enabled on FD725\n(II) modeset(0): glamor initialized\n'
+              '(II) modeset(0): Output DSI-1 connected\n')
+DRI3 = ('MESA_LOADER_DRIVER_OVERRIDE=kgsl FD_FORCE_KGSL=1 FD_KGSL_ENABLE_DMABUF=1 '
+        'VK_DRIVER_FILES=/usr/share/vulkan/icd.d/freedreno_icd.aarch64.json')
+COPY = ('VK_DRIVER_FILES=/usr/share/vulkan/icd.d/freedreno_icd.aarch64.json MESA_VK_WSI_DEBUG=sw MESA_LOADER_DRIVER_OVERRIDE=zink '
+        'LIBGL_KOPPER_DRI2=1')
 
 
 class Gpu(DesktopFixture):
@@ -1139,6 +1243,9 @@ class Gpu(DesktopFixture):
         (self.test / 'journalctl').write_text('#!/bin/sh\necho "journal override=${MESA_LOADER_DRIVER_OVERRIDE:-none}"\n')
         os.symlink('/dev/null', self.root / 'kgsl-node')
         (self.root / 'gpu-model').write_text('Adreno725v1\n')
+        (self.root / 'gpu-profile').write_text('dri3\n')
+        (self.root / 'xorg0.log').write_text(GLAMOR_LOG)
+        (self.root / 'proc/104/stat').write_text('104 (Xorg) S 1 104 104 0 -1 4194560 100 0 0 0 250 30 0 0 20 0 2 0 5 0 0\n')
         (self.test / 'probe-out').write_text(f'M19 GPU vulkan devices=1\nM19 GPU vulkan device={TURNIP}\nM19 GPU vulkan vendor=0x5143 type=1 '
                                              'driver=18 api=1.4.335 info=Mesa\nM19 GPU vulkan fill bytes=16777216 us=900 coherent=1 '
                                              'mismatches=0\nM19 GPU vulkan fill ok\n')
@@ -1146,15 +1253,19 @@ class Gpu(DesktopFixture):
         (self.test / 'vulkaninfo-out').write_text(f'Devices:\n========\nGPU0:\n\tvendorID = 0x5143\n\tdeviceName = {TURNIP}\n'
                                                   '\tdriverID = DRIVER_ID_MESA_TURNIP\n')
         (self.test / 'vkcube-rc').write_text('0\n')
-        (self.test / 'glxinfo-out').write_text(f'name of display: :0\nOpenGL vendor string: Mesa\nOpenGL renderer string: {ZINK}\n')
+        (self.test / 'glxinfo-out').write_text('name of display: :0\ndirect rendering: Yes\nOpenGL vendor string: freedreno\n'
+                                               'OpenGL renderer string: FD725\n')
         (self.test / 'gears-out').write_text('600 frames in 5.0 seconds = 119.934 FPS\n')
+        (self.test / 'glmark2-out').write_text('[build] use-vbo=false: FPS: 900\n=======\n                                  glmark2 Score: 812\n')
+        (self.test / 'glmark2-rc').write_text('0\n')
         (self.test / 'eglinfo-out').write_text('Surfaceless platform:\nEGL vendor string: Mesa Project\nOpenGL ES profile renderer: FD725\n')
         (self.test / 'eglinfo-rc').write_text('0\n')
 
-    def run_gpu(self, gears_ms=600):
+    def run_gpu(self, gears_ms=600, **env):
         wire = Wire()
-        environment = dict(os.environ, ASAN_OPTIONS='detect_leaks=0', M19_VBLANK_HZ='120')
-        for name in ('VK_DRIVER_FILES', 'MESA_VK_WSI_DEBUG', 'MESA_LOADER_DRIVER_OVERRIDE', 'LIBGL_KOPPER_DRI2'):
+        environment = dict(os.environ, ASAN_OPTIONS='detect_leaks=0', M19_VBLANK_HZ='120', **env)
+        for name in ('VK_DRIVER_FILES', 'MESA_VK_WSI_DEBUG', 'MESA_LOADER_DRIVER_OVERRIDE', 'LIBGL_KOPPER_DRI2', 'FD_FORCE_KGSL',
+                     'FD_KGSL_ENABLE_DMABUF'):
             environment.pop(name, None)
         subprocess.run([ARGS.driver, 'report-gpu', str(self.root), wire.path, '300', '5000', '300', str(gears_ms)], capture_output=True,
                        timeout=90, env=environment)
@@ -1162,7 +1273,7 @@ class Gpu(DesktopFixture):
 
     def gpu(self, log):
         fields = {}
-        for line in ('gpu', 'gpu-names', 'gpu-renderers'):
+        for line in ('gpu', 'gpu-names', 'gpu-renderers', 'glamor', 'glamor-renderers'):
             fields.update(item.split('=', 1) for item in re.search(rf'M19 R4 {line} (.*)\n', log).group(1).split())
         return fields
 
@@ -1172,50 +1283,67 @@ class Gpu(DesktopFixture):
         g = self.gpu(log)
         self.assertEqual((g['node'], g['model'], g['probe'], g['probe_device'], g['vk'], g['device'], g['cube'], g['gl'], g['gears'], g['egl']),
                          ('1', 'Adreno725v1', '1', 'Turnip_Adreno_(TM)_725', '1', 'Turnip_Adreno_(TM)_725', '1', '1', '1', '1'))
-        self.assertEqual((g['renderer'], g['gears_fps'], g['egl_renderer'], g['gpu_ok']), (ZINK.replace(' ', '_'), '119.9', 'FD725', '1'))
+        self.assertEqual((g['renderer'], g['gears_fps'], g['egl_renderer'], g['gpu_ok']), ('FD725', '119.9', 'FD725', '1'))
+        self.assertEqual((g['initialized'], g['enabled'], g['unit'], g['profile'], g['glmark2'], g['glamor_ok']), ('1', '1', '1', 'dri3', '812', '1'))
+        self.assertEqual((g['glamor_renderer'], g['copy_renderer']), ('FD725', ZINK.replace(' ', '_')))
+        self.assertGreater(float(g['xorg_cpu']), 0)
         self.assertGreater(float(g['cube_fps']), 0)
         self.assertEqual(self.desktop(log)['touch_ok'], '1')
         self.assertIn('M19STEP T12-gpu START', steps)
-        self.assertIn('M19STEP T12-gpu END 1 1 1 1 1 1 1', steps)
+        self.assertIn('M19STEP T12-gpu END 1 1 1 1 1 1 1 1', steps)
         self.assertLess(steps.index('M19STEP T12-touch END 12 2'), steps.index('M19STEP T12-gpu START'))
-        icd = 'VK_DRIVER_FILES=/usr/share/vulkan/icd.d/freedreno_icd.aarch64.json'
-        self.assertIn(f'M19 $ {icd} MESA_VK_WSI_DEBUG=sw {self.test}/gpu-probe vulkan\n', log)
-        self.assertIn(f'M19 $ {icd} MESA_VK_WSI_DEBUG=sw {self.test}/vkcube --c 300\n', log)
-        self.assertIn(f'M19 $ {icd} MESA_VK_WSI_DEBUG=sw MESA_LOADER_DRIVER_OVERRIDE=zink LIBGL_KOPPER_DRI2=1 {self.test}/glxgears\n', log)
-        self.assertIn(f'M19 $ MESA_LOADER_DRIVER_OVERRIDE=kgsl {self.test}/eglinfo -B -p surfaceless\n', log)
+        self.assertIn(f'M19 $ {DRI3} {self.test}/gpu-probe vulkan\n', log)
+        self.assertIn(f'M19 $ {DRI3} {self.test}/vkcube --c 300\n', log)
+        self.assertIn(f'M19 $ {DRI3} {self.test}/glxgears\n', log)
+        self.assertIn(f'M19 $ {DRI3} {self.test}/glxinfo -B\n', log)
+        self.assertIn(f'M19 $ {COPY} {self.test}/glxinfo -B\n', log)
+        self.assertIn(f'M19 $ {DRI3} {self.test}/eglinfo -B -p surfaceless\n', log)
         # The variables reach each tool and nothing else.
         self.assertIn('journal override=none', log)
 
     def test_each_gpu_check_fails_the_run(self):
-        changes = {'node': lambda: ((self.root / 'kgsl-node').unlink(), (self.root / 'kgsl-node').write_text('')),
-                   'probe': lambda: (self.test / 'probe-rc').write_text('1\n'),
-                   'probe_device': lambda: (self.test / 'probe-out').write_text('M19 GPU vulkan device=llvmpipe (LLVM 20)\nM19 GPU vulkan fill ok\n'),
-                   'probe_fill': lambda: (self.test / 'probe-out').write_text(f'M19 GPU vulkan device={TURNIP}\nM19 GPU vulkan FAIL fill\n'),
-                   'vk': lambda: (self.test / 'vulkaninfo-out').write_text(f'\tdeviceName = {TURNIP}\n\tdriverID = DRIVER_ID_MESA_LLVMPIPE\n'),
-                   'vk_name': lambda: (self.test / 'vulkaninfo-out').write_text('\tdeviceName = lavapipe\n\tdriverID = DRIVER_ID_MESA_TURNIP\n'),
-                   'cube': lambda: (self.test / 'vkcube-rc').write_text('1\n'),
-                   'gl': lambda: (self.test / 'glxinfo-out').write_text('OpenGL renderer string: llvmpipe (LLVM 20.1.0, 128 bits)\n'),
-                   'gears': lambda: (self.test / 'gears-out').write_text('0 frames in 5.0 seconds = 0.000 FPS\n')}
-        flag = {'probe_device': 'probe', 'probe_fill': 'probe', 'vk_name': 'vk'}
-        for change, apply in changes.items():
+        root, test = self.root, self.test
+        changes = {
+            'node': (lambda: ((root / 'kgsl-node').unlink(), (root / 'kgsl-node').write_text('')), 'node', '0', {}),
+            'probe': (lambda: (test / 'probe-rc').write_text('1\n'), 'probe', '0', {}),
+            'probe_device': (lambda: (test / 'probe-out').write_text('M19 GPU vulkan device=llvmpipe (LLVM 20)\nM19 GPU vulkan fill ok\n'), 'probe', '0', {}),
+            'probe_fill': (lambda: (test / 'probe-out').write_text(f'M19 GPU vulkan device={TURNIP}\nM19 GPU vulkan FAIL fill\n'), 'probe', '0', {}),
+            'vk': (lambda: (test / 'vulkaninfo-out').write_text(f'\tdeviceName = {TURNIP}\n\tdriverID = DRIVER_ID_MESA_LLVMPIPE\n'), 'vk', '0', {}),
+            'vk_name': (lambda: (test / 'vulkaninfo-out').write_text('\tdeviceName = lavapipe\n\tdriverID = DRIVER_ID_MESA_TURNIP\n'), 'vk', '0', {}),
+            'cube': (lambda: (test / 'vkcube-rc').write_text('1\n'), 'cube', '0', {}),
+            'gl': (lambda: (test / 'glxinfo-out').write_text('OpenGL renderer string: llvmpipe (LLVM 20.1.0, 128 bits)\n'), 'gl', '0', {}),
+            'gl_zink': (lambda: (test / 'glxinfo-out').write_text(f'OpenGL renderer string: {ZINK}\n'), 'gl', '0', {}),
+            'gears': (lambda: (test / 'gears-out').write_text('0 frames in 5.0 seconds = 0.000 FPS\n'), 'gears', '0', {}),
+            'glamor_initialized': (lambda: (root / 'xorg0.log').write_text(GLAMOR_LOG.replace('glamor initialized', 'glamor initialization failed')),
+                                   'initialized', '0', {}),
+            'glamor_enabled': (lambda: (root / 'xorg0.log').write_text(GLAMOR_LOG.replace('glamor X acceleration enabled on FD725\n', '')),
+                               'enabled', '0', {}),
+            'glamor_cpu': (lambda: (root / 'xorg0.log').write_text(GLAMOR_LOG.replace('enabled on FD725', 'enabled on llvmpipe')), 'glamor_ok', '0', {}),
+            'unit': (lambda: None, 'unit', '0', {'M19_ACTIVE_RC': '3'}),
+            'profile': (lambda: (root / 'gpu-profile').write_text('copy\n'), 'profile', 'copy', {}),
+            'no_profile': (lambda: (root / 'gpu-profile').unlink(), 'profile', 'none', {}),
+        }
+        for change, (apply, flag, value, env) in changes.items():
             with self.subTest(change=change):
                 self.setUp()
+                root, test = self.root, self.test
                 apply()
-                fields, log, _ = self.run_gpu()
+                fields, log, _ = self.run_gpu(**env)
                 g = self.gpu(log)
-                self.assertEqual((fields[3], g[flag.get(change, change)], g['gpu_ok']), ('0', '0', '0'))
+                self.assertEqual((fields[3], g[flag], g['gpu_ok']), ('0', value, '0'))
                 self.assertEqual(self.desktop(log)['touch_ok'], '1')
 
-    def test_freedreno_without_x_is_recorded_not_judged(self):
+    def test_glmark2_and_freedreno_without_x_are_recorded_not_judged(self):
         (self.test / 'eglinfo-rc').write_text('1\n')
+        (self.test / 'glmark2-rc').write_text('1\n')
         fields, log, _ = self.run_gpu()
         g = self.gpu(log)
-        self.assertEqual((fields[3], g['egl'], g['gpu_ok']), ('1', '0', '1'))
+        self.assertEqual((fields[3], g['egl'], g['glmark2'], g['gpu_ok']), ('1', '0', '-1', '1'))
 
     def test_without_x_the_gpu_phase_does_not_run(self):
         (self.test / 'x-up').unlink()
         fields, log, steps = self.run_gpu()
-        self.assertEqual((fields[3], self.gpu(log)['gpu_ok'], self.gpu(log)['probe']), ('0', '0', '0'))
+        self.assertEqual((fields[3], self.gpu(log)['gpu_ok'], self.gpu(log)['probe'], self.gpu(log)['glamor_ok']), ('0', '0', '0', '0'))
         self.assertFalse([line for line in steps if 'T12-gpu' in line])
 
     def test_a_hung_gpu_tool_is_abandoned_and_the_report_still_goes(self):
@@ -1224,9 +1352,8 @@ class Gpu(DesktopFixture):
         fields, log, steps = self.run_gpu()
         self.assertLess(time.monotonic() - started, 25)
         g = self.gpu(log)
-        self.assertEqual((fields[3], g['cube'], g['gl'], g['gears']), ('0', '0', '1', '1'))
-        self.assertIn('M19STEP T12-gpu END 1 1 1 0 1 1 1', steps)
-
+        self.assertEqual((fields[3], g['cube'], g['gl'], g['gears'], g['glamor_ok']), ('0', '0', '1', '1', '1'))
+        self.assertIn('M19STEP T12-gpu END 1 1 1 0 1 1 1 1', steps)
 
 LOADER = '''#!/bin/sh
 echo "$*" >> "$M19_TEST/load.log"
@@ -1272,7 +1399,8 @@ class GpuScript(unittest.TestCase):
         for name in ('run/m19', 'dev'):
             (self.new / name).mkdir(parents=True)
         for tool in ('usr/lib/aarch64-linux-gnu/libvulkan.so.1', 'usr/share/vulkan/icd.d/freedreno_icd.aarch64.json', 'usr/bin/vulkaninfo',
-                     'usr/bin/vkcube', 'usr/bin/glxinfo', 'usr/bin/glxgears', 'usr/bin/eglinfo'):
+                     'usr/bin/vkcube', 'usr/bin/glxinfo', 'usr/bin/glxgears', 'usr/bin/eglinfo', 'usr/bin/glmark2',
+                     'usr/lib/xorg/modules/libglamoregl.so', 'usr/lib/aarch64-linux-gnu/gbm/dri_gbm.so', 'usr/lib/aarch64-linux-gnu/dri/kgsl_dri.so'):
             (self.new / tool).parent.mkdir(parents=True, exist_ok=True)
             (self.new / tool).write_text('x\n')
 
@@ -1304,6 +1432,7 @@ class GpuScript(unittest.TestCase):
         self.assertEqual(nodes, [('600', f'{self.new}/dev/kgsl-3d0', 'c', '504', '0'), ('600', f'{self.new}/dev/dma_heap/system', 'c', '248', '1')])
         self.assertEqual((self.new / 'run/m19/m19-gpu-probe').read_bytes(), b'\x7fELF probe')
         self.assertEqual(oct((self.new / 'run/m19/m19-gpu-probe').stat().st_mode & 0o777), '0o755')
+        self.assertEqual((self.new / 'run/m19/xorg-glamor.conf').read_bytes(), r4plan.render()['m19/r4/xorg-glamor.conf'])
         self.assertIn('M19 T9 gpu: modules=110 firmware=7 kgsl=504:0 heap=248:1 path=/run/m19/firmware\n', result.stderr)
 
     def test_missing_firmware_stops_before_any_module(self):
@@ -1341,6 +1470,12 @@ class GpuScript(unittest.TestCase):
         self.setUp()
         (self.new / 'usr/bin/vkcube').unlink()
         self.assertFails('missing usr/bin/vkcube')
+        self.setUp()
+        (self.new / 'usr/lib/xorg/modules/libglamoregl.so').unlink()
+        self.assertFails('missing usr/lib/xorg/modules/libglamoregl.so')
+        self.setUp()
+        (self.root / 'm19/r4/xorg-glamor.conf').unlink()
+        self.assertFails('xorg-glamor')
 
     def test_bad_plan_lines_stop(self):
         for name, text, reason in (('firmware', '../a730_sqe.fw\n', 'firmware name ../a730_sqe.fw'),
@@ -1510,11 +1645,42 @@ class Shim(unittest.TestCase):
         if not self.lib or not self.driver:
             self.skipTest('shim not built in this run')
 
-    def run_driver(self, mode, preload=True):
-        environment = {key: value for key, value in os.environ.items() if not key.startswith(('ASAN', 'UBSAN', 'LD_PRELOAD'))}
+    def run_driver(self, mode, preload=True, **env):
+        environment = {key: value for key, value in os.environ.items() if not key.startswith(('ASAN', 'UBSAN', 'LD_PRELOAD', 'M19_SHIM_GBM'))}
         if preload:
             environment['LD_PRELOAD'] = self.lib
+        environment.update(env)
         return subprocess.run([self.driver, mode], capture_output=True, text=True, env=environment, timeout=30)
+
+    def test_the_gbm_bridge_hands_out_card0_handles(self):
+        done = self.run_driver('gbm', M19_SHIM_GBM='1')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        lines = done.stdout.splitlines()
+        kms = re.search(r'kms (\d+)$', lines[-1]).group(1)
+        # a: imported once, then cached; its second plane is the same dma-buf, so card0 gives the same handle;
+        # b has no dma-buf and keeps GBM's handle; destroying a closes its one card0 handle once; c, perhaps
+        # at a's old address, is a new import.
+        self.assertEqual(lines, [f'prime kms={kms} handle 1281', 'a 1281', 'a again 1281', f'prime kms={kms} handle 1281 again', 'a plane1 1281',
+                                 'b 4128', f'gem-close kms={kms} handle 1281', f'prime kms={kms} handle 1282', 'c 1282',
+                                 f'gem-close kms={kms} handle 1282', f'imports 2 closes 2 destroyed 3 kms {kms}'])
+        self.assertIn('M19 SHIM gbm plane 0 handle 4112 -> kms 1281\n', done.stderr)
+        self.assertIn('M19 SHIM gbm plane 0 keeps handle 4128', done.stderr)
+        self.assertIn('gbm bridge on', done.stderr)
+
+    def test_the_gbm_bridge_is_off_unless_asked(self):
+        for preload, env in ((True, {}), (True, {'M19_SHIM_GBM': '0'}), (False, {'M19_SHIM_GBM': '1'})):
+            with self.subTest(preload=preload, env=env):
+                done = self.run_driver('gbm', preload=preload, **env)
+                self.assertEqual(done.returncode, 0, done.stderr)
+                self.assertEqual(done.stdout.splitlines()[:5], ['a 4112', 'a again 4112', 'a plane1 4113', 'b 4128', 'c 4144'])
+                self.assertRegex(done.stdout, r'imports 0 closes 0 destroyed 3 kms \d+\n')
+
+    def test_a_failed_import_keeps_the_gbm_handle(self):
+        done = self.run_driver('gbm', M19_SHIM_GBM='1', FAKE_PRIME_FAIL='1')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(done.stdout.splitlines()[:5], ['a 4112', 'a again 4112', 'a plane1 4113', 'b 4128', 'c 4144'])
+        self.assertIn('M19 SHIM gbm plane 0 keeps handle 4112', done.stderr)
+        self.assertRegex(done.stdout, r'imports 0 closes 0 destroyed 3 ')
 
     def test_only_range_enum_and_blob_properties_remain(self):
         done = self.run_driver('filter')

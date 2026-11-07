@@ -1,9 +1,12 @@
 /* A stand-in for the libdrm calls xorg-shim.c wraps, with one connector carrying every kind of
  * property SDE might: RANGE, ENUM, BLOB, BITMASK, OBJECT, SIGNED_RANGE and an unreadable one.
  * Built only for the offline tests. */
+#define _POSIX_C_SOURCE 200809L
+#include <fcntl.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 struct fake_property {
     uint32_t prop_id, flags;
@@ -97,4 +100,83 @@ void drmModeFreeConnector(struct fake_connector *c)
     free(c->props);
     free(c->prop_values);
     free(c);
+}
+
+/* R4b: the libgbm calls the glamor bridge wraps. A buffer's GBM handle is 0x1000 + 16 * id + plane, as
+ * KGSL's would be. An exportable buffer has one backing file, as a dma-buf would, and every plane's fd
+ * is a dup of it, so card0's PRIME import gives all its planes one handle. */
+union fake_gbm_handle {
+    void *ptr;
+    int32_t s32;
+    uint32_t u32;
+    int64_t s64;
+    uint64_t u64;
+};
+struct gbm_device {
+    int fd;
+};
+struct gbm_bo {
+    int id, backing;
+    struct gbm_device *device;
+};
+static struct gbm_device fake_device = {.fd = -1};
+int fake_gbm_destroyed;
+
+void fake_gbm_set_kms_fd(int fd)
+{
+    fake_device.fd = fd;
+}
+
+struct gbm_bo *fake_gbm_bo_new(int id, int exportable)
+{
+    struct gbm_bo *bo = calloc(1, sizeof(*bo));
+    if (!bo)
+        abort();
+    bo->id = id;
+    bo->backing = -1;
+    if (exportable) {
+        char name[] = "/tmp/fake-dmabuf-XXXXXX";
+        bo->backing = mkstemp(name);
+        if (bo->backing < 0)
+            abort();
+        unlink(name);
+    }
+    bo->device = &fake_device;
+    return bo;
+}
+
+union fake_gbm_handle gbm_bo_get_handle_for_plane(struct gbm_bo *bo, int plane)
+{
+    union fake_gbm_handle h = {.u64 = 0};
+    h.u32 = 0x1000u + 16u * (uint32_t)bo->id + (uint32_t)plane;
+    return h;
+}
+
+union fake_gbm_handle gbm_bo_get_handle(struct gbm_bo *bo)
+{
+    return gbm_bo_get_handle_for_plane(bo, 0);
+}
+
+int gbm_bo_get_fd_for_plane(struct gbm_bo *bo, int plane)
+{
+    (void)plane;
+    return bo->backing >= 0 ? dup(bo->backing) : -1;
+}
+
+struct gbm_device *gbm_bo_get_device(struct gbm_bo *bo)
+{
+    return bo->device;
+}
+
+int gbm_device_get_fd(struct gbm_device *device)
+{
+    return device->fd;
+}
+
+void gbm_bo_destroy(struct gbm_bo *bo)
+{
+    fake_gbm_destroyed++;
+    if (bo->backing >= 0)
+        close(bo->backing);
+    free(bo);
 }

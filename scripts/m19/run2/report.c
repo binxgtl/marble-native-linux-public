@@ -547,11 +547,62 @@ static void desktop_phase(const struct m19_report *c, int tty, struct desktop *d
 }
 
 struct gpu {
-    int node, probe, vk, cube, gl, gears, egl;
-    long cube_ms;
-    double cube_fps, gears_fps;
-    char model[64], probe_device[96], device[96], renderer[160], egl_renderer[160];
+    int node, probe, vk, cube, gl, gears, egl, glamor_init, glamor_on, xorg_unit, glamor_ok;
+    long cube_ms, glmark2;
+    double cube_fps, gears_fps, xorg_cpu;
+    char model[64], probe_device[96], device[96], renderer[160], egl_renderer[160], profile[16], glamor_renderer[160], copy_renderer[160];
 };
+
+/* A whole small file as text; -1 when it cannot be read. */
+static long file_text(const char *path, char *text, size_t room)
+{
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0)
+        return -1;
+    size_t n = 0;
+    for (;;) {
+        ssize_t got = read(fd, text + n, room - 1 - n);
+        if (got < 0 && errno == EINTR)
+            continue;
+        if (got <= 0)
+            break;
+        n += (size_t)got;
+        if (n == room - 1)
+            break;
+    }
+    close(fd);
+    text[n] = 0;
+    return (long)n;
+}
+
+/* CPU time the X server has used, in clock ticks: utime and stime of the process named Xorg. */
+static long xorg_ticks(const struct m19_report *c)
+{
+    DIR *directory = opendir(c->proc);
+    long ticks = -1;
+    if (!directory)
+        return -1;
+    struct dirent *entry;
+    while (ticks < 0 && (entry = readdir(directory))) {
+        if (entry->d_name[0] < '1' || entry->d_name[0] > '9')
+            continue;
+        char path[512], comm[32], fields[1024];
+        snprintf(path, sizeof(path), "%s/%s/comm", c->proc, entry->d_name);
+        if (read_small(path, comm, sizeof(comm)))
+            continue;
+        comm[strcspn(comm, "\n")] = 0;
+        if (strcmp(comm, "Xorg"))
+            continue;
+        snprintf(path, sizeof(path), "%s/%s/stat", c->proc, entry->d_name);
+        const char *after = read_small(path, fields, sizeof(fields)) ? NULL : strrchr(fields, ')');
+        unsigned long user, system;
+        /* After the command: state, then fields 4 to 13, then utime and stime. */
+        if (after && sscanf(after + 1, " %*c %*s %*s %*s %*s %*s %*s %*s %*s %*s %*s %lu %lu", &user, &system) == 2)
+            ticks = (long)(user + system);
+    }
+    closedir(directory);
+    return ticks;
+}
 
 /* A copy of a section's output, as text. */
 static char *section_text(size_t start, size_t length)
@@ -610,6 +661,24 @@ static void gpu_phase(const struct m19_report *c, int tty, struct gpu *g)
         snprintf(g->model, sizeof(g->model), "unreadable");
     g->model[strcspn(g->model, "\n")] = 0;
 
+    if (c->glamor) {
+        /* What the X server and the session got: glamor's own log lines, its unit, the session's profile. */
+        static char xlog[512 * 1024];
+        if (file_text(c->xorg_logs[0], xlog, sizeof(xlog)) >= 0) {
+            g->glamor_init = strstr(xlog, "glamor initialized") != NULL;
+            line_value(xlog, "glamor X acceleration enabled on", g->glamor_renderer, sizeof(g->glamor_renderer));
+            g->glamor_on = g->glamor_renderer[0] != 0;
+        }
+        unsigned char out[64];
+        size_t taken = 0;
+        char *active[] = {(char *)c->systemctl, "is-active", (char *)c->xorg_unit, NULL};
+        g->xorg_unit = capture(active, out, sizeof(out), &taken, c->command_ms) == 0 && taken >= 6 && !memcmp(out, "active", 6);
+        if (read_small(c->gpu_profile, g->profile, sizeof(g->profile)))
+            snprintf(g->profile, sizeof(g->profile), "none");
+        g->profile[strcspn(g->profile, "\n")] = 0;
+        g->glamor_ok = g->glamor_init && g->glamor_on && adreno_named(g->glamor_renderer) && g->xorg_unit && !strcmp(g->profile, "dri3");
+    }
+
     char *probe[] = {(char *)c->gpu_probe, "vulkan", NULL};
     int status = section_env(probe, c->vk_env, SECTION_CAP / 4, c->gpu_ms, &start, &length);
     char *text = section_text(start, length);
@@ -634,11 +703,20 @@ static void gpu_phase(const struct m19_report *c, int tty, struct gpu *g)
     char *info[] = {(char *)c->glxinfo, "-B", NULL};
     status = section_env(info, c->gl_env, SECTION_CAP / 4, c->gpu_ms, &start, &length);
     line_value(section_text(start, length), "OpenGL renderer string", g->renderer, sizeof(g->renderer));
-    g->gl = status == 0 && adreno_named(g->renderer);
+    /* With glamor, GL must be freedreno itself through DRI3, not zink copying through the CPU. */
+    g->gl = status == 0 && adreno_named(g->renderer) && !(c->glamor && strstr(g->renderer, "zink"));
 
-    /* glxgears runs until its window closes: the time limit ends it, and its FPS lines are the result. */
+    /* glxgears runs until its window closes: the time limit ends it, and its FPS lines are the result.
+     * The X server's CPU time meanwhile says whether frames reach it through the CPU. */
     char *gears[] = {(char *)c->glxgears, NULL};
+    long ticks = xorg_ticks(c);
+    unsigned long long gears_start = m19_now_ms();
     (void)section_env(gears, c->gl_env, SECTION_CAP / 4, c->gears_ms, &start, &length);
+    long ticks_after = xorg_ticks(c);
+    unsigned long long gears_ms = m19_now_ms() - gears_start;
+    long hz = sysconf(_SC_CLK_TCK);
+    g->xorg_cpu = ticks >= 0 && ticks_after >= ticks && gears_ms && hz > 0 ? (double)(ticks_after - ticks) * 100000.0 / ((double)hz * (double)gears_ms)
+                                                                           : -1.0;
     text = section_text(start, length);
     for (char *line = strtok(text, "\n"); line; line = strtok(NULL, "\n")) {
         int count;
@@ -649,13 +727,28 @@ static void gpu_phase(const struct m19_report *c, int tty, struct gpu *g)
         }
     }
 
-    /* freedreno itself on KGSL, without X: the driver a GPU X server would need. Recorded, not judged. */
+    /* A broader GL load, and GL through the copy profile for comparison. Recorded, not judged. */
+    g->glmark2 = -1;
+    if (c->glmark2) {
+        char *mark[] = {(char *)c->glmark2, "-b", "build:duration=2.0", "-b", "texture:duration=2.0", "-b", "shading:duration=2.0", NULL};
+        status = section_env(mark, c->gl_env, SECTION_CAP / 4, c->gpu_ms, &start, &length);
+        char score[32];
+        line_value(section_text(start, length), "glmark2 Score", score, sizeof(score));
+        if (status == 0 && score[0])
+            g->glmark2 = strtol(score, NULL, 10);
+    }
+    if (c->copy_env) {
+        status = section_env(info, c->copy_env, SECTION_CAP / 4, c->gpu_ms, &start, &length);
+        line_value(section_text(start, length), "OpenGL renderer string", g->copy_renderer, sizeof(g->copy_renderer));
+    }
+
+    /* freedreno itself on KGSL, without X: the driver a GPU X server needs. Recorded, not judged. */
     char *egl[] = {(char *)c->eglinfo, "-B", "-p", "surfaceless", NULL};
     status = section_env(egl, c->egl_env, SECTION_CAP / 4, c->gpu_ms, &start, &length);
     line_value(section_text(start, length), "renderer", g->egl_renderer, sizeof(g->egl_renderer));
     g->egl = status == 0 && adreno_named(g->egl_renderer);
-    (void)m19_wire_line(tty, c->pace_ms, M19_DEVICE_STEP " T12-gpu END %d %d %d %d %d %d %d", g->node, g->probe, g->vk, g->cube, g->gl, g->gears,
-                        g->egl);
+    (void)m19_wire_line(tty, c->pace_ms, M19_DEVICE_STEP " T12-gpu END %d %d %d %d %d %d %d %d", g->node, g->probe, g->vk, g->cube, g->gl, g->gears,
+                        g->egl, g->glamor_ok);
 }
 
 static void desktop_sections(const struct m19_report *c)
@@ -929,12 +1022,17 @@ int m19_report_main(const struct m19_report *c)
     }
     int gpu_ok = 1;
     if (c->gpu) {
-        gpu_ok = g.node && g.probe && g.vk && g.cube && g.gl && g.gears;
+        gpu_ok = g.node && g.probe && g.vk && g.cube && g.gl && g.gears && (!c->glamor || g.glamor_ok);
         /* Three lines, each well inside addf's buffer however long the names run. */
         addf("M19 R4 gpu node=%d probe=%d vk=%d cube=%d cube_ms=%ld cube_fps=%.1f gl=%d gears=%d gears_fps=%.1f egl=%d gpu_ok=%d\n", g.node, g.probe,
              g.vk, g.cube, g.cube_ms, g.cube_fps, g.gl, g.gears, g.gears_fps, g.egl, gpu_ok);
         addf("M19 R4 gpu-names model=%s probe_device=%s device=%s\n", token(g.model), token(g.probe_device), token(g.device));
         addf("M19 R4 gpu-renderers renderer=%s egl_renderer=%s\n", token(g.renderer), token(g.egl_renderer));
+        if (c->glamor) {
+            addf("M19 R4 glamor initialized=%d enabled=%d unit=%d profile=%s xorg_cpu=%.1f glmark2=%ld glamor_ok=%d\n", g.glamor_init, g.glamor_on,
+                 g.xorg_unit, token(g.profile), g.xorg_cpu, g.glmark2, g.glamor_ok);
+            addf("M19 R4 glamor-renderers glamor_renderer=%s copy_renderer=%s\n", token(g.glamor_renderer), token(g.copy_renderer));
+        }
     }
     int all_ok = init_ok && state_ok && targets_ok && writes_ok && ro_ok && mounts_ok && !write_warning && desktop_ok && gpu_ok;
     addf("M19 R2 verdict init=%d state=%s targets=%d writes=%d read_only=%d mounts=%d write_warning=%d all_ok=%d\n", init_ok, state, targets_ok,

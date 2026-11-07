@@ -47,6 +47,11 @@ struct m19_report {
     unsigned gpu, gpu_ms, gears_ms, cube_frames;
     const char *kgsl_node, *kgsl_model, *gpu_probe, *vulkaninfo, *vkcube, *glxinfo, *glxgears, *eglinfo;
     const char *const *vk_env, *const *gl_env, *const *egl_env;
+    /* R4b: Xorg on the GPU. glamor's log lines, its unit, the profile the session chose, glmark2, and
+     * GL through the copy profile for comparison. */
+    unsigned glamor;
+    const char *xorg_unit, *gpu_profile, *glmark2;
+    const char *const *copy_env;
 };
 
 /* R3's guard, a service of its own beside the desktop. It stops the desktop units and paints YELLOW

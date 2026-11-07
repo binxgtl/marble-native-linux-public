@@ -1,7 +1,7 @@
 /* M19 R4 PID 1. R3's steps and hand-off, with T9-gpu after T9-desktop: KGSL and its suppliers, the GPU
- * firmware in RAM and the GPU's nodes. Only a full PASS hands over; nothing restarts the phone.
- * Run as "m19-report report" by systemd, the same binary is the R4 reporter: R3's desktop checks, then
- * the GPU through the tree's own Mesa. */
+ * firmware in RAM, the GPU's nodes and glamor's configuration. Only a full PASS hands over; nothing restarts
+ * the phone. Run as "m19-report report" by systemd, the same binary is the R4 reporter: R3's desktop checks,
+ * then the GPU through the tree's own Mesa, glamor and the session's GPU profile. */
 #define _GNU_SOURCE
 #include <poll.h>
 #include <signal.h>
@@ -32,12 +32,12 @@ static struct m19_run run = {
     .link_ms = 420000, .log_ms = 300000, .beat_ms = 5000,
 };
 
-/* Turnip only, through its own manifest, and Vulkan presenting through the CPU: this X server has no DRI3.
- * GL goes through zink on Turnip. The XFCE session carries the same variables (r4plan.GL_ENV). */
+/* The session's two profiles (r4plan.DRI3_ENV and COPY_ENV). The checks use dri3, the profile a glamor X
+ * server gives every program: freedreno on KGSL for GL, Turnip for Vulkan, both presenting through DRI3.
+ * copy, R4a's path, is run once for comparison. */
 #define M19_VK_ICD "VK_DRIVER_FILES=/usr/share/vulkan/icd.d/freedreno_icd.aarch64.json"
-static const char *const vk_env[] = {M19_VK_ICD, "MESA_VK_WSI_DEBUG=sw", NULL};
-static const char *const gl_env[] = {M19_VK_ICD, "MESA_VK_WSI_DEBUG=sw", "MESA_LOADER_DRIVER_OVERRIDE=zink", "LIBGL_KOPPER_DRI2=1", NULL};
-static const char *const egl_env[] = {"MESA_LOADER_DRIVER_OVERRIDE=kgsl", NULL};
+static const char *const dri3_env[] = {"MESA_LOADER_DRIVER_OVERRIDE=kgsl", "FD_FORCE_KGSL=1", "FD_KGSL_ENABLE_DMABUF=1", M19_VK_ICD, NULL};
+static const char *const copy_env[] = {M19_VK_ICD, "MESA_VK_WSI_DEBUG=sw", "MESA_LOADER_DRIVER_OVERRIDE=zink", "LIBGL_KOPPER_DRI2=1", NULL};
 
 static const struct m19_report report = {
     .tty = "/dev/ttyGS0", .kmsg = "/dev/kmsg", .proc1_exe = "/proc/1/exe", .block = "/sys/block", .mountinfo = "/proc/self/mountinfo",
@@ -48,13 +48,14 @@ static const struct m19_report report = {
     .desktop = 1, .x_wait_ms = 120000, .session_wait_ms = 120000, .touch_ms = 60000, .want_hz = 120.0,
     .xdpyinfo = "/usr/bin/xdpyinfo", .xrandr = "/usr/bin/xrandr", .xinput = "/usr/bin/xinput", .ps = "/usr/bin/ps", .proc = "/proc",
     .interrupts = "/proc/interrupts", .card = "/dev/dri/card0", .touch_name = "goodix_ts",
-    .xorg_logs = {"/var/log/Xorg.0.log", "/var/log/Xorg.60.log"},
+    .xorg_logs = {"/var/log/Xorg.0.log", "/var/log/Xorg.cpu.log"},
     .guard_unit = "m19-r3-guard.service", .guard_marker = "/run/m19/guard-tripped",
     .battery_temp = "/sys/class/power_supply/battery/temp", .thermal = "/sys/class/thermal",
     .gpu = 1, .gpu_ms = 30000, .gears_ms = 11000, .cube_frames = 300, .kgsl_node = "/dev/kgsl-3d0",
     .kgsl_model = "/sys/class/kgsl/kgsl-3d0/gpu_model", .gpu_probe = "/run/m19/m19-gpu-probe", .vulkaninfo = "/usr/bin/vulkaninfo",
     .vkcube = "/usr/bin/vkcube", .glxinfo = "/usr/bin/glxinfo", .glxgears = "/usr/bin/glxgears", .eglinfo = "/usr/bin/eglinfo",
-    .vk_env = vk_env, .gl_env = gl_env, .egl_env = egl_env,
+    .vk_env = dri3_env, .gl_env = dri3_env, .egl_env = dri3_env, .glamor = 1, .xorg_unit = "marble-xorg.service",
+    .gpu_profile = "/run/m19/gpu-profile", .glmark2 = "/usr/bin/glmark2", .copy_env = copy_env,
 };
 
 /* Battery 42.0 C, any thermal zone 80 C, CPU 90 % busy for a minute, or fifteen minutes in all. */

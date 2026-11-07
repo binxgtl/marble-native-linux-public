@@ -221,9 +221,8 @@ static int report_desktop_mode(char **argv)
 
 /* R4's GPU phase on the desktop's fakes. The variables are pid4.c's, so the fakes can check they arrive. */
 #define TEST_VK_ICD "VK_DRIVER_FILES=/usr/share/vulkan/icd.d/freedreno_icd.aarch64.json"
-static const char *const test_vk_env[] = {TEST_VK_ICD, "MESA_VK_WSI_DEBUG=sw", NULL};
-static const char *const test_gl_env[] = {TEST_VK_ICD, "MESA_VK_WSI_DEBUG=sw", "MESA_LOADER_DRIVER_OVERRIDE=zink", "LIBGL_KOPPER_DRI2=1", NULL};
-static const char *const test_egl_env[] = {"MESA_LOADER_DRIVER_OVERRIDE=kgsl", NULL};
+static const char *const test_dri3_env[] = {"MESA_LOADER_DRIVER_OVERRIDE=kgsl", "FD_FORCE_KGSL=1", "FD_KGSL_ENABLE_DMABUF=1", TEST_VK_ICD, NULL};
+static const char *const test_copy_env[] = {TEST_VK_ICD, "MESA_VK_WSI_DEBUG=sw", "MESA_LOADER_DRIVER_OVERRIDE=zink", "LIBGL_KOPPER_DRI2=1", NULL};
 
 static int report_gpu_mode(char **argv)
 {
@@ -233,7 +232,7 @@ static int report_gpu_mode(char **argv)
     const char *names[] = {"test/kmsg", "proc1-exe", "block", "mountinfo", "test/systemctl", "test/journalctl", "test/analyze", "test/display",
                            "test/xdpyinfo", "test/xrandr", "test/xinput", "test/ps", "proc", "interrupts", "card", "xorg0.log", "xorg60.log",
                            "guard-tripped", "battery-temp", "thermal", "kgsl-node", "gpu-model", "test/gpu-probe", "test/vulkaninfo",
-                           "test/vkcube", "test/glxinfo", "test/glxgears", "test/eglinfo"};
+                           "test/vkcube", "test/glxinfo", "test/glxgears", "test/eglinfo", "gpu-profile", "test/glmark2"};
     for (unsigned i = 0; i < sizeof(names) / sizeof(names[0]); i++)
         snprintf(paths[i], sizeof(paths[i]), "%s/%s", root, names[i]);
     struct m19_report c = {.tty = argv[3], .kmsg = paths[0], .proc1_exe = paths[1], .block = paths[2], .mountinfo = paths[3],
@@ -247,7 +246,9 @@ static int report_gpu_mode(char **argv)
                            .guard_marker = paths[17], .battery_temp = paths[18], .thermal = paths[19], .gpu = 1, .gpu_ms = 5000,
                            .gears_ms = (unsigned)strtoul(argv[7], NULL, 10), .cube_frames = 300, .kgsl_node = paths[20],
                            .kgsl_model = paths[21], .gpu_probe = paths[22], .vulkaninfo = paths[23], .vkcube = paths[24], .glxinfo = paths[25],
-                           .glxgears = paths[26], .eglinfo = paths[27], .vk_env = test_vk_env, .gl_env = test_gl_env, .egl_env = test_egl_env};
+                           .glxgears = paths[26], .eglinfo = paths[27], .vk_env = test_dri3_env, .gl_env = test_dri3_env,
+                           .egl_env = test_dri3_env, .glamor = 1, .xorg_unit = "marble-xorg.service", .gpu_profile = paths[28],
+                           .glmark2 = paths[29], .copy_env = test_copy_env};
     return m19_report_main(&c);
 }
 

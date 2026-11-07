@@ -7,7 +7,7 @@ wraps=-Wl,--wrap=umount2,--wrap=mount,--wrap=chroot,--wrap=chdir,--wrap=execve,-
 # The Xorg preload library on a fake libdrm. Never sanitized: ASan must come first in a process, a preload cannot.
 gcc -std=c11 -O2 -Wall -Wextra -Werror -shared -fPIC "$src/fake-drm.c" -o "$out/libfakedrm.so"
 gcc -std=c11 -O2 -Wall -Wextra -Werror -shared -fPIC "$src/xorg-shim.c" -ldl -o "$out/xorg-shim-test.so"
-gcc -std=c11 -O0 -Wall -Wextra -Werror "$src/test-shim.c" -L"$out" -lfakedrm -Wl,-rpath,"$(cd "$out" && pwd)" -o "$out/test-shim"
+gcc -std=c11 -O0 -Wall -Wextra -Werror -rdynamic "$src/test-shim.c" -L"$out" -lfakedrm -Wl,-rpath,"$(cd "$out" && pwd)" -o "$out/test-shim"
 export M19_SHIM_LIB="$(cd "$out" && pwd)/xorg-shim-test.so" M19_SHIM_DRIVER="$(cd "$out" && pwd)/test-shim"
 # The GPU probe needs Vulkan's headers to build. Lavapipe, the runner's only Vulkan device, runs it.
 gcc -std=c11 -O2 -Wall -Wextra -Werror "$src/gpu-probe.c" -ldl -o "$out/gpu-probe-test"
