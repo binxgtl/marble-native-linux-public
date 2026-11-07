@@ -717,6 +717,7 @@ class Static(unittest.TestCase):
                       '.glxinfo = "/usr/bin/glxinfo"', '.glxgears = "/usr/bin/glxgears"', '.eglinfo = "/usr/bin/eglinfo"',
                       '.vk_env = dri3_env, .gl_env = dri3_env, .egl_env = dri3_env, .glamor = 1, .xorg_unit = "marble-xorg.service"',
                       '.gpu_profile = "/run/m19/gpu-profile", .glmark2 = "/usr/bin/glmark2", .copy_env = copy_env',
+                      '.present_probe = "/run/m19/m19-present-probe", .present_frames = 120,',
                       '.xorg_logs = {"/var/log/Xorg.0.log", "/var/log/Xorg.cpu.log"}', '.battery_limit = 420, ', '.session_ms = 900000, ',
                       '.guard_unit = "m19-r3-guard.service"', '.units = {"marble-xfce.service", "marble-xorg.service", "marble-xorg-fallback.service"}'):
             self.assertIn(field, text)
@@ -818,10 +819,13 @@ class Plan4(unittest.TestCase):
         glamor = r4plan.render()['m19/r4/xorg-glamor.conf'].decode()
         cpu = r3plan.xorg_conf(r3plan.MODE_120)
         self.assertIn('    Option "AccelMethod" "glamor"\n    Option "DRI" "3"\n', glamor)
-        self.assertEqual(glamor.replace('    Option "AccelMethod" "glamor"\n    Option "DRI" "3"\n', '    Option "AccelMethod" "none"\n'), cpu)
-        for line in ('Option "PreferredMode" "1080x2400x120vid"', 'Option "Monitor-Virtual-1" "writeback"', 'Option "Ignore" "true"',
-                     'Option "PageFlip" "false"'):
+        self.assertIn('    Option "PageFlip" "true"\n', glamor)
+        self.assertEqual(glamor.replace('    Option "AccelMethod" "glamor"\n    Option "DRI" "3"\n', '    Option "AccelMethod" "none"\n')
+                         .replace('"PageFlip" "true"', '"PageFlip" "false"'), cpu)
+        for line in ('Option "PreferredMode" "1080x2400x120vid"', 'Option "Monitor-Virtual-1" "writeback"', 'Option "Ignore" "true"'):
             self.assertIn(line, glamor)
+        # The CPU fallback is R3c's, page flips off.
+        self.assertIn('    Option "PageFlip" "false"\n', cpu)
 
     def test_xorg_units(self):
         self.assertIn('-config /run/m19/xorg-glamor.conf -logfile /var/log/Xorg.0.log ', r4plan.XORG)
@@ -912,6 +916,68 @@ class SessionScript(unittest.TestCase):
         self.assertNotEqual(done.returncode, 0)
         self.assertIsNone(profile)
         self.assertEqual(done.stdout, '')
+
+
+class PresentProbe(unittest.TestCase):
+    """present-probe.c against Xvfb, whose Present has a fake 60 Hz vblank and never flips. test.sh and mutate.py build it."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.probe, xvfb, cls.server = os.environ.get('M19_PRESENT_PROBE'), os.environ.get('M19_XVFB'), None
+        if not cls.probe or not xvfb:
+            return
+        number = next(n for n in range(90, 120) if not os.path.exists(f'/tmp/.X11-unix/X{n}') and not os.path.exists(f'/tmp/.X{n}-lock'))
+        cls.display, socket = f':{number}', Path(f'/tmp/.X11-unix/X{number}')
+        cls.server = subprocess.Popen([xvfb, cls.display, '-screen', '0', '1080x2400x24', '-nolisten', 'tcp'], stdout=subprocess.DEVNULL,
+                                      stderr=subprocess.DEVNULL)
+        for _ in range(200):
+            if socket.exists():
+                break
+            time.sleep(0.05)
+
+    @classmethod
+    def tearDownClass(cls):
+        if cls.server:
+            cls.server.kill()
+            cls.server.wait()
+
+    def setUp(self):
+        if not self.server:
+            self.skipTest('present probe or Xvfb not available in this run')
+
+    def run_probe(self, *arguments, display=None):
+        environment = {key: value for key, value in os.environ.items() if not key.startswith(('ASAN', 'UBSAN'))}
+        environment['DISPLAY'] = display or self.display
+        return subprocess.run([self.probe, *arguments], capture_output=True, text=True, env=environment, timeout=60)
+
+    def summary(self, out, mode):
+        line = re.search(rf'M19 PRESENT {mode} (frames=.*)\n', out).group(1)
+        return {key: float(value) for key, value in (item.split('=') for item in line.split())}
+
+    def test_copies_complete_one_vblank_apart(self):
+        done = self.run_probe('copy', '30')
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        s = self.summary(done.stdout, 'copy')
+        self.assertEqual((s['frames'], s['done'], s['copies'], s['flips'], s['skips'], s['others']), (30, 30, 30, 0, 0, 0))
+        # Each request aims at the vblank after the last completion; a loaded runner may miss the odd one.
+        self.assertTrue(0.9 <= s['msc_per_frame'] <= 1.5, s)
+        # Xvfb's fake vblank is 1/60 s; each frame's UST time is its MSCs times that.
+        self.assertAlmostEqual(s['us_per_frame'] / s['msc_per_frame'], 16667, delta=4000)
+        self.assertIn('M19 PRESENT copy version=1.', done.stdout)
+        self.assertTrue(done.stdout.endswith('M19 PRESENT copy ok\n'))
+
+    def test_a_window_covering_the_screen_completes_without_flips_here(self):
+        done = self.run_probe('flip', '20')
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        s = self.summary(done.stdout, 'flip')
+        self.assertEqual((s['done'], s['flips'], s['copies'] + s['skips'] + s['others']), (20, 0, 20))
+
+    def test_usage_and_no_server(self):
+        for arguments in ((), ('copy',), ('copy', '1'), ('flip', 'x'), ('other', '10'), ('copy', '10', 'x')):
+            self.assertEqual(self.run_probe(*arguments).returncode, 64, arguments)
+        done = self.run_probe('copy', '10', display=':119')
+        self.assertEqual(done.returncode, 1)
+        self.assertIn('M19 PRESENT copy FAIL connect', done.stdout)
 
 
 class DesktopScript(unittest.TestCase):
@@ -1220,12 +1286,22 @@ exec sleep 30
 '''), ('glmark2', '''#!/bin/sh
 [ "$*" = "-b build:duration=2.0 -b texture:duration=2.0 -b shading:duration=2.0" ] && [ "$MESA_LOADER_DRIVER_OVERRIDE" = kgsl ] || exit 2
 cat "$(dirname "$0")/glmark2-out"; exit "$(cat "$(dirname "$0")/glmark2-rc")"
+'''), ('present-probe', '''#!/bin/sh
+d=$(dirname "$0")
+[ "$2" = 120 ] || exit 64
+case "$1" in
+ copy) cat "$d/present-copy-out";;
+ flip) cat "$d/present-flip-out"; exit "$(cat "$d/present-flip-rc")";;
+ *) exit 64;;
+esac
 '''), ('eglinfo', '''#!/bin/sh
 [ "$*" = "-B -p surfaceless" ] && [ "$MESA_LOADER_DRIVER_OVERRIDE" = kgsl ] || { echo "OpenGL ES profile renderer: llvmpipe"; exit 0; }
 cat "$(dirname "$0")/eglinfo-out"; exit "$(cat "$(dirname "$0")/eglinfo-rc")"
 '''))
 TURNIP = 'Turnip Adreno (TM) 725'
 ZINK = 'zink Vulkan 1.4(Turnip Adreno (TM) 725 (MESA_TURNIP))'
+PRESENT = ('M19 PRESENT {mode} version=1.2\nM19 PRESENT {mode} frames=120 done={done} copies={copies} flips={flips} skips=0 others=0 '
+           'msc_per_frame={msc} us_per_frame={us} wall_us_per_frame={us}\n')
 GLAMOR_LOG = ('(II) modeset(0): glamor X acceleration enabled on FD725\n(II) modeset(0): glamor initialized\n'
               '(II) modeset(0): Output DSI-1 connected\n')
 DRI3 = ('MESA_LOADER_DRIVER_OVERRIDE=kgsl FD_FORCE_KGSL=1 FD_KGSL_ENABLE_DMABUF=1 '
@@ -1260,6 +1336,9 @@ class Gpu(DesktopFixture):
         (self.test / 'glmark2-rc').write_text('0\n')
         (self.test / 'eglinfo-out').write_text('Surfaceless platform:\nEGL vendor string: Mesa Project\nOpenGL ES profile renderer: FD725\n')
         (self.test / 'eglinfo-rc').write_text('0\n')
+        (self.test / 'present-copy-out').write_text(PRESENT.format(mode='copy', done=120, copies=120, flips=0, msc='2.00', us=16667) + 'M19 PRESENT copy ok\n')
+        (self.test / 'present-flip-out').write_text(PRESENT.format(mode='flip', done=120, copies=2, flips=118, msc='1.00', us=8333) + 'M19 PRESENT flip ok\n')
+        (self.test / 'present-flip-rc').write_text('0\n')
 
     def run_gpu(self, gears_ms=600, **env):
         wire = Wire()
@@ -1273,7 +1352,7 @@ class Gpu(DesktopFixture):
 
     def gpu(self, log):
         fields = {}
-        for line in ('gpu', 'gpu-names', 'gpu-renderers', 'glamor', 'glamor-renderers'):
+        for line in ('gpu', 'gpu-names', 'gpu-renderers', 'glamor', 'glamor-renderers', 'present'):
             fields.update(item.split('=', 1) for item in re.search(rf'M19 R4 {line} (.*)\n', log).group(1).split())
         return fields
 
@@ -1290,8 +1369,14 @@ class Gpu(DesktopFixture):
         self.assertGreater(float(g['cube_fps']), 0)
         self.assertEqual(self.desktop(log)['touch_ok'], '1')
         self.assertIn('M19STEP T12-gpu START', steps)
-        self.assertIn('M19STEP T12-gpu END 1 1 1 1 1 1 1 1', steps)
+        self.assertIn('M19STEP T12-gpu END 1 1 1 1 1 1 1 1 1', steps)
         self.assertLess(steps.index('M19STEP T12-touch END 12 2'), steps.index('M19STEP T12-gpu START'))
+        # Page flips: the probe's copy run is recorded as it is, the flip run passes; glxgears also ran fullscreen.
+        self.assertEqual((g['copy_done'], g['copy_msc'], g['copy_us'], g['flip_done'], g['flips'], g['flip_msc'], g['flip_us'], g['gears_full_fps'],
+                          g['flip_ok']), ('120', '2.00', '16667', '120', '118', '1.00', '8333', '119.9', '1'))
+        self.assertIn(f'M19 $ {self.test}/present-probe copy 120\n', log)
+        self.assertIn(f'M19 $ {self.test}/present-probe flip 120\n', log)
+        self.assertIn(f'M19 $ {DRI3} {self.test}/glxgears -fullscreen\n', log)
         self.assertIn(f'M19 $ {DRI3} {self.test}/gpu-probe vulkan\n', log)
         self.assertIn(f'M19 $ {DRI3} {self.test}/vkcube --c 300\n', log)
         self.assertIn(f'M19 $ {DRI3} {self.test}/glxgears\n', log)
@@ -1322,6 +1407,18 @@ class Gpu(DesktopFixture):
             'unit': (lambda: None, 'unit', '0', {'M19_ACTIVE_RC': '3'}),
             'profile': (lambda: (root / 'gpu-profile').write_text('copy\n'), 'profile', 'copy', {}),
             'no_profile': (lambda: (root / 'gpu-profile').unlink(), 'profile', 'none', {}),
+            'no_flips': (lambda: (test / 'present-flip-out').write_text(PRESENT.format(mode='flip', done=120, copies=120, flips=0, msc='1.00', us=8333)),
+                         'flip_ok', '0', {}),
+            'few_flips': (lambda: (test / 'present-flip-out').write_text(PRESENT.format(mode='flip', done=120, copies=13, flips=107, msc='1.00', us=8333)),
+                          'flip_ok', '0', {}),
+            'slow_flips': (lambda: (test / 'present-flip-out').write_text(PRESENT.format(mode='flip', done=120, copies=0, flips=120, msc='1.11', us=9250)),
+                           'flip_ok', '0', {}),
+            'short_flips': (lambda: ((test / 'present-flip-out').write_text(PRESENT.format(mode='flip', done=119, copies=0, flips=119, msc='1.00', us=8333)),
+                                     (test / 'present-flip-rc').write_text('1\n')), 'flip_ok', '0', {}),
+            'failed_flip_run': (lambda: (test / 'present-flip-rc').write_text('1\n'), 'flip_ok', '0', {}),
+            'short_flips_rc0': (lambda: (test / 'present-flip-out').write_text(PRESENT.format(mode='flip', done=119, copies=0, flips=119, msc='1.00',
+                                                                                              us=8333)), 'flip_ok', '0', {}),
+            'no_flip_line': (lambda: (test / 'present-flip-out').write_text('M19 PRESENT flip FAIL connect\n'), 'flip_done', '-1', {}),
         }
         for change, (apply, flag, value, env) in changes.items():
             with self.subTest(change=change):
@@ -1340,6 +1437,12 @@ class Gpu(DesktopFixture):
         g = self.gpu(log)
         self.assertEqual((fields[3], g['egl'], g['glmark2'], g['gpu_ok']), ('1', '0', '-1', '1'))
 
+    def test_the_copy_path_is_recorded_not_judged(self):
+        (self.test / 'present-copy-out').write_text('M19 PRESENT copy FAIL timeout after 3\n')
+        fields, log, _ = self.run_gpu()
+        g = self.gpu(log)
+        self.assertEqual((fields[3], g['copy_done'], g['flip_ok'], g['gpu_ok']), ('1', '-1', '1', '1'))
+
     def test_without_x_the_gpu_phase_does_not_run(self):
         (self.test / 'x-up').unlink()
         fields, log, steps = self.run_gpu()
@@ -1353,7 +1456,7 @@ class Gpu(DesktopFixture):
         self.assertLess(time.monotonic() - started, 25)
         g = self.gpu(log)
         self.assertEqual((fields[3], g['cube'], g['gl'], g['gears'], g['glamor_ok']), ('0', '0', '1', '1', '1'))
-        self.assertIn('M19STEP T12-gpu END 1 1 1 0 1 1 1 1', steps)
+        self.assertIn('M19STEP T12-gpu END 1 1 1 0 1 1 1 1 1', steps)
 
 LOADER = '''#!/bin/sh
 echo "$*" >> "$M19_TEST/load.log"
@@ -1386,6 +1489,7 @@ class GpuScript(unittest.TestCase):
         for name, data in self.firmware.items():
             (self.root / 'm19/gpu-firmware' / name).write_bytes(data)
         (self.root / 'm19/m19-gpu-probe').write_bytes(b'\x7fELF probe')
+        (self.root / 'm19/m19-present-probe').write_bytes(b'\x7fELF present')
         (self.root / 'run/m19').mkdir(parents=True)
         param = self.root / 'sys/module/firmware_class/parameters/path'
         param.parent.mkdir(parents=True)
@@ -1432,6 +1536,8 @@ class GpuScript(unittest.TestCase):
         self.assertEqual(nodes, [('600', f'{self.new}/dev/kgsl-3d0', 'c', '504', '0'), ('600', f'{self.new}/dev/dma_heap/system', 'c', '248', '1')])
         self.assertEqual((self.new / 'run/m19/m19-gpu-probe').read_bytes(), b'\x7fELF probe')
         self.assertEqual(oct((self.new / 'run/m19/m19-gpu-probe').stat().st_mode & 0o777), '0o755')
+        self.assertEqual((self.new / 'run/m19/m19-present-probe').read_bytes(), b'\x7fELF present')
+        self.assertEqual(oct((self.new / 'run/m19/m19-present-probe').stat().st_mode & 0o777), '0o755')
         self.assertEqual((self.new / 'run/m19/xorg-glamor.conf').read_bytes(), r4plan.render()['m19/r4/xorg-glamor.conf'])
         self.assertIn('M19 T9 gpu: modules=110 firmware=7 kgsl=504:0 heap=248:1 path=/run/m19/firmware\n', result.stderr)
 
@@ -1467,6 +1573,9 @@ class GpuScript(unittest.TestCase):
     def test_a_missing_probe_or_tool_stops(self):
         (self.root / 'm19/m19-gpu-probe').unlink()
         self.assertFails('gpu-probe')
+        self.setUp()
+        (self.root / 'm19/m19-present-probe').unlink()
+        self.assertFails('present-probe')
         self.setUp()
         (self.new / 'usr/bin/vkcube').unlink()
         self.assertFails('missing usr/bin/vkcube')

@@ -52,6 +52,10 @@ struct m19_report {
     unsigned glamor;
     const char *xorg_unit, *gpu_profile, *glmark2;
     const char *const *copy_env;
+    /* R4c: page flips. The Present probe measures copies into a window and flips of a window covering
+     * the screen, present_frames each; glxgears also runs fullscreen. */
+    const char *present_probe;
+    unsigned present_frames;
 };
 
 /* R3's guard, a service of its own beside the desktop. It stops the desktop units and paints YELLOW

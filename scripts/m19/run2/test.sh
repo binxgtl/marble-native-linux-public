@@ -14,6 +14,10 @@ gcc -std=c11 -O2 -Wall -Wextra -Werror "$src/gpu-probe.c" -ldl -o "$out/gpu-prob
 lvp=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json 2>/dev/null | head -n 1 || true)
 [[ -n $lvp ]] || { echo "lavapipe ICD missing: install mesa-vulkan-drivers" >&2; exit 1; }
 export M19_GPU_PROBE="$(cd "$out" && pwd)/gpu-probe-test" M19_LVP_ICD="$lvp"
+# The Present probe needs libxcb-present's headers; Xvfb, with its fake 60 Hz vblank, runs it.
+gcc -std=c11 -O2 -Wall -Wextra -Werror "$src/present-probe.c" -lxcb-present -lxcb -o "$out/present-probe-test"
+command -v Xvfb >/dev/null || { echo "Xvfb missing: install xvfb" >&2; exit 1; }
+export M19_PRESENT_PROBE="$(cd "$out" && pwd)/present-probe-test" M19_XVFB="$(command -v Xvfb)"
 for variant in normal sanitize; do
   flags=(-std=c11 -O2 -Wall -Wextra -Werror)
   if [[ $variant == sanitize ]]; then
@@ -48,3 +52,8 @@ for copy in a b; do
 done
 cmp "$out/gpu-probe-a" "$out/gpu-probe-b"
 sha256sum "$out/gpu-probe-a" | tee -a "$out/run2-binaries.txt"
+for copy in a b; do
+  gcc -std=c11 -Os -Wall -Wextra -Werror -Wl,--build-id=none "$src/present-probe.c" -lxcb-present -lxcb -o "$out/present-probe-$copy"
+done
+cmp "$out/present-probe-a" "$out/present-probe-b"
+sha256sum "$out/present-probe-a" | tee -a "$out/run2-binaries.txt"

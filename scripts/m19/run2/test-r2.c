@@ -232,7 +232,7 @@ static int report_gpu_mode(char **argv)
     const char *names[] = {"test/kmsg", "proc1-exe", "block", "mountinfo", "test/systemctl", "test/journalctl", "test/analyze", "test/display",
                            "test/xdpyinfo", "test/xrandr", "test/xinput", "test/ps", "proc", "interrupts", "card", "xorg0.log", "xorg60.log",
                            "guard-tripped", "battery-temp", "thermal", "kgsl-node", "gpu-model", "test/gpu-probe", "test/vulkaninfo",
-                           "test/vkcube", "test/glxinfo", "test/glxgears", "test/eglinfo", "gpu-profile", "test/glmark2"};
+                           "test/vkcube", "test/glxinfo", "test/glxgears", "test/eglinfo", "gpu-profile", "test/glmark2", "test/present-probe"};
     for (unsigned i = 0; i < sizeof(names) / sizeof(names[0]); i++)
         snprintf(paths[i], sizeof(paths[i]), "%s/%s", root, names[i]);
     struct m19_report c = {.tty = argv[3], .kmsg = paths[0], .proc1_exe = paths[1], .block = paths[2], .mountinfo = paths[3],
@@ -248,7 +248,7 @@ static int report_gpu_mode(char **argv)
                            .kgsl_model = paths[21], .gpu_probe = paths[22], .vulkaninfo = paths[23], .vkcube = paths[24], .glxinfo = paths[25],
                            .glxgears = paths[26], .eglinfo = paths[27], .vk_env = test_dri3_env, .gl_env = test_dri3_env,
                            .egl_env = test_dri3_env, .glamor = 1, .xorg_unit = "marble-xorg.service", .gpu_profile = paths[28],
-                           .glmark2 = paths[29], .copy_env = test_copy_env};
+                           .glmark2 = paths[29], .copy_env = test_copy_env, .present_probe = paths[30], .present_frames = 120};
     return m19_report_main(&c);
 }
 

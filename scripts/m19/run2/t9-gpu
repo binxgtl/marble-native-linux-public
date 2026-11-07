@@ -74,10 +74,12 @@ $BB mkdir -p "$new/dev/dma_heap" || fail dma-heap-directory
 make_node dma_heap system "$new/dev/dma_heap/system"
 heap=$number
 
-# 4. The probe that proves GPU execution, run by the reporter in the new root, and glamor's configuration.
-[ -f "$R/m19/m19-gpu-probe" ] && [ ! -L "$R/m19/m19-gpu-probe" ] || fail gpu-probe
-$BB cp "$R/m19/m19-gpu-probe" "$new/run/m19/m19-gpu-probe" || fail gpu-probe
-$BB chmod 755 "$new/run/m19/m19-gpu-probe" || fail gpu-probe
+# 4. The probes the reporter runs in the new root (GPU execution, Present timing) and glamor's configuration.
+for probe in gpu-probe present-probe; do
+ [ -f "$R/m19/m19-$probe" ] && [ ! -L "$R/m19/m19-$probe" ] || fail "$probe"
+ $BB cp "$R/m19/m19-$probe" "$new/run/m19/m19-$probe" || fail "$probe"
+ $BB chmod 755 "$new/run/m19/m19-$probe" || fail "$probe"
+done
 $BB cp "$plan/xorg-glamor.conf" "$new/run/m19/xorg-glamor.conf" || fail xorg-glamor
 for tool in usr/lib/aarch64-linux-gnu/libvulkan.so.1 usr/share/vulkan/icd.d/freedreno_icd.aarch64.json usr/bin/vulkaninfo usr/bin/vkcube \
  usr/bin/glxinfo usr/bin/glxgears usr/bin/eglinfo usr/bin/glmark2 usr/lib/xorg/modules/libglamoregl.so \

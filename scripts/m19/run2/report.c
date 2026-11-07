@@ -547,9 +547,9 @@ static void desktop_phase(const struct m19_report *c, int tty, struct desktop *d
 }
 
 struct gpu {
-    int node, probe, vk, cube, gl, gears, egl, glamor_init, glamor_on, xorg_unit, glamor_ok;
-    long cube_ms, glmark2;
-    double cube_fps, gears_fps, xorg_cpu;
+    int node, probe, vk, cube, gl, gears, egl, glamor_init, glamor_on, xorg_unit, glamor_ok, flip_ok;
+    long cube_ms, glmark2, copy_done, copies, flip_done, flips;
+    double cube_fps, gears_fps, xorg_cpu, copy_msc, copy_us, flip_msc, flip_us, gears_full_fps;
     char model[64], probe_device[96], device[96], renderer[160], egl_renderer[160], profile[16], glamor_renderer[160], copy_renderer[160];
 };
 
@@ -573,6 +573,33 @@ static long file_text(const char *path, char *text, size_t room)
     close(fd);
     text[n] = 0;
     return (long)n;
+}
+
+/* The summary line of one Present probe run: completions, copies, flips, MSCs and microseconds per frame. */
+static void present_line(const char *text, const char *mode, long *done, long *copies, long *flips, double *msc, double *us)
+{
+    char key[32];
+    snprintf(key, sizeof(key), "M19 PRESENT %s frames=", mode);
+    const char *at = strstr(text, key);
+    long frames, skips, others;
+    *done = *copies = *flips = -1;
+    *msc = *us = -1.0;
+    if (at && sscanf(at + strlen(key), "%ld done=%ld copies=%ld flips=%ld skips=%ld others=%ld msc_per_frame=%lf us_per_frame=%lf", &frames, done,
+                     copies, flips, &skips, &others, msc, us) != 8)
+        *done = *copies = *flips = -1;
+}
+
+/* The FPS that glxgears reported last, or 0 when it reported no frames. */
+static double gears_fps(char *text)
+{
+    double last = 0;
+    for (char *line = strtok(text, "\n"); line; line = strtok(NULL, "\n")) {
+        int count;
+        double seconds, fps;
+        if (sscanf(line, "%d frames in %lf seconds = %lf FPS", &count, &seconds, &fps) == 3 && count > 0)
+            last = fps;
+    }
+    return last;
 }
 
 /* CPU time the X server has used, in clock ticks: utime and stime of the process named Xorg. */
@@ -717,14 +744,27 @@ static void gpu_phase(const struct m19_report *c, int tty, struct gpu *g)
     long hz = sysconf(_SC_CLK_TCK);
     g->xorg_cpu = ticks >= 0 && ticks_after >= ticks && gears_ms && hz > 0 ? (double)(ticks_after - ticks) * 100000.0 / ((double)hz * (double)gears_ms)
                                                                            : -1.0;
-    text = section_text(start, length);
-    for (char *line = strtok(text, "\n"); line; line = strtok(NULL, "\n")) {
-        int count;
-        double seconds, fps;
-        if (sscanf(line, "%d frames in %lf seconds = %lf FPS", &count, &seconds, &fps) == 3 && count > 0) {
-            g->gears = 1;
-            g->gears_fps = fps;
-        }
+    g->gears_fps = gears_fps(section_text(start, length));
+    g->gears = g->gears_fps > 0;
+
+    if (c->present_probe) {
+        /* Page flips: the probe, with no Mesa in the way, then glxgears covering the screen. A flip run
+         * passes when nearly every completion was a flip and each took one vblank. */
+        char frames_text[16];
+        snprintf(frames_text, sizeof(frames_text), "%u", c->present_frames);
+        char *copy[] = {(char *)c->present_probe, "copy", frames_text, NULL};
+        (void)section_env(copy, NULL, SECTION_CAP / 8, c->gpu_ms, &start, &length);
+        long ignored;
+        present_line(section_text(start, length), "copy", &g->copy_done, &ignored, &ignored, &g->copy_msc, &g->copy_us);
+        char *flip[] = {(char *)c->present_probe, "flip", frames_text, NULL};
+        status = section_env(flip, NULL, SECTION_CAP / 8, c->gpu_ms, &start, &length);
+        long flip_copies;
+        present_line(section_text(start, length), "flip", &g->flip_done, &flip_copies, &g->flips, &g->flip_msc, &g->flip_us);
+        g->flip_ok = status == 0 && g->flip_done == (long)c->present_frames && g->flips * 10 >= (long)c->present_frames * 9 && g->flip_msc > 0 &&
+                     g->flip_msc <= 1.10;
+        char *full[] = {(char *)c->glxgears, "-fullscreen", NULL};
+        (void)section_env(full, c->gl_env, SECTION_CAP / 4, c->gears_ms, &start, &length);
+        g->gears_full_fps = gears_fps(section_text(start, length));
     }
 
     /* A broader GL load, and GL through the copy profile for comparison. Recorded, not judged. */
@@ -747,8 +787,8 @@ static void gpu_phase(const struct m19_report *c, int tty, struct gpu *g)
     status = section_env(egl, c->egl_env, SECTION_CAP / 4, c->gpu_ms, &start, &length);
     line_value(section_text(start, length), "renderer", g->egl_renderer, sizeof(g->egl_renderer));
     g->egl = status == 0 && adreno_named(g->egl_renderer);
-    (void)m19_wire_line(tty, c->pace_ms, M19_DEVICE_STEP " T12-gpu END %d %d %d %d %d %d %d %d", g->node, g->probe, g->vk, g->cube, g->gl, g->gears,
-                        g->egl, g->glamor_ok);
+    (void)m19_wire_line(tty, c->pace_ms, M19_DEVICE_STEP " T12-gpu END %d %d %d %d %d %d %d %d %d", g->node, g->probe, g->vk, g->cube, g->gl,
+                        g->gears, g->egl, g->glamor_ok, g->flip_ok);
 }
 
 static void desktop_sections(const struct m19_report *c)
@@ -1022,7 +1062,7 @@ int m19_report_main(const struct m19_report *c)
     }
     int gpu_ok = 1;
     if (c->gpu) {
-        gpu_ok = g.node && g.probe && g.vk && g.cube && g.gl && g.gears && (!c->glamor || g.glamor_ok);
+        gpu_ok = g.node && g.probe && g.vk && g.cube && g.gl && g.gears && (!c->glamor || g.glamor_ok) && (!c->present_probe || g.flip_ok);
         /* Three lines, each well inside addf's buffer however long the names run. */
         addf("M19 R4 gpu node=%d probe=%d vk=%d cube=%d cube_ms=%ld cube_fps=%.1f gl=%d gears=%d gears_fps=%.1f egl=%d gpu_ok=%d\n", g.node, g.probe,
              g.vk, g.cube, g.cube_ms, g.cube_fps, g.gl, g.gears, g.gears_fps, g.egl, gpu_ok);
@@ -1033,6 +1073,9 @@ int m19_report_main(const struct m19_report *c)
                  g.xorg_unit, token(g.profile), g.xorg_cpu, g.glmark2, g.glamor_ok);
             addf("M19 R4 glamor-renderers glamor_renderer=%s copy_renderer=%s\n", token(g.glamor_renderer), token(g.copy_renderer));
         }
+        if (c->present_probe)
+            addf("M19 R4 present copy_done=%ld copy_msc=%.2f copy_us=%.0f flip_done=%ld flips=%ld flip_msc=%.2f flip_us=%.0f gears_full_fps=%.1f "
+                 "flip_ok=%d\n", g.copy_done, g.copy_msc, g.copy_us, g.flip_done, g.flips, g.flip_msc, g.flip_us, g.gears_full_fps, g.flip_ok);
     }
     int all_ok = init_ok && state_ok && targets_ok && writes_ok && ro_ok && mounts_ok && !write_warning && desktop_ok && gpu_ok;
     addf("M19 R2 verdict init=%d state=%s targets=%d writes=%d read_only=%d mounts=%d write_warning=%d all_ok=%d\n", init_ok, state, targets_ok,

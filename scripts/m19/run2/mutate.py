@@ -111,6 +111,20 @@ MUTANTS = (
     ('r3plan.py', ', \'    Option "NoTrapSignals" "true"\'', '', ('Plan3',)),
     ('r3plan.py', "'LimitCORE=0', ", '', ('Plan3',)),
     ('r3plan.py', "              'sysctl.d/m19-r3.conf': SYSCTL,\n", '', ('Plan3',)),
+    ('report.c', 'g->flips * 10 >= (long)c->present_frames * 9 && ', '', ('Gpu',)),
+    ('report.c', ' &&\n                     g->flip_msc <= 1.10;', ';', ('Gpu',)),
+    ('report.c', 'g->flip_ok = status == 0 && g->flip_done == (long)c->present_frames &&', 'g->flip_ok = g->flip_done == (long)c->present_frames &&', ('Gpu',)),
+    ('report.c', 'g->flip_ok = status == 0 && g->flip_done == (long)c->present_frames &&', 'g->flip_ok = status == 0 &&', ('Gpu',)),
+    ('report.c', '&& (!c->present_probe || g.flip_ok);', ';', ('Gpu',)),
+    ('report.c', '    char *full[] = {(char *)c->glxgears, "-fullscreen", NULL};', '    char *full[] = {(char *)c->glxgears, NULL};', ('Gpu',)),
+    ('report.c', '    snprintf(key, sizeof(key), "M19 PRESENT %s frames=", mode);', '    snprintf(key, sizeof(key), "M19 PRESENT copy frames=");', ('Gpu',)),
+    ('present-probe.c', 'msc + 1, 0, 0, 0, NULL);', 'msc + 2, 0, 0, 0, NULL);', ('PresentProbe',)),
+    ('present-probe.c', '        case XCB_PRESENT_COMPLETE_MODE_COPY: copies++; break;\n', '', ('PresentProbe',)),
+    ('present-probe.c', '        msc = complete->msc;\n', '', ('PresentProbe',)),
+    ('present-probe.c', 'if ((!flip && !copy) || frames < 2 || frames > 10000) {', 'if ((!flip && !copy) || frames > 10000) {', ('PresentProbe',)),
+    ('t9-gpu', 'for probe in gpu-probe present-probe; do', 'for probe in gpu-probe; do', ('GpuScript',)),
+    ('r4plan.py', '    return _swap(conf, \'    Option "PageFlip" "false"\\n\', \'    Option "PageFlip" "true"\\n\')', '    return conf', ('Plan4',)),
+    ('pid4.c', '.present_frames = 120,', '.present_frames = 12,', ('Static',)),
     ('xorg-shim.c', '    if (!bridge_on || !bo || !plane_fd || !device_of || !device_fd)\n        return original;', '    if (!bo || !plane_fd || !device_of || !device_fd)\n        return original;', ('Shim',)),
     ('xorg-shim.c', '        if (bridge[i].bo == bo && bridge[i].plane == plane) {', '        if (0) {', ('Shim',)),
     ('xorg-shim.c', '        if (!shared) {', '        if (1) {', ('Shim',)),
@@ -122,7 +136,7 @@ MUTANTS = (
     ('report.c', 'g->glamor_ok = g->glamor_init && g->glamor_on && adreno_named(g->glamor_renderer) && g->xorg_unit && !strcmp(g->profile, "dri3");', 'g->glamor_ok = g->glamor_init && g->glamor_on && adreno_named(g->glamor_renderer) && g->xorg_unit;', ('Gpu',)),
     ('report.c', 'g->glamor_ok = g->glamor_init && g->glamor_on && adreno_named(g->glamor_renderer) && g->xorg_unit && !strcmp(g->profile, "dri3");', 'g->glamor_ok = g->glamor_on && adreno_named(g->glamor_renderer) && g->xorg_unit && !strcmp(g->profile, "dri3");', ('Gpu',)),
     ('report.c', '&& taken >= 6 && !memcmp(out, "active", 6);', '|| 1;', ('Gpu',)),
-    ('report.c', '&& g.gears && (!c->glamor || g.glamor_ok);', '&& g.gears;', ('Gpu',)),
+    ('report.c', '&& g.gears && (!c->glamor || g.glamor_ok) &&', '&& g.gears &&', ('Gpu',)),
     ('report.c', '        status = section_env(info, c->copy_env, SECTION_CAP / 4, c->gpu_ms, &start, &length);', '        status = section_env(info, c->gl_env, SECTION_CAP / 4, c->gpu_ms, &start, &length);', ('Gpu',)),
     ('report.c', '        if (status == 0 && score[0])\n            g->glmark2 = strtol(score, NULL, 10);', '        g->glmark2 = strtol(score, NULL, 10);', ('Gpu',)),
     ('pid4.c', '.vk_env = dri3_env, .gl_env = dri3_env,', '.vk_env = dri3_env, .gl_env = copy_env,', ('Static',)),
@@ -155,7 +169,7 @@ MUTANTS = (
     ('report.c', 'g->gl = status == 0 && adreno_named(g->renderer) && !(c->glamor && strstr(g->renderer, "zink"));', 'g->gl = status == 0;', ('Gpu',)),
     ('report.c', 'g->gl = status == 0 && adreno_named(g->renderer) && !(c->glamor && strstr(g->renderer, "zink"));',
      'g->gl = status == 0 && adreno_named(g->renderer);', ('Gpu',)),
-    ('report.c', '&fps) == 3 && count > 0) {', '&fps) == 3) {', ('Gpu',)),
+    ('report.c', '&fps) == 3 && count > 0)\n            last = fps;', '&fps) == 3)\n            last = fps;', ('Gpu',)),
     ('report.c', 'gpu_ok = g.node && g.probe && g.vk && g.cube && g.gl && g.gears &&', 'gpu_ok = g.node && g.probe && g.vk && g.gl && g.gears &&', ('Gpu',)),
     ('report.c', 'gpu_ok = g.node && g.probe && g.vk && g.cube && g.gl && g.gears &&', 'gpu_ok = g.probe && g.vk && g.cube && g.gl && g.gears &&', ('Gpu',)),
     ('report.c', '        for (unsigned i = 0; env && env[i]; i++)\n            if (putenv((char *)env[i]))', '        for (unsigned i = 0; 0 && env && env[i]; i++)\n            if (putenv((char *)env[i]))', ('Gpu',)),
@@ -196,6 +210,13 @@ def main():
             if built.returncode:
                 sys.exit(f'mutant {number} does not compile')
             environment = dict(os.environ)
+            if 'PresentProbe' in classes:
+                # The Present probe on Xvfb, as test.sh builds and runs it.
+                xvfb = shutil.which('Xvfb')
+                if not xvfb or subprocess.run(['gcc', '-std=c11', '-O2', '-w', 'present-probe.c', '-lxcb-present', '-lxcb', '-o', 'present-probe-test'],
+                                              cwd=target, capture_output=True, timeout=120).returncode:
+                    sys.exit(f'mutant {number}: no Xvfb or the Present probe does not compile')
+                environment.update(M19_PRESENT_PROBE=str(target / 'present-probe-test'), M19_XVFB=xvfb)
             if 'GpuProbe' in classes:
                 # The probe on lavapipe, as test.sh builds and runs it.
                 icds = sorted(Path('/usr/share/vulkan/icd.d').glob('lvp_icd*.json'))
