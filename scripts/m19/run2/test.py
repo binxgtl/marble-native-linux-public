@@ -882,7 +882,7 @@ class SessionScript(unittest.TestCase):
         (self.root / 'Xorg.0.log').write_text('(II) modeset(0): glamor X acceleration enabled on FD725\n(II) modeset(0): glamor initialized\n')
         script = r4plan.SESSION
         for old, new in (('/usr/bin/xdpyinfo', f'{self.root}/xdpyinfo'), ('/usr/bin/systemctl', f'{self.root}/systemctl'),
-                         ('/usr/bin/grep', 'grep'), ('/var/log/Xorg.0.log', f'{self.root}/Xorg.0.log'), ('/etc/m19/', f'{self.root}/etc/'),
+                         ('/usr/bin/grep', 'grep'), ('/var/log/Xorg.0.log', f'{self.root}/Xorg.0.log'), ('</etc/m19/gpu-$profile.env', f'<{self.root}/etc/gpu-$profile.env'),
                          ('/run/m19/gpu-profile', f'{self.root}/gpu-profile'), ('/usr/bin/dbus-run-session -- /usr/bin/startxfce4', f'{self.root}/startxfce4'),
                          ('sleep 0.2', 'sleep 0.01')):
             self.assertIn(old, script)
