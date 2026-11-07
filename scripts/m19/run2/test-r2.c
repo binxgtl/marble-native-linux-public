@@ -248,7 +248,8 @@ static int report_gpu_mode(char **argv)
                            .kgsl_model = paths[21], .gpu_probe = paths[22], .vulkaninfo = paths[23], .vkcube = paths[24], .glxinfo = paths[25],
                            .glxgears = paths[26], .eglinfo = paths[27], .vk_env = test_dri3_env, .gl_env = test_dri3_env,
                            .egl_env = test_dri3_env, .glamor = 1, .xorg_unit = "marble-xorg.service", .gpu_profile = paths[28],
-                           .glmark2 = paths[29], .copy_env = test_copy_env, .present_probe = paths[30], .present_frames = 120};
+                           .glmark2 = paths[29], .copy_env = test_copy_env, .present_probe = paths[30], .present_frames = 120,
+                           .compositor = 1};
     return m19_report_main(&c);
 }
 

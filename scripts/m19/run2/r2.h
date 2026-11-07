@@ -56,6 +56,8 @@ struct m19_report {
      * the screen, present_frames each; glxgears also runs fullscreen. */
     const char *present_probe;
     unsigned present_frames;
+    /* R4d: a compositing manager must own _NET_WM_CM_S0, as the probe reports. */
+    unsigned compositor;
 };
 
 /* R3's guard, a service of its own beside the desktop. It stops the desktop units and paints YELLOW

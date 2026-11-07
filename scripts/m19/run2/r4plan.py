@@ -72,7 +72,30 @@ while IFS= read -r line; do
  case "$line" in ''|'#'*) ;; *=*) export "$line";; esac
 done </etc/m19/gpu-$profile.env
 printf '%s\\n' "$profile" >/run/m19/gpu-profile
+# R4d: on glamor, xfwm4 composites on the GPU in step with vblank, so no window tears; on the CPU it must not.
+compositor=off
+[ "$profile" != dri3 ] || compositor=on
+printf '[Desktop Entry]\\nType=Application\\nName=M19 GPU compositor\\nExec=/bin/sh /etc/m19/gpu-compositor %s\\n' "$compositor" \\
+ >"$HOME/.config/autostart/m19-compositor.desktop"
 exec /usr/bin/dbus-run-session -- /usr/bin/startxfce4
+'''
+
+# R4d: xfwm4's compositor through xfconf, in the session's RAM home. On, every window is drawn into one
+# frame that xfwm4 presents through the Present extension at vblank (vblank_mode xpresent): no window tears,
+# and that frame covers the screen, so it can page-flip. A window that itself covers the screen is left
+# uncomposited (unredirect_overlays), so a game or a video can flip on its own.
+COMPOSITOR = '''#!/bin/sh
+# M19 R4d: xfwm4's compositor, on with the dri3 profile and off otherwise.
+set -u
+case "${1:-}" in
+ on)
+  /usr/bin/xfconf-query -c xfwm4 -p /general/vblank_mode -n -t string -s xpresent
+  /usr/bin/xfconf-query -c xfwm4 -p /general/unredirect_overlays -n -t bool -s true
+  /usr/bin/xfconf-query -c xfwm4 -p /general/use_compositing -n -t bool -s true;;
+ off)
+  /usr/bin/xfconf-query -c xfwm4 -p /general/use_compositing -n -t bool -s false;;
+ *) exit 64;;
+esac
 '''
 
 _EXEC = 'ExecStart=/usr/bin/dbus-run-session -- /usr/bin/startxfce4\n'
@@ -86,7 +109,7 @@ REPORT = _swap(r3plan.REPORT, 'M19 R3 evidence over USB', 'M19 R4 evidence over 
 FILES = {name: text for name, text in r3plan.FILES.items() if name not in ('systemd/system/m19-r3.target', 'systemd/system/m19-r3-report.service')}
 FILES.update({'systemd/system/m19-r4.target': TARGET, 'systemd/system/m19-r4-report.service': REPORT, 'systemd/system/marble-xfce.service': XFCE,
               'systemd/system/marble-xorg.service': XORG, 'systemd/system/marble-xorg-fallback.service': XORG_FALLBACK,
-              'm19/gpu-session': SESSION, **{f'm19/gpu-{name}.env': ''.join(f'{item}\n' for item in env) for name, env in PROFILES.items()}})
+              'm19/gpu-session': SESSION, 'm19/gpu-compositor': COMPOSITOR, **{f'm19/gpu-{name}.env': ''.join(f'{item}\n' for item in env) for name, env in PROFILES.items()}})
 
 
 def render():

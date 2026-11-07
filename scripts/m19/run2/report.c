@@ -547,7 +547,8 @@ static void desktop_phase(const struct m19_report *c, int tty, struct desktop *d
 }
 
 struct gpu {
-    int node, probe, vk, cube, gl, gears, egl, glamor_init, glamor_on, xorg_unit, glamor_ok, flip_ok;
+    int node, probe, vk, cube, gl, gears, egl, glamor_init, glamor_on, xorg_unit, glamor_ok, flip_ok, compositor_ok;
+    unsigned long compositor_owner;
     long cube_ms, glmark2, copy_done, copies, flip_done, flips;
     double cube_fps, gears_fps, xorg_cpu, copy_msc, copy_us, flip_msc, flip_us, gears_full_fps;
     char model[64], probe_device[96], device[96], renderer[160], egl_renderer[160], profile[16], glamor_renderer[160], copy_renderer[160];
@@ -765,6 +766,14 @@ static void gpu_phase(const struct m19_report *c, int tty, struct gpu *g)
         char *full[] = {(char *)c->glxgears, "-fullscreen", NULL};
         (void)section_env(full, c->gl_env, SECTION_CAP / 4, c->gears_ms, &start, &length);
         g->gears_full_fps = gears_fps(section_text(start, length));
+        if (c->compositor) {
+            /* xfwm4 composites only if it holds the compositing manager's selection. */
+            char *owner[] = {(char *)c->present_probe, "compositor", NULL};
+            status = section_env(owner, NULL, SECTION_CAP / 16, c->command_ms, &start, &length);
+            const char *at = strstr(section_text(start, length), "M19 PRESENT compositor owner=");
+            g->compositor_ok = status == 0 && at && sscanf(at, "M19 PRESENT compositor owner=%lx", &g->compositor_owner) == 1 &&
+                               g->compositor_owner != 0;
+        }
     }
 
     /* A broader GL load, and GL through the copy profile for comparison. Recorded, not judged. */
@@ -787,8 +796,8 @@ static void gpu_phase(const struct m19_report *c, int tty, struct gpu *g)
     status = section_env(egl, c->egl_env, SECTION_CAP / 4, c->gpu_ms, &start, &length);
     line_value(section_text(start, length), "renderer", g->egl_renderer, sizeof(g->egl_renderer));
     g->egl = status == 0 && adreno_named(g->egl_renderer);
-    (void)m19_wire_line(tty, c->pace_ms, M19_DEVICE_STEP " T12-gpu END %d %d %d %d %d %d %d %d %d", g->node, g->probe, g->vk, g->cube, g->gl,
-                        g->gears, g->egl, g->glamor_ok, g->flip_ok);
+    (void)m19_wire_line(tty, c->pace_ms, M19_DEVICE_STEP " T12-gpu END %d %d %d %d %d %d %d %d %d %d", g->node, g->probe, g->vk, g->cube, g->gl,
+                        g->gears, g->egl, g->glamor_ok, g->flip_ok, g->compositor_ok);
 }
 
 static void desktop_sections(const struct m19_report *c)
@@ -1062,7 +1071,8 @@ int m19_report_main(const struct m19_report *c)
     }
     int gpu_ok = 1;
     if (c->gpu) {
-        gpu_ok = g.node && g.probe && g.vk && g.cube && g.gl && g.gears && (!c->glamor || g.glamor_ok) && (!c->present_probe || g.flip_ok);
+        gpu_ok = g.node && g.probe && g.vk && g.cube && g.gl && g.gears && (!c->glamor || g.glamor_ok) && (!c->present_probe || g.flip_ok) &&
+                 (!c->compositor || g.compositor_ok);
         /* Three lines, each well inside addf's buffer however long the names run. */
         addf("M19 R4 gpu node=%d probe=%d vk=%d cube=%d cube_ms=%ld cube_fps=%.1f gl=%d gears=%d gears_fps=%.1f egl=%d gpu_ok=%d\n", g.node, g.probe,
              g.vk, g.cube, g.cube_ms, g.cube_fps, g.gl, g.gears, g.gears_fps, g.egl, gpu_ok);
@@ -1076,6 +1086,8 @@ int m19_report_main(const struct m19_report *c)
         if (c->present_probe)
             addf("M19 R4 present copy_done=%ld copy_msc=%.2f copy_us=%.0f flip_done=%ld flips=%ld flip_msc=%.2f flip_us=%.0f gears_full_fps=%.1f "
                  "flip_ok=%d\n", g.copy_done, g.copy_msc, g.copy_us, g.flip_done, g.flips, g.flip_msc, g.flip_us, g.gears_full_fps, g.flip_ok);
+        if (c->compositor)
+            addf("M19 R4 compositor owner=0x%08lx compositor_ok=%d\n", g.compositor_owner, g.compositor_ok);
     }
     int all_ok = init_ok && state_ok && targets_ok && writes_ok && ro_ok && mounts_ok && !write_warning && desktop_ok && gpu_ok;
     addf("M19 R2 verdict init=%d state=%s targets=%d writes=%d read_only=%d mounts=%d write_warning=%d all_ok=%d\n", init_ok, state, targets_ok,

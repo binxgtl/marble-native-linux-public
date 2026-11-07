@@ -717,7 +717,7 @@ class Static(unittest.TestCase):
                       '.glxinfo = "/usr/bin/glxinfo"', '.glxgears = "/usr/bin/glxgears"', '.eglinfo = "/usr/bin/eglinfo"',
                       '.vk_env = dri3_env, .gl_env = dri3_env, .egl_env = dri3_env, .glamor = 1, .xorg_unit = "marble-xorg.service"',
                       '.gpu_profile = "/run/m19/gpu-profile", .glmark2 = "/usr/bin/glmark2", .copy_env = copy_env',
-                      '.present_probe = "/run/m19/m19-present-probe", .present_frames = 120,',
+                      '.present_probe = "/run/m19/m19-present-probe", .present_frames = 120, .compositor = 1,',
                       '.xorg_logs = {"/var/log/Xorg.0.log", "/var/log/Xorg.cpu.log"}', '.battery_limit = 420, ', '.session_ms = 900000, ',
                       '.guard_unit = "m19-r3-guard.service"', '.units = {"marble-xfce.service", "marble-xorg.service", "marble-xorg-fallback.service"}'):
             self.assertIn(field, text)
@@ -853,6 +853,10 @@ class Plan4(unittest.TestCase):
         self.assertIn('ExecStart=/run/m19/m19-report report\n', r4plan.REPORT)
         self.assertNotIn('MESA', r4plan.REPORT + r4plan.TARGET + r3plan.GUARD)
         self.assertEqual(r4plan.FILES['m19/gpu-session'], r4plan.SESSION)
+        self.assertEqual(r4plan.FILES['m19/gpu-compositor'], r4plan.COMPOSITOR)
+        for line in ('-p /general/vblank_mode -n -t string -s xpresent', '-p /general/unredirect_overlays -n -t bool -s true',
+                     '-p /general/use_compositing -n -t bool -s true', '-p /general/use_compositing -n -t bool -s false'):
+            self.assertEqual(r4plan.COMPOSITOR.count(f'/usr/bin/xfconf-query -c xfwm4 {line}'), 1, line)
 
 
 SESSION_FAKES = (('xdpyinfo', '#!/bin/sh\n[ -e "$(dirname "$0")/x-up" ]\n'),
@@ -884,9 +888,15 @@ class SessionScript(unittest.TestCase):
             self.assertIn(old, script)
             script = script.replace(old, new)
         (self.root / 'session').write_text(script)
+        (self.root / 'home/.config/autostart').mkdir(parents=True)
+
+    def autostart(self):
+        path = self.root / 'home/.config/autostart/m19-compositor.desktop'
+        return path.read_text() if path.exists() else None
 
     def run_session(self):
         environment = {key: value for key, value in os.environ.items() if not key.startswith(('MESA', 'FD_', 'VK_', 'LIBGL'))}
+        environment['HOME'] = str(self.root / 'home')
         done = subprocess.run(['sh', str(self.root / 'session')], capture_output=True, text=True, env=environment, timeout=60)
         profile = (self.root / 'gpu-profile').read_text() if (self.root / 'gpu-profile').exists() else None
         return done, profile
@@ -895,6 +905,7 @@ class SessionScript(unittest.TestCase):
         done, profile = self.run_session()
         self.assertEqual((done.returncode, profile), (0, 'dri3\n'), done.stderr)
         self.assertEqual(done.stdout.splitlines(), sorted(r4plan.DRI3_ENV))
+        self.assertEqual(self.autostart(), '[Desktop Entry]\nType=Application\nName=M19 GPU compositor\nExec=/bin/sh /etc/m19/gpu-compositor on\n')
 
     def test_without_glamor_the_session_takes_the_copy_profile(self):
         for change in ('log', 'inactive', 'missing-log'):
@@ -909,6 +920,7 @@ class SessionScript(unittest.TestCase):
                 done, profile = self.run_session()
                 self.assertEqual((done.returncode, profile), (0, 'copy\n'), done.stderr)
                 self.assertEqual(done.stdout.splitlines(), sorted(r4plan.COPY_ENV))
+                self.assertTrue(self.autostart().endswith('Exec=/bin/sh /etc/m19/gpu-compositor off\n'))
 
     def test_no_x_server_no_session(self):
         (self.root / 'x-up').unlink()
@@ -916,6 +928,34 @@ class SessionScript(unittest.TestCase):
         self.assertNotEqual(done.returncode, 0)
         self.assertIsNone(profile)
         self.assertEqual(done.stdout, '')
+        self.assertIsNone(self.autostart())
+
+
+class CompositorScript(unittest.TestCase):
+    """r4plan.COMPOSITOR with xfconf-query replaced by a fake that logs its arguments."""
+
+    def run_compositor(self, *arguments):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'xfconf-query').write_text('#!/bin/sh\necho "$*" >> "$(dirname "$0")/calls"\n')
+            (root / 'xfconf-query').chmod(0o755)
+            self.assertIn('/usr/bin/xfconf-query', r4plan.COMPOSITOR)
+            (root / 'compositor').write_text(r4plan.COMPOSITOR.replace('/usr/bin/xfconf-query', f'{root}/xfconf-query'))
+            done = subprocess.run(['sh', str(root / 'compositor'), *arguments], capture_output=True, text=True, timeout=30)
+            calls = (root / 'calls').read_text().splitlines() if (root / 'calls').exists() else []
+            return done.returncode, calls
+
+    def test_on_sets_xpresent_and_unredirect_before_compositing(self):
+        self.assertEqual(self.run_compositor('on'), (0, ['-c xfwm4 -p /general/vblank_mode -n -t string -s xpresent',
+                                                         '-c xfwm4 -p /general/unredirect_overlays -n -t bool -s true',
+                                                         '-c xfwm4 -p /general/use_compositing -n -t bool -s true']))
+
+    def test_off_only_stops_compositing(self):
+        self.assertEqual(self.run_compositor('off'), (0, ['-c xfwm4 -p /general/use_compositing -n -t bool -s false']))
+
+    def test_anything_else_does_nothing(self):
+        for arguments in ((), ('yes',), ('ON',)):
+            self.assertEqual(self.run_compositor(*arguments), (64, []), arguments)
 
 
 class PresentProbe(unittest.TestCase):
@@ -972,12 +1012,19 @@ class PresentProbe(unittest.TestCase):
         s = self.summary(done.stdout, 'flip')
         self.assertEqual((s['done'], s['flips'], s['copies'] + s['skips'] + s['others']), (20, 0, 20))
 
+    def test_nothing_composites_on_bare_xvfb(self):
+        done = self.run_probe('compositor')
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(done.stdout, 'M19 PRESENT compositor owner=0x00000000\nM19 PRESENT compositor ok\n')
+
     def test_usage_and_no_server(self):
-        for arguments in ((), ('copy',), ('copy', '1'), ('flip', 'x'), ('other', '10'), ('copy', '10', 'x')):
+        for arguments in ((), ('copy',), ('copy', '1'), ('flip', 'x'), ('other', '10'), ('copy', '10', 'x'), ('compositor', 'x')):
             self.assertEqual(self.run_probe(*arguments).returncode, 64, arguments)
         done = self.run_probe('copy', '10', display=':119')
         self.assertEqual(done.returncode, 1)
         self.assertIn('M19 PRESENT copy FAIL connect', done.stdout)
+        done = self.run_probe('compositor', display=':119')
+        self.assertEqual((done.returncode, done.stdout), (1, 'M19 PRESENT compositor FAIL connect\n'))
 
 
 class DesktopScript(unittest.TestCase):
@@ -1288,8 +1335,9 @@ exec sleep 30
 cat "$(dirname "$0")/glmark2-out"; exit "$(cat "$(dirname "$0")/glmark2-rc")"
 '''), ('present-probe', '''#!/bin/sh
 d=$(dirname "$0")
-[ "$2" = 120 ] || exit 64
+[ "$1" = compositor ] || [ "$2" = 120 ] || exit 64
 case "$1" in
+ compositor) cat "$d/present-compositor-out"; exit "$(cat "$d/present-compositor-rc")";;
  copy) cat "$d/present-copy-out";;
  flip) cat "$d/present-flip-out"; exit "$(cat "$d/present-flip-rc")";;
  *) exit 64;;
@@ -1339,6 +1387,8 @@ class Gpu(DesktopFixture):
         (self.test / 'present-copy-out').write_text(PRESENT.format(mode='copy', done=120, copies=120, flips=0, msc='2.00', us=16667) + 'M19 PRESENT copy ok\n')
         (self.test / 'present-flip-out').write_text(PRESENT.format(mode='flip', done=120, copies=2, flips=118, msc='1.00', us=8333) + 'M19 PRESENT flip ok\n')
         (self.test / 'present-flip-rc').write_text('0\n')
+        (self.test / 'present-compositor-out').write_text('M19 PRESENT compositor owner=0x00a0000b\nM19 PRESENT compositor ok\n')
+        (self.test / 'present-compositor-rc').write_text('0\n')
 
     def run_gpu(self, gears_ms=600, **env):
         wire = Wire()
@@ -1352,7 +1402,7 @@ class Gpu(DesktopFixture):
 
     def gpu(self, log):
         fields = {}
-        for line in ('gpu', 'gpu-names', 'gpu-renderers', 'glamor', 'glamor-renderers', 'present'):
+        for line in ('gpu', 'gpu-names', 'gpu-renderers', 'glamor', 'glamor-renderers', 'present', 'compositor'):
             fields.update(item.split('=', 1) for item in re.search(rf'M19 R4 {line} (.*)\n', log).group(1).split())
         return fields
 
@@ -1369,7 +1419,9 @@ class Gpu(DesktopFixture):
         self.assertGreater(float(g['cube_fps']), 0)
         self.assertEqual(self.desktop(log)['touch_ok'], '1')
         self.assertIn('M19STEP T12-gpu START', steps)
-        self.assertIn('M19STEP T12-gpu END 1 1 1 1 1 1 1 1 1', steps)
+        self.assertIn('M19STEP T12-gpu END 1 1 1 1 1 1 1 1 1 1', steps)
+        self.assertEqual((g['owner'], g['compositor_ok']), ('0x00a0000b', '1'))
+        self.assertIn(f'M19 $ {self.test}/present-probe compositor\n', log)
         self.assertLess(steps.index('M19STEP T12-touch END 12 2'), steps.index('M19STEP T12-gpu START'))
         # Page flips: the probe's copy run is recorded as it is, the flip run passes; glxgears also ran fullscreen.
         self.assertEqual((g['copy_done'], g['copy_msc'], g['copy_us'], g['flip_done'], g['flips'], g['flip_msc'], g['flip_us'], g['gears_full_fps'],
@@ -1419,6 +1471,12 @@ class Gpu(DesktopFixture):
             'short_flips_rc0': (lambda: (test / 'present-flip-out').write_text(PRESENT.format(mode='flip', done=119, copies=0, flips=119, msc='1.00',
                                                                                               us=8333)), 'flip_ok', '0', {}),
             'no_flip_line': (lambda: (test / 'present-flip-out').write_text('M19 PRESENT flip FAIL connect\n'), 'flip_done', '-1', {}),
+            'no_compositor': (lambda: (test / 'present-compositor-out').write_text('M19 PRESENT compositor owner=0x00000000\nM19 PRESENT compositor ok\n'),
+                              'compositor_ok', '0', {}),
+            'compositor_query_failed': (lambda: ((test / 'present-compositor-out').write_text('M19 PRESENT compositor owner=0x00a0000b\n'),
+                                                 (test / 'present-compositor-rc').write_text('1\n')), 'compositor_ok', '0', {}),
+            'compositor_no_line': (lambda: (test / 'present-compositor-out').write_text('M19 PRESENT compositor FAIL connect\n'), 'owner', '0x00000000',
+                                   {}),
         }
         for change, (apply, flag, value, env) in changes.items():
             with self.subTest(change=change):
@@ -1456,7 +1514,7 @@ class Gpu(DesktopFixture):
         self.assertLess(time.monotonic() - started, 25)
         g = self.gpu(log)
         self.assertEqual((fields[3], g['cube'], g['gl'], g['gears'], g['glamor_ok']), ('0', '0', '1', '1', '1'))
-        self.assertIn('M19STEP T12-gpu END 1 1 1 0 1 1 1 1 1', steps)
+        self.assertIn('M19STEP T12-gpu END 1 1 1 0 1 1 1 1 1 1', steps)
 
 LOADER = '''#!/bin/sh
 echo "$*" >> "$M19_TEST/load.log"
@@ -1504,7 +1562,8 @@ class GpuScript(unittest.TestCase):
             (self.new / name).mkdir(parents=True)
         for tool in ('usr/lib/aarch64-linux-gnu/libvulkan.so.1', 'usr/share/vulkan/icd.d/freedreno_icd.aarch64.json', 'usr/bin/vulkaninfo',
                      'usr/bin/vkcube', 'usr/bin/glxinfo', 'usr/bin/glxgears', 'usr/bin/eglinfo', 'usr/bin/glmark2',
-                     'usr/lib/xorg/modules/libglamoregl.so', 'usr/lib/aarch64-linux-gnu/gbm/dri_gbm.so', 'usr/lib/aarch64-linux-gnu/dri/kgsl_dri.so'):
+                     'usr/lib/xorg/modules/libglamoregl.so', 'usr/lib/aarch64-linux-gnu/gbm/dri_gbm.so', 'usr/lib/aarch64-linux-gnu/dri/kgsl_dri.so',
+                     'usr/bin/xfconf-query'):
             (self.new / tool).parent.mkdir(parents=True, exist_ok=True)
             (self.new / tool).write_text('x\n')
 
@@ -1582,6 +1641,9 @@ class GpuScript(unittest.TestCase):
         self.setUp()
         (self.new / 'usr/lib/xorg/modules/libglamoregl.so').unlink()
         self.assertFails('missing usr/lib/xorg/modules/libglamoregl.so')
+        self.setUp()
+        (self.new / 'usr/bin/xfconf-query').unlink()
+        self.assertFails('missing usr/bin/xfconf-query')
         self.setUp()
         (self.root / 'm19/r4/xorg-glamor.conf').unlink()
         self.assertFails('xorg-glamor')

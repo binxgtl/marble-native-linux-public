@@ -3,8 +3,9 @@
  * each CompleteNotify before sending the next. It reports how many completions were copies or flips, how
  * many MSCs each frame took, and the time per frame by the server's UST and by the wall clock.
  *
- *   copy N   a 256x256 window: the copy path every windowed program takes
- *   flip N   a window covering the screen: the path where modesetting may page-flip
+ *   copy N       a 256x256 window: the copy path every windowed program takes
+ *   flip N       a window covering the screen: the path where modesetting may page-flip
+ *   compositor   (R4d) who owns _NET_WM_CM_S0, the selection a running compositing manager holds
  *
  * Both windows are override-redirect, so no window manager moves or decorates them. Built against libxcb
  * and libxcb-present; it needs nothing else. */
@@ -54,15 +55,41 @@ static xcb_present_complete_notify_event_t *wait_complete(xcb_connection_t *c, u
     }
 }
 
+/* The owner of screen 0's compositing-manager selection: none when nothing composites. */
+static int compositor(void)
+{
+    xcb_connection_t *c = xcb_connect(NULL, NULL);
+    if (xcb_connection_has_error(c)) {
+        printf("M19 PRESENT compositor FAIL connect\n");
+        return 1;
+    }
+    static const char name[] = "_NET_WM_CM_S0";
+    xcb_intern_atom_reply_t *atom = xcb_intern_atom_reply(c, xcb_intern_atom(c, 0, sizeof(name) - 1, name), NULL);
+    xcb_get_selection_owner_reply_t *owner = atom ? xcb_get_selection_owner_reply(c, xcb_get_selection_owner(c, atom->atom), NULL) : NULL;
+    int ok = owner != NULL;
+    printf("M19 PRESENT compositor owner=0x%08x\n", ok ? owner->owner : 0u);
+    free(atom);
+    free(owner);
+    xcb_disconnect(c);
+    if (!ok) {
+        printf("M19 PRESENT compositor FAIL query\n");
+        return 1;
+    }
+    printf("M19 PRESENT compositor ok\n");
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
+    setvbuf(stdout, NULL, _IOLBF, 0);
+    if (argc == 2 && !strcmp(argv[1], "compositor"))
+        return compositor();
     int flip = argc == 3 && !strcmp(argv[1], "flip"), copy = argc == 3 && !strcmp(argv[1], "copy");
     long frames = argc == 3 ? strtol(argv[2], NULL, 10) : 0;
     if ((!flip && !copy) || frames < 2 || frames > 10000) {
-        fprintf(stderr, "usage: m19-present-probe copy|flip FRAMES\n");
+        fprintf(stderr, "usage: m19-present-probe copy|flip FRAMES, or compositor\n");
         return 64;
     }
-    setvbuf(stdout, NULL, _IOLBF, 0);
     const char *mode = flip ? "flip" : "copy";
     xcb_connection_t *c = xcb_connect(NULL, NULL);
     if (xcb_connection_has_error(c)) {
