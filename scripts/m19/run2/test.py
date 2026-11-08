@@ -1509,7 +1509,10 @@ cat "$(dirname "$0")/glmark2-out"; exit "$(cat "$(dirname "$0")/glmark2-rc")"
 d=$(dirname "$0")
 state=$(cat "$d/compositor-state")
 case "$1" in
- compositor) [ "$#" = 1 ] || exit 64; echo "M19 PRESENT compositor owner=$(cat "$d/owner-$state")"; exit "$(cat "$d/present-compositor-rc")";;
+ compositor) [ "$#" = 1 ] || exit 64; owner=$(cat "$d/owner-$state")
+  # xfwm4 takes a moment to own the selection: from the second query after on.
+  if [ "$state" = on ]; then n=$(($(cat "$d/on-queries") + 1)); echo "$n" >"$d/on-queries"; [ "$n" -gt 1 ] || owner=0x00000000; fi
+  echo "M19 PRESENT compositor owner=$owner"; exit "$(cat "$d/present-compositor-rc")";;
  copy|flip) [ "$#" = 2 ] && [ "$2" = 120 ] || exit 64; mode=$1; [ "$state" != on ] || mode=$1-on; cat "$d/present-$mode-out"
   [ "$1" = copy ] || exit "$(cat "$d/present-flip-rc")";;
  vblank) [ "$#" = 3 ] && [ "$2" = 120 ] && [ "${3##*/}" = card ] || exit 64; cat "$d/vblank-out"; exit "$(cat "$d/vblank-rc")";;
@@ -1520,7 +1523,7 @@ esac
 '''), ('gpu-compositor', '''d=$(dirname "$0")
 echo "$*" >> "$d/compositor-calls"
 case "$*" in
- on) echo on >"$d/compositor-state"
+ on) echo on >"$d/compositor-state"; echo 0 >"$d/on-queries"
   # Mesa's GLX library lands in xfwm4's maps, across the end of the reporter's first 64 KiB read.
   head -c 65530 /dev/zero | tr '\\0' x >"$d/../proc/101/maps"; printf 'libGLX_mesa.so.0\\n' >>"$d/../proc/101/maps"
   exit "$(cat "$d/compositor-on-rc")";;
@@ -1690,6 +1693,7 @@ class Gpu(DesktopFixture):
             'never_composites': (lambda: (test / 'owner-on').write_text('0x00000000\n'), 'compositor_ok', '0', {}),
             'still_composites': (lambda: (test / 'owner-off').write_text('0x00c00003\n'), 'compositor_ok', '0', {}),
             'owner_unreadable': (lambda: (test / 'present-compositor-rc').write_text('1\n'), 'compositor_ok', '0', {}),
+            'session_owner_unreadable': (lambda: (test / 'owner-session').write_text('zz\n'), 'compositor_ok', '0', {}),
             'crtc_rc': (lambda: (test / 'crtc-rc').write_text('1\n'), 'scanout_ok', '0', {}),
             'crtc_line': (lambda: (test / 'crtc-on-out').write_text('M19 PRESENT crtc FAIL sample errno=22\n'), 'scanout_ok', '0', {}),
             'root_line': (lambda: (test / 'root-off-out').write_text('M19 PRESENT root FAIL connect\n'), 'scanout_ok', '0', {}),
@@ -1703,6 +1707,16 @@ class Gpu(DesktopFixture):
                 g = self.gpu(log)
                 self.assertEqual((fields[3], g[flag], g['gpu_ok']), ('0', value, '0'))
                 self.assertEqual(self.desktop(log)['touch_ok'], '1')
+
+    def test_a_reading_that_fails_reads_minus_one(self):
+        (self.test / 'crtc-on-out').write_text('M19 PRESENT crtc FAIL sample errno=22\n')
+        (self.test / 'root-off-out').write_text('M19 PRESENT root FAIL connect\n')
+        (self.test / 'owner-session').write_text('zz\n')
+        _, log, _ = self.run_gpu()
+        views = self.views(log)
+        self.assertEqual(views['session'], {'owner': '-1', 'gl': '0', 'fb': '76', 'fbs': '1', 'changes': '0', 'nonblack': '912', 'mean': '96'})
+        self.assertEqual(views['on'], {'owner': str(0x00c00003), 'gl': '1', 'fb': '-1', 'fbs': '-1', 'changes': '-1', 'nonblack': '0', 'mean': '0'})
+        self.assertEqual(views['off'], {'owner': '0', 'gl': '0', 'fb': '76', 'fbs': '1', 'changes': '0', 'nonblack': '-1', 'mean': '-1'})
 
     def test_page_flips_and_the_composited_runs_are_recorded_not_judged(self):
         test = self.test
