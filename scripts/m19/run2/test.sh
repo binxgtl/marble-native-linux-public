@@ -17,7 +17,9 @@ export M19_GPU_PROBE="$(cd "$out" && pwd)/gpu-probe-test" M19_LVP_ICD="$lvp"
 # The Present probe needs libxcb-present's headers; Xvfb, with its fake 60 Hz vblank, runs it.
 gcc -std=c11 -O2 -Wall -Wextra -Werror "$src/present-probe.c" -lxcb-present -lxcb -o "$out/present-probe-test"
 command -v Xvfb >/dev/null || { echo "Xvfb missing: install xvfb" >&2; exit 1; }
-export M19_PRESENT_PROBE="$(cd "$out" && pwd)/present-probe-test" M19_XVFB="$(command -v Xvfb)"
+# Its vblank and crtc modes run on a fake DRM card, preloaded. Test-only, like the fake libdrm.
+gcc -std=c11 -O2 -Wall -Wextra -Werror -shared -fPIC "$src/fake-card.c" -ldl -o "$out/libfakecard.so"
+export M19_PRESENT_PROBE="$(cd "$out" && pwd)/present-probe-test" M19_XVFB="$(command -v Xvfb)" M19_FAKE_CARD="$(cd "$out" && pwd)/libfakecard.so"
 for variant in normal sanitize; do
   flags=(-std=c11 -O2 -Wall -Wextra -Werror)
   if [[ $variant == sanitize ]]; then

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Mutation check for R2 to R4: every mutant of the hand-off, the reporter, T9, the plans, PID 1 or the GPU probe must fail test.py."""
+"""Mutation check for R2 to R4: every mutant of the hand-off, the reporter, T9, the plans, PID 1, the shim or the probes must fail test.py."""
 import os
 import shutil
 import subprocess
@@ -111,27 +111,20 @@ MUTANTS = (
     ('r3plan.py', ', \'    Option "NoTrapSignals" "true"\'', '', ('Plan3',)),
     ('r3plan.py', "'LimitCORE=0', ", '', ('Plan3',)),
     ('r3plan.py', "              'sysctl.d/m19-r3.conf': SYSCTL,\n", '', ('Plan3',)),
-    ('report.c', ' == 1 &&\n                               g->compositor_owner != 0;', ' == 1;', ('Gpu',)),
-    ('report.c', 'g->compositor_ok = status == 0 && at &&', 'g->compositor_ok = at &&', ('Gpu',)),
-    ('report.c', ' &&\n                 (!c->compositor || g.compositor_ok);', ';', ('Gpu',)),
     ('present-probe.c', '    if (xcb_connection_has_error(c)) {\n        printf("M19 PRESENT compositor FAIL connect\\n");\n        return 1;', '    if (xcb_connection_has_error(c)) {\n        printf("M19 PRESENT compositor FAIL connect\\n");\n        return 0;', ('PresentProbe',)),
     ('r4plan.py', '-p /general/vblank_mode -n -t string -s xpresent', '-p /general/vblank_mode -n -t string -s glx', ('Plan4', 'CompositorScript')),
-    ('r4plan.py', '  /usr/bin/xfconf-query -c xfwm4 -p /general/unredirect_overlays -n -t bool -s true\n', '', ('Plan4', 'CompositorScript')),
-    ('r4plan.py', '[ "$profile" != dri3 ] || compositor=on', 'compositor=on', ('SessionScript',)),
-    ('r4plan.py', ' >"$HOME/.config/autostart/m19-compositor.desktop"', ' >/dev/null', ('SessionScript',)),
+    ('r4plan.py', '  /usr/bin/xfconf-query -c xfwm4 -p /general/unredirect_overlays -n -t bool -s true &&\n', '', ('Plan4', 'CompositorScript')),
     ('t9-gpu', ' usr/bin/xfconf-query; do', '; do', ('GpuScript',)),
-    ('pid4.c', '.compositor = 1,', '.compositor = 0,', ('Static',)),
     ('report.c', 'g->flips * 10 >= (long)c->present_frames * 9 && ', '', ('Gpu',)),
     ('report.c', ' &&\n                     g->flip_msc <= 1.10;', ';', ('Gpu',)),
     ('report.c', 'g->flip_ok = status == 0 && g->flip_done == (long)c->present_frames &&', 'g->flip_ok = g->flip_done == (long)c->present_frames &&', ('Gpu',)),
     ('report.c', 'g->flip_ok = status == 0 && g->flip_done == (long)c->present_frames &&', 'g->flip_ok = status == 0 &&', ('Gpu',)),
-    ('report.c', ' && (!c->present_probe || g.flip_ok) &&', ' &&', ('Gpu',)),
     ('report.c', '    char *full[] = {(char *)c->glxgears, "-fullscreen", NULL};', '    char *full[] = {(char *)c->glxgears, NULL};', ('Gpu',)),
     ('report.c', '    snprintf(key, sizeof(key), "M19 PRESENT %s frames=", mode);', '    snprintf(key, sizeof(key), "M19 PRESENT copy frames=");', ('Gpu',)),
     ('present-probe.c', 'msc + 1, 0, 0, 0, NULL);', 'msc + 2, 0, 0, 0, NULL);', ('PresentProbe',)),
     ('present-probe.c', '        case XCB_PRESENT_COMPLETE_MODE_COPY: copies++; break;\n', '', ('PresentProbe',)),
     ('present-probe.c', '        msc = complete->msc;\n', '', ('PresentProbe',)),
-    ('present-probe.c', 'if ((!flip && !copy) || frames < 2 || frames > 10000) {', 'if ((!flip && !copy) || frames > 10000) {', ('PresentProbe',)),
+    ('present-probe.c', 'if ((!flip && !copy && !card) || frames < 2 || frames > 10000) {', 'if ((!flip && !copy && !card) || frames > 10000) {', ('PresentProbe',)),
     ('t9-gpu', 'for probe in gpu-probe present-probe; do', 'for probe in gpu-probe; do', ('GpuScript',)),
     ('r4plan.py', '    return _swap(conf, \'    Option "PageFlip" "false"\\n\', \'    Option "PageFlip" "true"\\n\')', '    return conf', ('Plan4',)),
     ('pid4.c', '.present_frames = 120,', '.present_frames = 12,', ('Static',)),
@@ -191,6 +184,49 @@ MUTANTS = (
     ('pid4.c', '.gpu = 1, ', '.gpu = 0, ', ('Static',)),
     ('gpu-probe.c', '    if (p->deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU)\n        return allow_cpu;', '    if (p->deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU)\n        return 1;', ('GpuProbe',)),
     ('gpu-probe.c', '    vkCmdFillBuffer(commands, buffer, 0, VK_WHOLE_SIZE, FILL_WORD);\n', '', ('GpuProbe',)),
+    # R4e: the probe's vblank, crtc and root modes, the reporter's three views, the Xorg log's filter, the session's bus.
+    ('present-probe.c', '        v.request.sequence = 1;\n', '        v.request.sequence = 2;\n', ('CardProbe',)),
+    ('present-probe.c', '        late += event.sequence != target;\n', '', ('CardProbe',)),
+    ('present-probe.c', '        target = event.sequence + 1;\n', '        target = event.sequence + 2;\n', ('CardProbe',)),
+    ('present-probe.c', '        wall += now_us() - queued;\n', '', ('CardProbe',)),
+    ('present-probe.c', 'return n == (ssize_t)sizeof(*event) && event->type == M19_EVENT_VBLANK && event->user_data == serial;', 'return 1;', ('CardProbe',)),
+    ('present-probe.c', 'if (!ioctl(fd, M19_GET_CRTC, &c) && c.mode_valid && c.fb_id)', 'if (!ioctl(fd, M19_GET_CRTC, &c))', ('CardProbe',)),
+    ('present-probe.c', '        changes += c.fb_id != previous;\n', '', ('CardProbe',)),
+    ('present-probe.c', '        if (!known && distinct < 8)\n', '        if (distinct < 8)\n', ('CardProbe',)),
+    ('present-probe.c', "c.mode.name[i] > ' ' && c.mode.name[i] < 127 && c.mode.name[i] != '=' ? c.mode.name[i] : '_';", 'c.mode.name[i];', ('CardProbe',)),
+    ('present-probe.c', '    if (!id) {\n        printf("M19 PRESENT crtc FAIL no active crtc\\n");', '    if (0) {\n        printf("M19 PRESENT crtc FAIL no active crtc\\n");', ('CardProbe',)),
+    ('present-probe.c', '            sum += (unsigned)p[0] + p[1] + p[2];\n', '            sum += p[0];\n', ('PresentProbe',)),
+    ('present-probe.c', '            nonblack += top > 24;\n', '            nonblack += p[0] > 24;\n', ('PresentProbe',)),
+    ('present-probe.c', '    for (uint16_t y = 0; y < height; y += 64) {', '    for (uint16_t y = 0; y < height / 2; y += 64) {', ('PresentProbe',)),
+    ('present-probe.c', "    if (argc == 2 && !strcmp(argv[1], \"root\"))\n        return root();\n", '', ('PresentProbe',)),
+    ('report.c', 'g->vblank_ok = vblank_line(section_text(start, length), g) && status == 0;', 'g->vblank_ok = vblank_line(section_text(start, length), g);', ('Gpu',)),
+    ('report.c', 'g->compositor_ok = g->on_rc == 0 && g->off_rc == 0 && g->view[0].owner_ok &&', 'g->compositor_ok = g->off_rc == 0 && g->view[0].owner_ok &&', ('Gpu',)),
+    ('report.c', 'g->compositor_ok = g->on_rc == 0 && g->off_rc == 0 && g->view[0].owner_ok &&', 'g->compositor_ok = g->on_rc == 0 && g->view[0].owner_ok &&', ('Gpu',)),
+    ('report.c', 'g->compositor_ok = g->on_rc == 0 && g->off_rc == 0 && g->view[0].owner_ok &&', 'g->compositor_ok = g->on_rc == 0 && g->off_rc == 0 &&', ('Gpu',)),
+    ('report.c', ' && g->view[1].owner > 0 && g->view[2].owner == 0;', ' && g->view[2].owner == 0;', ('Gpu',)),
+    ('report.c', ' && g->view[1].owner > 0 && g->view[2].owner == 0;', ' && g->view[1].owner > 0;', ('Gpu',)),
+    ('report.c', 'g->scanout_ok = g->scanout_ok && g->view[i].crtc_ok && g->view[i].root_ok;', 'g->scanout_ok = g->scanout_ok && g->view[i].crtc_ok;', ('Gpu',)),
+    ('report.c', 'g->scanout_ok = g->scanout_ok && g->view[i].crtc_ok && g->view[i].root_ok;', 'g->scanout_ok = g->scanout_ok && g->view[i].root_ok;', ('Gpu',)),
+    ('report.c', '(!c->compositor_script || (g.compositor_ok && g.vblank_ok && g.scanout_ok));', '(!c->compositor_script || (g.vblank_ok && g.scanout_ok));', ('Gpu',)),
+    ('report.c', '(!c->compositor_script || (g.compositor_ok && g.vblank_ok && g.scanout_ok));', '(!c->compositor_script || (g.compositor_ok && g.scanout_ok));', ('Gpu',)),
+    ('report.c', '(!c->compositor_script || (g.compositor_ok && g.vblank_ok && g.scanout_ok));', '(!c->compositor_script || (g.compositor_ok && g.vblank_ok));', ('Gpu',)),
+    ('report.c', '    v->gl = xfwm4_gl(c);\n', '    v->gl = 0;\n', ('Gpu',)),
+    ('report.c', '        keep = have < 63 ? have : 63;\n', '        keep = 0;\n', ('Gpu',)),
+    ('report.c', '    snprintf(samples, sizeof(samples), "%u", c->crtc_samples);', '    snprintf(samples, sizeof(samples), "%u", 5u);', ('Gpu',)),
+    ('report.c', '            snprintf(vblank_frames, sizeof(vblank_frames), "%u", c->vblank_frames);', '            snprintf(vblank_frames, sizeof(vblank_frames), "%u", 12u);', ('Gpu',)),
+    ('report.c', '            wait_owner(c, 1);\n            observe(c, 1, &g->view[1]);', '            observe(c, 1, &g->view[1]);', ('Gpu',)),
+    ('report.c', '    if (!v->crtc_ok)\n        v->fb = v->fbs = v->changes = -1;', '', ('Gpu',)),
+    ('report.c', '            if (memmem(piece + at, line, drop, size))\n                dropped++;', '            if (0)\n                dropped++;', ('Desktop',)),
+    ('report.c', '            else if (used - start + line <= cap)\n', '            else\n', ('Desktop',)),
+    ('report.c', '((end || (!at && have == sizeof(piece))) ? have - at : 0);', '(end ? have - at : 0);', ('Desktop',)),
+    ('report.c', '"overflowing for touch");', '"overflowing for touch 2");', ('Desktop',)),
+    ('r4plan.py', 'printf "%s\\\\n" "$DBUS_SESSION_BUS_ADDRESS" >/run/m19/session-bus && exec', 'exec', ('SessionScript',)),
+    ('r4plan.py', ' IFS= read -r DBUS_SESSION_BUS_ADDRESS </run/m19/session-bus || exit 69\n', ' :\n', ('CompositorScript',)),
+    ('r4plan.py', ' export DBUS_SESSION_BUS_ADDRESS\n', '', ('CompositorScript',)),
+    ('r4plan.py', '-n -t string -s xpresent &&\n', '-n -t string -s xpresent\n', ('CompositorScript',)),
+    ('r4plan.py', ' 2>/dev/null) || value=unset\n', ' 2>/dev/null) || :\n', ('CompositorScript',)),
+    ('pid4.c', '.compositor_script = "/etc/m19/gpu-compositor",', '.compositor_script = "/etc/m19/gpu-session",', ('Static',)),
+    ('pid4.c', '.compose_ms = 10000,', '.compose_ms = 1000,', ('Static',)),
 )
 
 
@@ -219,13 +255,15 @@ def main():
             if built.returncode:
                 sys.exit(f'mutant {number} does not compile')
             environment = dict(os.environ)
-            if 'PresentProbe' in classes:
-                # The Present probe on Xvfb, as test.sh builds and runs it.
+            if 'PresentProbe' in classes or 'CardProbe' in classes:
+                # The Present probe on Xvfb and on the fake card, as test.sh builds and runs it.
                 xvfb = shutil.which('Xvfb')
                 if not xvfb or subprocess.run(['gcc', '-std=c11', '-O2', '-w', 'present-probe.c', '-lxcb-present', '-lxcb', '-o', 'present-probe-test'],
-                                              cwd=target, capture_output=True, timeout=120).returncode:
-                    sys.exit(f'mutant {number}: no Xvfb or the Present probe does not compile')
-                environment.update(M19_PRESENT_PROBE=str(target / 'present-probe-test'), M19_XVFB=xvfb)
+                                              cwd=target, capture_output=True, timeout=120).returncode or subprocess.run(
+                        ['gcc', '-std=c11', '-O2', '-w', '-shared', '-fPIC', 'fake-card.c', '-ldl', '-o', 'libfakecard.so'], cwd=target,
+                        capture_output=True, timeout=120).returncode:
+                    sys.exit(f'mutant {number}: no Xvfb, or the Present probe or the fake card does not compile')
+                environment.update(M19_PRESENT_PROBE=str(target / 'present-probe-test'), M19_XVFB=xvfb, M19_FAKE_CARD=str(target / 'libfakecard.so'))
             if 'GpuProbe' in classes:
                 # The probe on lavapipe, as test.sh builds and runs it.
                 icds = sorted(Path('/usr/share/vulkan/icd.d').glob('lvp_icd*.json'))

@@ -56,8 +56,12 @@ struct m19_report {
      * the screen, present_frames each; glxgears also runs fullscreen. */
     const char *present_probe;
     unsigned present_frames;
-    /* R4d: a compositing manager must own _NET_WM_CM_S0, as the probe reports. */
-    unsigned compositor;
+    /* R4e: the desktop starts as the tree's xfwm4 settings leave it. With compositor_script set, the reporter
+     * reads the kernel's vblanks on card (vblank_frames waits and events), then views the screen three times:
+     * as the session left it, with R4d's compositor on, and with compositing off. Each view samples the CRTC's
+     * framebuffer crtc_samples times and reads the root window. The compositor gets compose_ms to come or go. */
+    const char *shell, *compositor_script;
+    unsigned vblank_frames, crtc_samples, compose_ms;
 };
 
 /* R3's guard, a service of its own beside the desktop. It stops the desktop units and paints YELLOW

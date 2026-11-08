@@ -173,6 +173,48 @@ static size_t add_file(const char *path, size_t cap)
     return used - start;
 }
 
+/* A text file without its lines that hold drop, at most cap bytes of it; then how many lines were left out.
+ * R4b's and R4d's Xorg logs lost the GPU phase to a flood of one touch message. */
+static long add_file_without(const char *path, size_t cap, const char *drop)
+{
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        addf("M19 cannot open %s errno=%d\n", path, errno);
+        return -1;
+    }
+    static char piece[16384];
+    size_t have = 0, start = used, size = strlen(drop);
+    long dropped = 0;
+    for (;;) {
+        ssize_t n = read(fd, piece + have, sizeof(piece) - have);
+        if (n < 0 && errno == EINTR)
+            continue;
+        int end = n <= 0;
+        if (!end)
+            have += (size_t)n;
+        size_t at = 0;
+        while (at < have) {
+            char *newline = memchr(piece + at, '\n', have - at);
+            /* A whole line; at the end, what is left; a line longer than the piece goes in pieces. */
+            size_t line = newline ? (size_t)(newline - (piece + at)) + 1 : ((end || (!at && have == sizeof(piece))) ? have - at : 0);
+            if (!line)
+                break;
+            if (memmem(piece + at, line, drop, size))
+                dropped++;
+            else if (used - start + line <= cap)
+                add(piece + at, line);
+            at += line;
+        }
+        memmove(piece, piece + at, have - at);
+        have -= at;
+        if (end)
+            break;
+    }
+    close(fd);
+    addf("M19 left out %ld lines holding \"%s\"\n", dropped, drop);
+    return dropped;
+}
+
 static void first_word(const unsigned char *text, size_t size, char *word, size_t room)
 {
     size_t n = 0;
@@ -546,13 +588,23 @@ static void desktop_phase(const struct m19_report *c, int tty, struct desktop *d
     (void)m19_wire_line(tty, c->pace_ms, M19_DEVICE_STEP " T12-touch END %ld %d", d->irq_delta, d->events);
 }
 
+/* R4e: one view of the screen. Who composites, whether xfwm4 has Mesa's GL mapped, what the CRTC scans out
+ * and how often that changes, and what the X server holds for the whole screen. */
+struct view {
+    long owner, fb, fbs, changes, nonblack, mean;
+    int owner_ok, gl, crtc_ok, root_ok;
+};
+
 struct gpu {
-    int node, probe, vk, cube, gl, gears, egl, glamor_init, glamor_on, xorg_unit, glamor_ok, flip_ok, compositor_ok;
-    unsigned long compositor_owner;
-    long cube_ms, glmark2, copy_done, copies, flip_done, flips;
-    double cube_fps, gears_fps, xorg_cpu, copy_msc, copy_us, flip_msc, flip_us, gears_full_fps;
+    int node, probe, vk, cube, gl, gears, egl, glamor_init, glamor_on, xorg_unit, glamor_ok, flip_ok, compositor_ok, vblank_ok, scanout_ok, on_rc,
+        off_rc;
+    long cube_ms, glmark2, copy_done, copies, flip_done, flips, late, composited_done, composited_copies, composited_flips;
+    double cube_fps, gears_fps, xorg_cpu, copy_msc, copy_us, flip_msc, flip_us, gears_full_fps, wait_seq, wait_us, event_seq, event_us,
+        composited_msc, composited_cube_fps;
+    struct view view[3];
     char model[64], probe_device[96], device[96], renderer[160], egl_renderer[160], profile[16], glamor_renderer[160], copy_renderer[160];
 };
+static const char *const view_names[3] = {"session", "on", "off"};
 
 /* A whole small file as text; -1 when it cannot be read. */
 static long file_text(const char *path, char *text, size_t room)
@@ -603,33 +655,77 @@ static double gears_fps(char *text)
     return last;
 }
 
-/* CPU time the X server has used, in clock ticks: utime and stime of the process named Xorg. */
-static long xorg_ticks(const struct m19_report *c)
+/* The pid of the first process named name, or -1. */
+static long pid_of(const struct m19_report *c, const char *name)
 {
     DIR *directory = opendir(c->proc);
-    long ticks = -1;
+    long pid = -1;
     if (!directory)
         return -1;
     struct dirent *entry;
-    while (ticks < 0 && (entry = readdir(directory))) {
+    while (pid < 0 && (entry = readdir(directory))) {
         if (entry->d_name[0] < '1' || entry->d_name[0] > '9')
             continue;
-        char path[512], comm[32], fields[1024];
+        char path[512], comm[32];
         snprintf(path, sizeof(path), "%s/%s/comm", c->proc, entry->d_name);
         if (read_small(path, comm, sizeof(comm)))
             continue;
         comm[strcspn(comm, "\n")] = 0;
-        if (strcmp(comm, "Xorg"))
-            continue;
-        snprintf(path, sizeof(path), "%s/%s/stat", c->proc, entry->d_name);
-        const char *after = read_small(path, fields, sizeof(fields)) ? NULL : strrchr(fields, ')');
-        unsigned long user, system;
-        /* After the command: state, then fields 4 to 13, then utime and stime. */
-        if (after && sscanf(after + 1, " %*c %*s %*s %*s %*s %*s %*s %*s %*s %*s %*s %lu %lu", &user, &system) == 2)
-            ticks = (long)(user + system);
+        if (!strcmp(comm, name))
+            pid = strtol(entry->d_name, NULL, 10);
     }
     closedir(directory);
-    return ticks;
+    return pid;
+}
+
+/* CPU time the X server has used, in clock ticks: utime and stime of the process named Xorg. */
+static long xorg_ticks(const struct m19_report *c)
+{
+    long pid = pid_of(c, "Xorg");
+    char path[512], fields[1024];
+    snprintf(path, sizeof(path), "%s/%ld/stat", c->proc, pid);
+    const char *after = pid < 0 || read_small(path, fields, sizeof(fields)) ? NULL : strrchr(fields, ')');
+    unsigned long user, system;
+    /* After the command: state, then fields 4 to 13, then utime and stime. */
+    if (after && sscanf(after + 1, " %*c %*s %*s %*s %*s %*s %*s %*s %*s %*s %*s %lu %lu", &user, &system) == 2)
+        return (long)(user + system);
+    return -1;
+}
+
+/* Whether a file holds any of the needles, each shorter than 64 bytes: 1, 0, or -1 when it cannot be read.
+ * It is read in pieces, so a process's maps of any size fit. */
+static int file_holds(const char *path, const char *const needles[])
+{
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0)
+        return -1;
+    static char piece[65536 + 64];
+    size_t keep = 0;
+    int found = 0;
+    while (!found) {
+        ssize_t n = read(fd, piece + keep, 65536);
+        if (n < 0 && errno == EINTR)
+            continue;
+        if (n <= 0)
+            break;
+        size_t have = keep + (size_t)n;
+        for (unsigned i = 0; needles[i]; i++)
+            found |= memmem(piece, have, needles[i], strlen(needles[i])) != NULL;
+        keep = have < 63 ? have : 63;
+        memmove(piece, piece + have - keep, keep);
+    }
+    close(fd);
+    return found;
+}
+
+/* Whether xfwm4 composites with Mesa's GL: libglvnd's GLX or EGL vendor library, or Mesa's driver, in its maps. */
+static int xfwm4_gl(const struct m19_report *c)
+{
+    static const char *const mesa[] = {"libGLX_mesa", "libEGL_mesa", "libgallium", NULL};
+    long pid = pid_of(c, "xfwm4");
+    char path[512];
+    snprintf(path, sizeof(path), "%s/%ld/maps", c->proc, pid);
+    return pid < 0 ? -1 : file_holds(path, mesa);
 }
 
 /* A copy of a section's output, as text. */
@@ -674,6 +770,77 @@ static int adreno_named(const char *name)
 {
     return (strstr(name, "Adreno") || strstr(name, "Turnip") || strstr(name, "FD7")) && !strstr(name, "llvmpipe") && !strstr(name, "softpipe") &&
            !strstr(name, "lavapipe");
+}
+
+/* The compositing manager's selection owner, as the probe reads it: 0 when nothing composites, -1 when
+ * unreadable. Quiet: nothing goes into the report. */
+static long owner_now(const struct m19_report *c)
+{
+    char *argv[] = {(char *)c->present_probe, "compositor", NULL};
+    unsigned char out[256];
+    size_t taken = 0;
+    int status = capture(argv, out, sizeof(out) - 1, &taken, c->command_ms);
+    out[taken] = 0;
+    const char *at = strstr((const char *)out, "M19 PRESENT compositor owner=");
+    unsigned long owner = 0;
+    return status == 0 && at && sscanf(at, "M19 PRESENT compositor owner=%lx", &owner) == 1 ? (long)owner : -1;
+}
+
+/* Waits up to compose_ms for a compositing manager to come (want) or go (!want), then a fifth of that for
+ * xfwm4 to draw what it now draws. */
+static void wait_owner(const struct m19_report *c, int want)
+{
+    unsigned long long end = m19_now_ms() + c->compose_ms;
+    long owner;
+    while (((owner = owner_now(c)) < 0 || (owner != 0) != want) && m19_now_ms() < end)
+        (void)poll(NULL, 0, 100);
+    (void)poll(NULL, 0, (int)(c->compose_ms / 5));
+}
+
+/* One view of the screen: xfwm4's settings, the selection's owner, xfwm4's GL, the framebuffers the CRTC
+ * scans out, and the root window's pixels. Each reading is -1 when it failed. */
+static void observe(const struct m19_report *c, unsigned which, struct view *v)
+{
+    size_t start = 0, length = 0;
+    addf("M19 view %s\n", view_names[which]);
+    char *show[] = {(char *)c->shell, (char *)c->compositor_script, "show", NULL};
+    (void)section(show, SECTION_CAP / 16, c->command_ms);
+    char *owner[] = {(char *)c->present_probe, "compositor", NULL};
+    int status = section_env(owner, NULL, SECTION_CAP / 16, c->command_ms, &start, &length);
+    const char *at = strstr(section_text(start, length), "M19 PRESENT compositor owner=");
+    unsigned long id = 0;
+    v->owner_ok = status == 0 && at && sscanf(at, "M19 PRESENT compositor owner=%lx", &id) == 1;
+    v->owner = v->owner_ok ? (long)id : -1;
+    v->gl = xfwm4_gl(c);
+    char samples[16];
+    snprintf(samples, sizeof(samples), "%u", c->crtc_samples);
+    char *crtc[] = {(char *)c->present_probe, "crtc", samples, (char *)c->card, NULL};
+    status = section_env(crtc, NULL, SECTION_CAP / 16, c->command_ms, &start, &length);
+    at = strstr(section_text(start, length), "M19 PRESENT crtc id=");
+    v->crtc_ok = status == 0 && at &&
+                 sscanf(at, "M19 PRESENT crtc id=%*u mode=%*s refresh=%*u fb=%ld fbs=%ld changes=%ld", &v->fb, &v->fbs, &v->changes) == 3;
+    if (!v->crtc_ok)
+        v->fb = v->fbs = v->changes = -1;
+    char *root[] = {(char *)c->present_probe, "root", NULL};
+    status = section_env(root, NULL, SECTION_CAP / 16, c->command_ms, &start, &length);
+    at = strstr(section_text(start, length), "M19 PRESENT root width=");
+    v->root_ok = status == 0 && at && sscanf(at, "M19 PRESENT root width=%*u height=%*u nonblack=%ld mean=%ld", &v->nonblack, &v->mean) == 2;
+    if (!v->root_ok)
+        v->nonblack = v->mean = -1;
+}
+
+/* The kernel's vblank line from the probe; every value is -1 when it is missing. */
+static int vblank_line(const char *text, struct gpu *g)
+{
+    const char *at = strstr(text, "M19 PRESENT vblank frames=");
+    long frames;
+    double wall;
+    if (at && sscanf(at, "M19 PRESENT vblank frames=%ld wait_seq=%lf wait_us=%lf event_seq=%lf event_us=%lf event_wall_us=%lf late=%ld", &frames,
+                     &g->wait_seq, &g->wait_us, &g->event_seq, &g->event_us, &wall, &g->late) == 7)
+        return 1;
+    g->wait_seq = g->wait_us = g->event_seq = g->event_us = -1.0;
+    g->late = -1;
+    return 0;
 }
 
 /* The GPU, after the desktop and touch checks so they run exactly as in R3. The probe fills a buffer on
@@ -766,13 +933,38 @@ static void gpu_phase(const struct m19_report *c, int tty, struct gpu *g)
         char *full[] = {(char *)c->glxgears, "-fullscreen", NULL};
         (void)section_env(full, c->gl_env, SECTION_CAP / 4, c->gears_ms, &start, &length);
         g->gears_full_fps = gears_fps(section_text(start, length));
-        if (c->compositor) {
-            /* xfwm4 composites only if it holds the compositing manager's selection. */
-            char *owner[] = {(char *)c->present_probe, "compositor", NULL};
-            status = section_env(owner, NULL, SECTION_CAP / 16, c->command_ms, &start, &length);
-            const char *at = strstr(section_text(start, length), "M19 PRESENT compositor owner=");
-            g->compositor_ok = status == 0 && at && sscanf(at, "M19 PRESENT compositor owner=%lx", &g->compositor_owner) == 1 &&
-                               g->compositor_owner != 0;
+        if (c->compositor_script) {
+            /* R4e. The kernel's vblanks on card0, without X, to place Present's two vblanks a frame. */
+            char vblank_frames[16];
+            snprintf(vblank_frames, sizeof(vblank_frames), "%u", c->vblank_frames);
+            char *vblank[] = {(char *)c->present_probe, "vblank", vblank_frames, (char *)c->card, NULL};
+            status = section_env(vblank, NULL, SECTION_CAP / 16, c->gpu_ms, &start, &length);
+            g->vblank_ok = vblank_line(section_text(start, length), g) && status == 0;
+            /* The screen as the session left it, then with R4d's compositor on, then with compositing off. */
+            observe(c, 0, &g->view[0]);
+            char *on[] = {(char *)c->shell, (char *)c->compositor_script, "on", NULL};
+            g->on_rc = section(on, SECTION_CAP / 16, c->command_ms);
+            wait_owner(c, 1);
+            observe(c, 1, &g->view[1]);
+            /* Composited, as R4d ran them: the probe's two windows and vkcube. */
+            long ignored, done;
+            double us, msc;
+            (void)section_env(copy, NULL, SECTION_CAP / 8, c->gpu_ms, &start, &length);
+            present_line(section_text(start, length), "copy", &g->composited_done, &g->composited_copies, &ignored, &g->composited_msc, &us);
+            (void)section_env(flip, NULL, SECTION_CAP / 8, c->gpu_ms, &start, &length);
+            present_line(section_text(start, length), "flip", &done, &ignored, &g->composited_flips, &msc, &us);
+            began = m19_now_ms();
+            status = section_env(cube, c->vk_env, SECTION_CAP / 4, c->gpu_ms, NULL, NULL);
+            unsigned long long composited_ms = m19_now_ms() - began;
+            g->composited_cube_fps = status == 0 && composited_ms ? c->cube_frames * 1000.0 / (double)composited_ms : 0;
+            char *off[] = {(char *)c->shell, (char *)c->compositor_script, "off", NULL};
+            g->off_rc = section(off, SECTION_CAP / 16, c->command_ms);
+            wait_owner(c, 0);
+            observe(c, 2, &g->view[2]);
+            g->compositor_ok = g->on_rc == 0 && g->off_rc == 0 && g->view[0].owner_ok && g->view[1].owner > 0 && g->view[2].owner == 0;
+            g->scanout_ok = 1;
+            for (unsigned i = 0; i < 3; i++)
+                g->scanout_ok = g->scanout_ok && g->view[i].crtc_ok && g->view[i].root_ok;
         }
     }
 
@@ -796,8 +988,8 @@ static void gpu_phase(const struct m19_report *c, int tty, struct gpu *g)
     status = section_env(egl, c->egl_env, SECTION_CAP / 4, c->gpu_ms, &start, &length);
     line_value(section_text(start, length), "renderer", g->egl_renderer, sizeof(g->egl_renderer));
     g->egl = status == 0 && adreno_named(g->egl_renderer);
-    (void)m19_wire_line(tty, c->pace_ms, M19_DEVICE_STEP " T12-gpu END %d %d %d %d %d %d %d %d %d %d", g->node, g->probe, g->vk, g->cube, g->gl,
-                        g->gears, g->egl, g->glamor_ok, g->flip_ok, g->compositor_ok);
+    (void)m19_wire_line(tty, c->pace_ms, M19_DEVICE_STEP " T12-gpu END %d %d %d %d %d %d %d %d %d %d %d %d", g->node, g->probe, g->vk, g->cube,
+                        g->gl, g->gears, g->egl, g->glamor_ok, g->flip_ok, g->compositor_ok, g->vblank_ok, g->scanout_ok);
 }
 
 static void desktop_sections(const struct m19_report *c)
@@ -812,7 +1004,7 @@ static void desktop_sections(const struct m19_report *c)
     (void)section(processes, SECTION_CAP / 4, c->command_ms);
     for (unsigned i = 0; i < 2; i++) {
         addf("M19 %s\n", c->xorg_logs[i]);
-        (void)add_file(c->xorg_logs[i], 2 * SECTION_CAP);
+        (void)add_file_without(c->xorg_logs[i], 2 * SECTION_CAP, "overflowing for touch");
     }
     addf("M19 %s\n", c->interrupts);
     (void)add_file(c->interrupts, SECTION_CAP);
@@ -1071,8 +1263,9 @@ int m19_report_main(const struct m19_report *c)
     }
     int gpu_ok = 1;
     if (c->gpu) {
-        gpu_ok = g.node && g.probe && g.vk && g.cube && g.gl && g.gears && (!c->glamor || g.glamor_ok) && (!c->present_probe || g.flip_ok) &&
-                 (!c->compositor || g.compositor_ok);
+        /* Page flips and the composited runs are recorded, not judged: R4e measures where they fail. */
+        gpu_ok = g.node && g.probe && g.vk && g.cube && g.gl && g.gears && (!c->glamor || g.glamor_ok) &&
+                 (!c->compositor_script || (g.compositor_ok && g.vblank_ok && g.scanout_ok));
         /* Three lines, each well inside addf's buffer however long the names run. */
         addf("M19 R4 gpu node=%d probe=%d vk=%d cube=%d cube_ms=%ld cube_fps=%.1f gl=%d gears=%d gears_fps=%.1f egl=%d gpu_ok=%d\n", g.node, g.probe,
              g.vk, g.cube, g.cube_ms, g.cube_fps, g.gl, g.gears, g.gears_fps, g.egl, gpu_ok);
@@ -1086,8 +1279,16 @@ int m19_report_main(const struct m19_report *c)
         if (c->present_probe)
             addf("M19 R4 present copy_done=%ld copy_msc=%.2f copy_us=%.0f flip_done=%ld flips=%ld flip_msc=%.2f flip_us=%.0f gears_full_fps=%.1f "
                  "flip_ok=%d\n", g.copy_done, g.copy_msc, g.copy_us, g.flip_done, g.flips, g.flip_msc, g.flip_us, g.gears_full_fps, g.flip_ok);
-        if (c->compositor)
-            addf("M19 R4 compositor owner=0x%08lx compositor_ok=%d\n", g.compositor_owner, g.compositor_ok);
+        if (c->compositor_script) {
+            addf("M19 R4 vblank wait_seq=%.2f wait_us=%.0f event_seq=%.2f event_us=%.0f late=%ld vblank_ok=%d\n", g.wait_seq, g.wait_us, g.event_seq,
+                 g.event_us, g.late, g.vblank_ok);
+            addf("M19 R4 compositor on_rc=%d off_rc=%d composited_done=%ld composited_copies=%ld composited_flips=%ld composited_msc=%.2f "
+                 "composited_cube_fps=%.1f compositor_ok=%d scanout_ok=%d\n", g.on_rc, g.off_rc, g.composited_done, g.composited_copies,
+                 g.composited_flips, g.composited_msc, g.composited_cube_fps, g.compositor_ok, g.scanout_ok);
+            for (unsigned i = 0; i < 3; i++)
+                addf("M19 R4 view %s owner=%ld gl=%d fb=%ld fbs=%ld changes=%ld nonblack=%ld mean=%ld\n", view_names[i], g.view[i].owner, g.view[i].gl,
+                     g.view[i].fb, g.view[i].fbs, g.view[i].changes, g.view[i].nonblack, g.view[i].mean);
+        }
     }
     int all_ok = init_ok && state_ok && targets_ok && writes_ok && ro_ok && mounts_ok && !write_warning && desktop_ok && gpu_ok;
     addf("M19 R2 verdict init=%d state=%s targets=%d writes=%d read_only=%d mounts=%d write_warning=%d all_ok=%d\n", init_ok, state, targets_ok,

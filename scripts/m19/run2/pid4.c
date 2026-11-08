@@ -56,7 +56,8 @@ static const struct m19_report report = {
     .vkcube = "/usr/bin/vkcube", .glxinfo = "/usr/bin/glxinfo", .glxgears = "/usr/bin/glxgears", .eglinfo = "/usr/bin/eglinfo",
     .vk_env = dri3_env, .gl_env = dri3_env, .egl_env = dri3_env, .glamor = 1, .xorg_unit = "marble-xorg.service",
     .gpu_profile = "/run/m19/gpu-profile", .glmark2 = "/usr/bin/glmark2", .copy_env = copy_env,
-    .present_probe = "/run/m19/m19-present-probe", .present_frames = 120, .compositor = 1,
+    .present_probe = "/run/m19/m19-present-probe", .present_frames = 120, .shell = "/bin/sh", .compositor_script = "/etc/m19/gpu-compositor",
+    .vblank_frames = 120, .crtc_samples = 50, .compose_ms = 10000,
 };
 
 /* Battery 42.0 C, any thermal zone 80 C, CPU 90 % busy for a minute, or fifteen minutes in all. */
