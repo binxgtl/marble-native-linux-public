@@ -1000,16 +1000,14 @@ class CompositorScript(unittest.TestCase):
 
 
 def start_xvfb(xvfb, geometry, *extra):
-    """An Xvfb on the first free display from :90, once its socket exists."""
-    number = next(n for n in range(90, 119) if not os.path.exists(f'/tmp/.X11-unix/X{n}') and not os.path.exists(f'/tmp/.X{n}-lock'))
-    display, socket = f':{number}', Path(f'/tmp/.X11-unix/X{number}')
-    server = subprocess.Popen([xvfb, display, '-screen', '0', geometry, '-nolisten', 'tcp', *extra], stdout=subprocess.DEVNULL,
-                              stderr=subprocess.DEVNULL)
-    for _ in range(200):
-        if socket.exists():
-            break
-        time.sleep(0.05)
-    return server, display
+    """An Xvfb on a display it picks itself and names once it accepts clients, so mutants can run side by side."""
+    read, write = os.pipe()
+    server = subprocess.Popen([xvfb, '-displayfd', str(write), '-screen', '0', geometry, '-nolisten', 'tcp', *extra], pass_fds=(write,),
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    os.close(write)
+    with os.fdopen(read) as pipe:
+        number = pipe.readline().strip()
+    return server, f':{number}'
 
 
 class PresentProbe(unittest.TestCase):
@@ -1080,12 +1078,20 @@ class PresentProbe(unittest.TestCase):
         line = re.fullmatch(r'M19 PRESENT root (width=\S+ height=\S+ nonblack=\S+ mean=\S+)\nM19 PRESENT root ok\n', out).group(1)
         return {key: int(value) for key, value in (item.split('=') for item in line.split())}
 
-    def test_the_root_window_of_a_bare_server_is_its_weave(self):
+    def test_a_bare_server_has_a_black_root(self):
         done = self.run_probe('root')
+        self.assertEqual((done.returncode, self.root(done.stdout)), (0, {'width': 1080, 'height': 2400, 'nonblack': 0, 'mean': 0}))
+
+    def test_the_retro_root_is_its_weave(self):
+        server, display = start_xvfb(self.xvfb, '72x130x24', '-retro')
+        try:
+            done = self.run_probe('root', display=display)
+        finally:
+            server.kill()
+            server.wait()
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         r = self.root(done.stdout)
-        self.assertEqual((r['width'], r['height']), (1080, 2400))
-        # Xvfb's default root is a black and white weave: some pixels white, the rest black.
+        # The classic root weave: some pixels white, the rest black.
         self.assertTrue(0 < r['nonblack'] < 1000, r)
         self.assertLessEqual(abs(r['mean'] - r['nonblack'] * 255 // 1000), 1, r)
 
@@ -1459,7 +1465,7 @@ class Desktop(DesktopFixture):
         (self.root / 'xorg0.log').write_text(line * 3000 + 'source device 6: overflowing for touch 1\n' + '(EE) past the cap\n')
         _, log, _ = self.parse(self.run_desktop()[0])
         start = log.index(f'M19 {self.root}/xorg0.log\n') + len(f'M19 {self.root}/xorg0.log\n')
-        end = log.index('M19 left out 1 lines holding "overflowing for touch"\n')
+        end = log.index('M19 left out 1 lines holding "overflowing for touch", cut at the cap\n')
         self.assertEqual(log[start:end], line * (128 * 1024 // 100))
         self.assertNotIn('(EE) past the cap', log)
 
@@ -2126,10 +2132,11 @@ def main():
     global ARGS
     parser = argparse.ArgumentParser()
     parser.add_argument('--driver', required=True)
+    parser.add_argument('--failfast', action='store_true', help='stop at the first failure, as mutants need')
     parser.add_argument('tests', nargs='*', help='test classes to run; all when empty')
     ARGS = parser.parse_args()
     ARGS.driver = os.path.abspath(ARGS.driver)
-    program = unittest.main(argv=['test', *ARGS.tests], exit=False, verbosity=1)
+    program = unittest.main(argv=['test', *ARGS.tests], exit=False, verbosity=1, failfast=ARGS.failfast)
     sys.exit(not program.result.wasSuccessful())
 
 

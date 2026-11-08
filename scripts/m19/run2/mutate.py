@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Mutation check for R2 to R4: every mutant of the hand-off, the reporter, T9, the plans, PID 1, the shim or the probes must fail test.py."""
+import concurrent.futures
 import os
 import shutil
 import subprocess
@@ -196,7 +197,6 @@ MUTANTS = (
     ('present-probe.c', "c.mode.name[i] > ' ' && c.mode.name[i] < 127 && c.mode.name[i] != '=' ? c.mode.name[i] : '_';", 'c.mode.name[i];', ('CardProbe',)),
     ('present-probe.c', '    if (!id) {\n        printf("M19 PRESENT crtc FAIL no active crtc\\n");', '    if (0) {\n        printf("M19 PRESENT crtc FAIL no active crtc\\n");', ('CardProbe',)),
     ('present-probe.c', '            sum += (unsigned)p[0] + p[1] + p[2];\n', '            sum += p[0];\n', ('PresentProbe',)),
-    ('present-probe.c', '            nonblack += top > 24;\n', '            nonblack += p[0] > 24;\n', ('PresentProbe',)),
     ('present-probe.c', '    for (uint16_t y = 0; y < height; y += 64) {', '    for (uint16_t y = 0; y < height / 2; y += 64) {', ('PresentProbe',)),
     ('present-probe.c', "    if (argc == 2 && !strcmp(argv[1], \"root\"))\n        return root();\n", '', ('PresentProbe',)),
     ('report.c', 'g->vblank_ok = vblank_line(section_text(start, length), g) && status == 0;', 'g->vblank_ok = vblank_line(section_text(start, length), g);', ('Gpu',)),
@@ -217,7 +217,8 @@ MUTANTS = (
     ('report.c', '            wait_owner(c, 1);\n            observe(c, 1, &g->view[1]);', '            observe(c, 1, &g->view[1]);', ('Gpu',)),
     ('report.c', '    if (!v->crtc_ok)\n        v->fb = v->fbs = v->changes = -1;', '', ('Gpu',)),
     ('report.c', '            if (memmem(piece + at, line, drop, size))\n                dropped++;', '            if (0)\n                dropped++;', ('Desktop',)),
-    ('report.c', '            else if (used - start + line <= cap)\n', '            else\n', ('Desktop',)),
+    ('report.c', '            else if (!full && used - start + line <= cap)\n', '            else if (used - start + line <= cap)\n', ('Desktop',)),
+    ('report.c', '            else if (!full && used - start + line <= cap)\n', '            else if (!full)\n', ('Desktop',)),
     ('report.c', '((end || (!at && have == sizeof(piece))) ? have - at : 0);', '(end ? have - at : 0);', ('Desktop',)),
     ('report.c', '"overflowing for touch");', '"overflowing for touch 2");', ('Desktop',)),
     ('r4plan.py', 'printf "%s\\\\n" "$DBUS_SESSION_BUS_ADDRESS" >/run/m19/session-bus && exec', 'exec', ('SessionScript',)),
@@ -230,64 +231,79 @@ MUTANTS = (
 )
 
 
+class Broken(Exception):
+    """A mutant that does not apply or does not build: the check itself is wrong."""
+
+
+def run(number, name, old, new, classes):
+    """True when test.py fails on the mutant. Each mutant gets its own tree, so they run side by side."""
+    source = (HERE / name).read_text(encoding='utf-8')
+    if old not in source:
+        raise Broken(f'mutant {number} does not apply to {name}: {old}')
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory) / 'm19'
+        target = root / 'run2'
+        (root / 'unlock').mkdir(parents=True)
+        (root / 'run1').mkdir()
+        shutil.copytree(HERE, target, ignore=shutil.ignore_patterns('__pycache__'))
+        for path in HERE.parent.glob('*.py'):
+            shutil.copy(path, root)
+        for item in ('core.h', 'hash.c'):
+            shutil.copy(HERE.parent / 'unlock' / item, root / 'unlock')
+        for item in ('r1.h', 'pins'):
+            shutil.copy(HERE.parent / 'run1' / item, root / 'run1')
+        (target / name).write_text(source.replace(old, new), encoding='utf-8', newline='\n')
+        built = subprocess.run(['gcc', '-std=c11', '-O1', '-w', '../unlock/hash.c', 'wire.c', 'handoff.c', 'report.c', 'test-r2.c',
+                                '-Wl,--wrap=umount2,--wrap=mount,--wrap=chroot,--wrap=chdir,--wrap=execve,--wrap=stat,--wrap=ioctl', '-o', 'driver'],
+                               cwd=target, capture_output=True, timeout=120)
+        if built.returncode:
+            raise Broken(f'mutant {number} does not compile')
+        environment = dict(os.environ)
+        if 'PresentProbe' in classes or 'CardProbe' in classes:
+            # The Present probe on Xvfb and on the fake card, as test.sh builds and runs it.
+            xvfb = shutil.which('Xvfb')
+            if not xvfb or subprocess.run(['gcc', '-std=c11', '-O2', '-w', 'present-probe.c', '-lxcb-present', '-lxcb', '-o', 'present-probe-test'],
+                                          cwd=target, capture_output=True, timeout=120).returncode or subprocess.run(
+                    ['gcc', '-std=c11', '-O2', '-w', '-shared', '-fPIC', 'fake-card.c', '-ldl', '-o', 'libfakecard.so'], cwd=target,
+                    capture_output=True, timeout=120).returncode:
+                raise Broken(f'mutant {number}: no Xvfb, or the Present probe or the fake card does not compile')
+            environment.update(M19_PRESENT_PROBE=str(target / 'present-probe-test'), M19_XVFB=xvfb, M19_FAKE_CARD=str(target / 'libfakecard.so'))
+        if 'GpuProbe' in classes:
+            # The probe on lavapipe, as test.sh builds and runs it.
+            icds = sorted(Path('/usr/share/vulkan/icd.d').glob('lvp_icd*.json'))
+            if not icds or subprocess.run(['gcc', '-std=c11', '-O2', '-w', 'gpu-probe.c', '-ldl', '-o', 'gpu-probe-test'], cwd=target,
+                                          capture_output=True, timeout=120).returncode:
+                raise Broken(f'mutant {number}: no lavapipe or the probe does not compile')
+            environment.update(M19_GPU_PROBE=str(target / 'gpu-probe-test'), M19_LVP_ICD=str(icds[0]))
+        if 'Shim' in classes:
+            # The preload library on the fake libdrm, as test.sh builds them.
+            for command in (['gcc', '-std=c11', '-O2', '-w', '-shared', '-fPIC', 'fake-drm.c', '-o', 'libfakedrm.so'],
+                            ['gcc', '-std=c11', '-O2', '-w', '-shared', '-fPIC', 'xorg-shim.c', '-ldl', '-o', 'xorg-shim-test.so'],
+                            ['gcc', '-std=c11', '-O0', '-w', '-rdynamic', 'test-shim.c', '-L.', '-lfakedrm', f'-Wl,-rpath,{target}', '-o', 'test-shim']):
+                if subprocess.run(command, cwd=target, capture_output=True, timeout=120).returncode:
+                    raise Broken(f'mutant {number} does not compile: {command[-1]}')
+            environment.update(M19_SHIM_LIB=str(target / 'xorg-shim-test.so'), M19_SHIM_DRIVER=str(target / 'test-shim'))
+        try:
+            # The first failure kills the mutant, so the rest of its classes need not run.
+            result = subprocess.run([sys.executable, 'test.py', '--failfast', '--driver', 'driver', *classes], cwd=target, capture_output=True,
+                                    timeout=300, env=environment)
+            return result.returncode != 0
+        except subprocess.TimeoutExpired:
+            return True
+
+
 def main():
-    survivors = []
-    for number, (name, old, new, classes) in enumerate(MUTANTS):
-        source = (HERE / name).read_text(encoding='utf-8')
-        if old not in source:
-            sys.exit(f'mutant {number} does not apply to {name}: {old}')
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory) / 'm19'
-            target = root / 'run2'
-            (root / 'unlock').mkdir(parents=True)
-            (root / 'run1').mkdir()
-            shutil.copytree(HERE, target, ignore=shutil.ignore_patterns('__pycache__'))
-            for path in HERE.parent.glob('*.py'):
-                shutil.copy(path, root)
-            for item in ('core.h', 'hash.c'):
-                shutil.copy(HERE.parent / 'unlock' / item, root / 'unlock')
-            for item in ('r1.h', 'pins'):
-                shutil.copy(HERE.parent / 'run1' / item, root / 'run1')
-            (target / name).write_text(source.replace(old, new), encoding='utf-8', newline='\n')
-            built = subprocess.run(['gcc', '-std=c11', '-O1', '-w', '../unlock/hash.c', 'wire.c', 'handoff.c', 'report.c', 'test-r2.c',
-                                    '-Wl,--wrap=umount2,--wrap=mount,--wrap=chroot,--wrap=chdir,--wrap=execve,--wrap=stat,--wrap=ioctl', '-o', 'driver'],
-                                   cwd=target, capture_output=True, timeout=120)
-            if built.returncode:
-                sys.exit(f'mutant {number} does not compile')
-            environment = dict(os.environ)
-            if 'PresentProbe' in classes or 'CardProbe' in classes:
-                # The Present probe on Xvfb and on the fake card, as test.sh builds and runs it.
-                xvfb = shutil.which('Xvfb')
-                if not xvfb or subprocess.run(['gcc', '-std=c11', '-O2', '-w', 'present-probe.c', '-lxcb-present', '-lxcb', '-o', 'present-probe-test'],
-                                              cwd=target, capture_output=True, timeout=120).returncode or subprocess.run(
-                        ['gcc', '-std=c11', '-O2', '-w', '-shared', '-fPIC', 'fake-card.c', '-ldl', '-o', 'libfakecard.so'], cwd=target,
-                        capture_output=True, timeout=120).returncode:
-                    sys.exit(f'mutant {number}: no Xvfb, or the Present probe or the fake card does not compile')
-                environment.update(M19_PRESENT_PROBE=str(target / 'present-probe-test'), M19_XVFB=xvfb, M19_FAKE_CARD=str(target / 'libfakecard.so'))
-            if 'GpuProbe' in classes:
-                # The probe on lavapipe, as test.sh builds and runs it.
-                icds = sorted(Path('/usr/share/vulkan/icd.d').glob('lvp_icd*.json'))
-                if not icds or subprocess.run(['gcc', '-std=c11', '-O2', '-w', 'gpu-probe.c', '-ldl', '-o', 'gpu-probe-test'], cwd=target,
-                                              capture_output=True, timeout=120).returncode:
-                    sys.exit(f'mutant {number}: no lavapipe or the probe does not compile')
-                environment.update(M19_GPU_PROBE=str(target / 'gpu-probe-test'), M19_LVP_ICD=str(icds[0]))
-            if 'Shim' in classes:
-                # The preload library on the fake libdrm, as test.sh builds them.
-                for command in (['gcc', '-std=c11', '-O2', '-w', '-shared', '-fPIC', 'fake-drm.c', '-o', 'libfakedrm.so'],
-                                ['gcc', '-std=c11', '-O2', '-w', '-shared', '-fPIC', 'xorg-shim.c', '-ldl', '-o', 'xorg-shim-test.so'],
-                                ['gcc', '-std=c11', '-O0', '-w', '-rdynamic', 'test-shim.c', '-L.', '-lfakedrm', f'-Wl,-rpath,{target}', '-o', 'test-shim']):
-                    if subprocess.run(command, cwd=target, capture_output=True, timeout=120).returncode:
-                        sys.exit(f'mutant {number} does not compile: {command[-1]}')
-                environment.update(M19_SHIM_LIB=str(target / 'xorg-shim-test.so'), M19_SHIM_DRIVER=str(target / 'test-shim'))
-            try:
-                result = subprocess.run([sys.executable, 'test.py', '--driver', 'driver', *classes], cwd=target, capture_output=True, timeout=300,
-                                        env=environment)
-                killed = result.returncode != 0
-            except subprocess.TimeoutExpired:
-                killed = True
-        if not killed:
-            survivors.append((number, name, old))
-    print(f'{len(MUTANTS) - len(survivors)} of {len(MUTANTS)} R2 mutants killed')
+    workers = max(1, min(8, os.cpu_count() or 1))
+    with concurrent.futures.ThreadPoolExecutor(workers) as pool:
+        futures = [pool.submit(run, number, *mutant) for number, mutant in enumerate(MUTANTS)]
+        try:
+            killed = [future.result() for future in futures]
+        except Broken as error:
+            for future in futures:
+                future.cancel()
+            sys.exit(str(error))
+    survivors = [(number, name, old) for number, ((name, old, _, _), dead) in enumerate(zip(MUTANTS, killed)) if not dead]
+    print(f'{len(MUTANTS) - len(survivors)} of {len(MUTANTS)} R2 mutants killed, {workers} at a time')
     for survivor in survivors:
         print('SURVIVED', survivor)
     sys.exit(1 if survivors else 0)

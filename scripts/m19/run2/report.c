@@ -173,7 +173,8 @@ static size_t add_file(const char *path, size_t cap)
     return used - start;
 }
 
-/* A text file without its lines that hold drop, at most cap bytes of it; then how many lines were left out.
+/* A text file without its lines that hold drop, kept until the first line that would pass cap bytes; then how
+ * many lines were left out, and whether the cap cut it.
  * R4b's and R4d's Xorg logs lost the GPU phase to a flood of one touch message. */
 static long add_file_without(const char *path, size_t cap, const char *drop)
 {
@@ -185,6 +186,7 @@ static long add_file_without(const char *path, size_t cap, const char *drop)
     static char piece[16384];
     size_t have = 0, start = used, size = strlen(drop);
     long dropped = 0;
+    int full = 0;
     for (;;) {
         ssize_t n = read(fd, piece + have, sizeof(piece) - have);
         if (n < 0 && errno == EINTR)
@@ -201,8 +203,10 @@ static long add_file_without(const char *path, size_t cap, const char *drop)
                 break;
             if (memmem(piece + at, line, drop, size))
                 dropped++;
-            else if (used - start + line <= cap)
+            else if (!full && used - start + line <= cap)
                 add(piece + at, line);
+            else
+                full = 1;
             at += line;
         }
         memmove(piece, piece + at, have - at);
@@ -211,7 +215,7 @@ static long add_file_without(const char *path, size_t cap, const char *drop)
             break;
     }
     close(fd);
-    addf("M19 left out %ld lines holding \"%s\"\n", dropped, drop);
+    addf("M19 left out %ld lines holding \"%s\"%s\n", dropped, drop, full ? ", cut at the cap" : "");
     return dropped;
 }
 
