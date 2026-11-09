@@ -18,6 +18,15 @@
  *   chain        (R4j) gpuwrite's dma-buf handed to the X server as xread's is, and read back
  *   xlate H      (R4k) xread, but the CPU writes the colour after the X server has imported the buffer
  *   chainlate    (R4k) chain, but the GPU draws after the X server has imported the buffer, as a program does
+ *   kgslsync H K (R4l) xread's buffer, without X, imported into KGSL node K and put through each cache operation
+ *                the Mesa fork's later KGSL handoff uses, one at a time, each timed: obj-clean, obj-flush,
+ *                cache-clean and cache-flush (IOCTL_KGSL_GPUOBJ_SYNC or IOCTL_KGSL_GPUMEM_SYNC_CACHE, with
+ *                KGSL_GPUMEM_CACHE_CLEAN or _FLUSH)
+ *   xsync H K O  (R4l) xlate, then that one operation O on the buffer before the X server reads it
+ *   xagain H     (R4l) xlate, then the same buffer handed to the X server a second time and read through both
+ *   xwait H      (R4l) xlate, with the pixmap read before the write and again a second after it
+ *   chainsync K O (R4l) chainlate, then operation O on the buffer before the X server reads it
+ *   chainagain   (R4l) chainlate, then the same buffer handed over a second time
  *
  * Every reading is the share of pixels holding the colour, in thousandths. Both windows are override-redirect,
  * so no window manager moves or decorates them. Built against libxcb, libxcb-present and libxcb-dri3; EGL and
@@ -369,24 +378,98 @@ static long read_back(xcb_connection_t *c, xcb_drawable_t drawable)
     return held;
 }
 
+/* (R4l) KGSL's cache maintenance for a dma-buf, as msm_kgsl.h defines it (KGSL_IOC_TYPE 0x09). The probe
+ * imports the buffer into its own KGSL context, which is how the Mesa fork's later releases reach an imported
+ * buffer's cache. */
+struct m19_kgsl_import { uint64_t priv, priv_len, flags; uint32_t type, id; };
+struct m19_kgsl_import_dmabuf { int fd; };
+struct m19_kgsl_sync_cache { unsigned long gpuaddr; uint32_t id, op; size_t offset, length; };
+struct m19_kgsl_sync_obj { uint64_t offset, length; uint32_t id, op; };
+struct m19_kgsl_sync { uint64_t objs; uint32_t obj_len, count; };
+struct m19_kgsl_free { uint32_t id, pad; };
+#define M19_KGSL_IMPORT _IOWR(0x09, 0x48, struct m19_kgsl_import)
+#define M19_KGSL_SYNC_CACHE _IOW(0x09, 0x37, struct m19_kgsl_sync_cache)
+#define M19_KGSL_SYNC _IOW(0x09, 0x49, struct m19_kgsl_sync)
+#define M19_KGSL_FREE_ID _IOWR(0x09, 0x35, struct m19_kgsl_free)
+#define M19_KGSL_DMABUF 3u
+#define M19_KGSL_CLEAN 1u
+#define M19_KGSL_FLUSH 3u
+
+static const char *const kgsl_ops[] = {"obj-clean", "obj-flush", "cache-clean", "cache-flush"};
+
+static int kgsl_op_known(const char *name)
+{
+    for (unsigned i = 0; i < sizeof(kgsl_ops) / sizeof(kgsl_ops[0]); i++)
+        if (!strcmp(name, kgsl_ops[i]))
+            return 1;
+    return 0;
+}
+
+/* Operation name on the size bytes of dma-buf fd, through KGSL node: open, import, the one ioctl (timed), free.
+ * Each result is 0 or the errno; -1 for a step not reached. */
+static void kgsl_sync(const char *mode, const char *node, int fd, size_t size, const char *name)
+{
+    int opened = -1, imported = -1, rc = -1;
+    unsigned long long us = 0;
+    int k = open(node, O_RDWR | O_CLOEXEC);
+    opened = k < 0 ? errno : 0;
+    if (k >= 0) {
+        struct m19_kgsl_import_dmabuf buffer = {fd};
+        struct m19_kgsl_import request = {.priv = (uintptr_t)&buffer, .priv_len = sizeof(buffer), .type = M19_KGSL_DMABUF};
+        imported = ioctl(k, M19_KGSL_IMPORT, &request) ? errno : 0;
+        if (!imported) {
+            uint32_t op = strstr(name, "clean") ? M19_KGSL_CLEAN : M19_KGSL_FLUSH;
+            unsigned long long start = now_us();
+            if (!strncmp(name, "obj-", 4)) {
+                struct m19_kgsl_sync_obj object = {.length = size, .id = request.id, .op = op};
+                struct m19_kgsl_sync sync = {.objs = (uintptr_t)&object, .obj_len = sizeof(object), .count = 1};
+                rc = ioctl(k, M19_KGSL_SYNC, &sync) ? errno : 0;
+            } else {
+                struct m19_kgsl_sync_cache cache = {.id = request.id, .op = op, .length = size};
+                rc = ioctl(k, M19_KGSL_SYNC_CACHE, &cache) ? errno : 0;
+            }
+            us = now_us() - start;
+            struct m19_kgsl_free release = {.id = request.id};
+            (void)ioctl(k, M19_KGSL_FREE_ID, &release);
+        }
+        close(k);
+    }
+    printf("M19 PRESENT %s kgsl op=%s open=%d import=%d rc=%d us=%llu\n", mode, name, opened, imported, rc, us);
+}
+
 /* (R4k) What happens after the X server has the buffer and before it is read back: the late writes. */
 typedef int (*late_fn)(void *context);
 
+/* (R4l) Around them: a read of the pixmap before them, another after a delay, and the same buffer handed over a
+ * second time (again_fd, which x_show then owns) and read through both pixmaps. */
+struct x_plan {
+    late_fn late;
+    void *context;
+    int before;
+    unsigned delay_ms;
+    int again_fd;
+};
+
 /* fd, a side x side dma-buf of stride bytes a row, goes to the X server through DRI3 as a program's buffer does
- * (xcb closes it once sent). late, when set, runs next. The pixmap is read back, then copied into a window, and
- * the window read back. */
-static int x_show(const char *mode, int fd, unsigned stride, late_fn late, void *context)
+ * (xcb closes it once sent). The plan, if any, runs around the reads. The pixmap is read back, then copied into a
+ * window, and the window read back. */
+static int x_show(const char *mode, int fd, unsigned stride, const struct x_plan *plan)
 {
+    int again_fd = plan ? plan->again_fd : -1;
     xcb_connection_t *c = xcb_connect(NULL, NULL);
     if (xcb_connection_has_error(c)) {
         printf("M19 PRESENT %s FAIL connect\n", mode);
         close(fd);
+        if (again_fd >= 0)
+            close(again_fd);
         return 1;
     }
     const xcb_query_extension_reply_t *extension = xcb_get_extension_data(c, &xcb_dri3_id);
     if (!extension || !extension->present) {
         printf("M19 PRESENT %s FAIL no dri3\n", mode);
         close(fd);
+        if (again_fd >= 0)
+            close(again_fd);
         xcb_disconnect(c);
         return 1;
     }
@@ -397,10 +480,16 @@ static int x_show(const char *mode, int fd, unsigned stride, late_fn late, void 
     if (error) {
         printf("M19 PRESENT %s FAIL pixmap error=%u\n", mode, error->error_code);
         free(error);
+        if (again_fd >= 0)
+            close(again_fd);
         xcb_disconnect(c);
         return 1;
     }
-    if (late && late(context)) {
+    if (plan && plan->before)
+        printf("M19 PRESENT %s before=%ld\n", mode, read_back(c, pixmap));
+    if (plan && plan->late && plan->late(plan->context)) {
+        if (again_fd >= 0)
+            close(again_fd);
         xcb_disconnect(c);
         return 1;
     }
@@ -416,6 +505,24 @@ static int x_show(const char *mode, int fd, unsigned stride, late_fn late, void 
     free(xcb_get_input_focus_reply(c, xcb_get_input_focus(c), NULL));
     long from_window = read_back(c, window);
     printf("M19 PRESENT %s pixmap=%ld window=%ld\n", mode, from_pixmap, from_window);
+    if (plan && plan->delay_ms) {
+        struct timespec pause = {(time_t)(plan->delay_ms / 1000u), (long)(plan->delay_ms % 1000u) * 1000000L};
+        (void)nanosleep(&pause, NULL);
+        printf("M19 PRESENT %s delayed=%ld\n", mode, read_back(c, pixmap));
+    }
+    if (again_fd >= 0) {
+        xcb_pixmap_t again = xcb_generate_id(c);
+        error = xcb_request_check(c, xcb_dri3_pixmap_from_buffer_checked(c, again, screen->root, stride * M19_SIDE, M19_SIDE, M19_SIDE,
+                                                                         (uint16_t)stride, 24, 32, again_fd));
+        if (error) {
+            printf("M19 PRESENT %s FAIL again error=%u\n", mode, error->error_code);
+            free(error);
+            xcb_disconnect(c);
+            return 1;
+        }
+        long from_again = read_back(c, again);
+        printf("M19 PRESENT %s again=%ld first=%ld\n", mode, from_again, read_back(c, pixmap));
+    }
     xcb_disconnect(c);
     printf("M19 PRESENT %s ok\n", mode);
     return 0;
@@ -428,6 +535,7 @@ struct heap_buffer {
     uint8_t *p;
     size_t size;
     unsigned stride;
+    const char *kgsl, *op;
 };
 
 static int cpu_paint(void *context)
@@ -443,10 +551,19 @@ static int cpu_paint(void *context)
     return 0;
 }
 
-/* xread paints before the X server has the buffer; xlate (R4k) after. */
-static int heap_read(const char *mode, const char *heap, int late)
+/* (R4l) The CPU's writes, then one KGSL cache operation over them. */
+static int cpu_paint_sync(void *context)
 {
-    struct heap_buffer b = {mode, -1, NULL, (size_t)M19_SIDE * 4 * M19_SIDE, M19_SIDE * 4};
+    struct heap_buffer *b = context;
+    cpu_paint(b);
+    kgsl_sync(b->mode, b->kgsl, b->fd, b->size, b->op);
+    return 0;
+}
+
+/* xread paints before the X server has the buffer; xlate (R4k) and R4l's after; kgslsync (R4l) never hands it over. */
+static int heap_read(const char *mode, const char *heap, const char *kgsl, const char *op)
+{
+    struct heap_buffer b = {mode, -1, NULL, (size_t)M19_SIDE * 4 * M19_SIDE, M19_SIDE * 4, kgsl, op};
     int h = open(heap, O_RDONLY | O_CLOEXEC);
     if (h < 0) {
         printf("M19 PRESENT %s FAIL heap open errno=%d\n", mode, errno);
@@ -466,12 +583,29 @@ static int heap_read(const char *mode, const char *heap, int late)
         close(b.fd);
         return 1;
     }
-    if (!late) {
+    if (!strcmp(mode, "xread")) {
         cpu_paint(&b);
         munmap(b.p, b.size);
-        return x_show(mode, b.fd, b.stride, NULL, NULL);
+        return x_show(mode, b.fd, b.stride, NULL);
     }
-    int rc = x_show(mode, dup(b.fd), b.stride, cpu_paint, &b);
+    int rc = 0;
+    if (!strcmp(mode, "kgslsync")) {
+        cpu_paint(&b);
+        for (unsigned i = 0; i < sizeof(kgsl_ops) / sizeof(kgsl_ops[0]); i++)
+            kgsl_sync(mode, kgsl, b.fd, b.size, kgsl_ops[i]);
+        printf("M19 PRESENT %s ok\n", mode);
+    } else {
+        struct x_plan plan = {cpu_paint, &b, 0, 0, -1};
+        if (!strcmp(mode, "xsync"))
+            plan.late = cpu_paint_sync;
+        else if (!strcmp(mode, "xagain"))
+            plan.again_fd = dup(b.fd);
+        else if (!strcmp(mode, "xwait")) {
+            plan.before = 1;
+            plan.delay_ms = 1000;
+        }
+        rc = x_show(mode, dup(b.fd), b.stride, &plan);
+    }
     munmap(b.p, b.size);
     close(b.fd);
     return rc;
@@ -513,6 +647,7 @@ struct gl {
     unsigned texture;
     int fourcc, fd, stride, offset;
     uint64_t modifier;
+    const char *kgsl, *op;
 };
 
 /* EGL's surfaceless platform, a GLES context, a texture, and its export, before anything is drawn. */
@@ -623,15 +758,32 @@ static int gl_paint(void *context)
     return 0;
 }
 
-/* gpuwrite: drawn, then read by the CPU. chain: then handed to the X server. chainlate (R4k): handed to the X
- * server first, then drawn. */
-static int gpu_read(const char *mode)
+/* (R4l) The GPU's writes, then one KGSL cache operation over them. */
+static int gl_paint_sync(void *context)
+{
+    struct gl *g = context;
+    if (gl_paint(g))
+        return 1;
+    kgsl_sync(g->mode, g->kgsl, g->fd, (size_t)g->stride * M19_SIDE + (size_t)g->offset, g->op);
+    return 0;
+}
+
+/* gpuwrite: drawn, then read by the CPU. chain: then handed to the X server. chainlate (R4k), chainsync and
+ * chainagain (R4l): handed to the X server first, then drawn. */
+static int gpu_read(const char *mode, const char *kgsl, const char *op)
 {
     struct gl g;
     if (gl_open(mode, &g))
         return 1;
-    if (!strcmp(mode, "chainlate")) {
-        int rc = x_show(mode, dup(g.fd), (unsigned)g.stride, gl_paint, &g);
+    g.kgsl = kgsl;
+    g.op = op;
+    if (strcmp(mode, "gpuwrite") && strcmp(mode, "chain")) {
+        struct x_plan plan = {gl_paint, &g, 0, 0, -1};
+        if (!strcmp(mode, "chainsync"))
+            plan.late = gl_paint_sync;
+        else if (!strcmp(mode, "chainagain"))
+            plan.again_fd = dup(g.fd);
+        int rc = x_show(mode, dup(g.fd), (unsigned)g.stride, &plan);
         close(g.fd);
         return rc;
     }
@@ -640,7 +792,7 @@ static int gpu_read(const char *mode)
         return 1;
     }
     if (!strcmp(mode, "chain"))
-        return x_show(mode, g.fd, (unsigned)g.stride, NULL, NULL);
+        return x_show(mode, g.fd, (unsigned)g.stride, NULL);
     close(g.fd);
     printf("M19 PRESENT %s ok\n", mode);
     return 0;
@@ -649,10 +801,16 @@ static int gpu_read(const char *mode)
 int main(int argc, char **argv)
 {
     setvbuf(stdout, NULL, _IOLBF, 0);
-    if (argc == 3 && (!strcmp(argv[1], "xread") || !strcmp(argv[1], "xlate")))
-        return heap_read(argv[1], argv[2], argv[1][1] == 'l');
-    if (argc == 2 && (!strcmp(argv[1], "gpuwrite") || !strcmp(argv[1], "chain") || !strcmp(argv[1], "chainlate")))
-        return gpu_read(argv[1]);
+    if (argc == 3 && (!strcmp(argv[1], "xread") || !strcmp(argv[1], "xlate") || !strcmp(argv[1], "xagain") || !strcmp(argv[1], "xwait")))
+        return heap_read(argv[1], argv[2], NULL, NULL);
+    if (argc == 4 && !strcmp(argv[1], "kgslsync"))
+        return heap_read(argv[1], argv[2], argv[3], NULL);
+    if (argc == 5 && !strcmp(argv[1], "xsync") && kgsl_op_known(argv[4]))
+        return heap_read(argv[1], argv[2], argv[3], argv[4]);
+    if (argc == 2 && (!strcmp(argv[1], "gpuwrite") || !strcmp(argv[1], "chain") || !strcmp(argv[1], "chainlate") || !strcmp(argv[1], "chainagain")))
+        return gpu_read(argv[1], NULL, NULL);
+    if (argc == 4 && !strcmp(argv[1], "chainsync") && kgsl_op_known(argv[3]))
+        return gpu_read(argv[1], argv[2], argv[3]);
     if (argc == 2 && !strcmp(argv[1], "compositor"))
         return compositor();
     if (argc == 2 && !strcmp(argv[1], "root"))
@@ -661,7 +819,8 @@ int main(int argc, char **argv)
     int flip = argc == 3 && !strcmp(argv[1], "flip"), copy = argc == 3 && !strcmp(argv[1], "copy");
     long frames = argc == 3 || card ? strtol(argv[2], NULL, 10) : 0;
     if ((!flip && !copy && !card) || frames < 2 || frames > 10000) {
-        fprintf(stderr, "usage: m19-present-probe copy|flip FRAMES, vblank|crtc COUNT CARD, xread|xlate HEAP, compositor, root, gpuwrite, chain or chainlate\n");
+        fprintf(stderr, "usage: m19-present-probe copy|flip FRAMES, vblank|crtc COUNT CARD, xread|xlate|xagain|xwait HEAP, kgslsync HEAP KGSL, xsync HEAP KGSL OP, compositor, root, gpuwrite, chain, chainlate, "
+                "chainagain or chainsync KGSL OP\n");
         return 64;
     }
     if (card)

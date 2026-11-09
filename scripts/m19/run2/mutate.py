@@ -268,9 +268,9 @@ MUTANTS = (
     ('report.c', '            g->xread_window = field(text, "M19 PRESENT xread pixmap=", "window");', '            g->xread_window = g->xread_pixmap;', ('Gpu',)),
     ('pid4.c', '.dmabuf_env = dri3_env,', '.dmabuf_env = copy_env,', ('Static',)),
     # R4k: writes after the import, and glxgears finishing its GPU work before every swap.
-    ('present-probe.c', "return heap_read(argv[1], argv[2], argv[1][1] == 'l');", 'return heap_read(argv[1], argv[2], 0);', ('PresentProbe',)),
-    ('present-probe.c', ' || !strcmp(argv[1], "xlate")))', '))', ('PresentProbe',)),
-    ('present-probe.c', ' || !strcmp(argv[1], "chainlate")))', '))', ('CardProbe',)),
+    ('present-probe.c', '    if (!strcmp(mode, "xread")) {\n        cpu_paint(&b);', '    if (strcmp(mode, "kgslsync")) {\n        cpu_paint(&b);', ('PresentProbe',)),
+    ('present-probe.c', ' || !strcmp(argv[1], "xlate") ||', ' ||', ('PresentProbe',)),
+    ('present-probe.c', ' || !strcmp(argv[1], "chainlate") ||', ' ||', ('CardProbe',)),
     ('present-probe.c', '        printf("M19 PRESENT %s FAIL heap alloc errno=%d\\n", mode, errno);', '        printf("M19 PRESENT xread FAIL heap alloc errno=%d\\n", errno);', ('CardProbe',)),
     ('glfinish.c', '    if (finish)\n        finish();\n', '', ('Shim',)),
     ('glfinish.c', '    if (finish)\n        finish();\n    if (real)\n        real(display, drawable);', '    if (real)\n        real(display, drawable);\n    if (finish)\n        finish();', ('Shim',)),
@@ -284,6 +284,21 @@ MUTANTS = (
     ('pid4.c', 'static const char *const finish_env[] = {M19_DRI3, M19_FINISH, NULL};', 'static const char *const finish_env[] = {M19_DRI3, NULL};', ('Static',)),
     ('t9-gpu', '$BB cp "$R/m19/m19-glfinish.so" "$new/run/m19/m19-glfinish.so" || fail glfinish\n', '', ('GpuScript',)),
     ('t9-gpu', '[ -f "$R/m19/m19-glfinish.so" ] && [ ! -L "$R/m19/m19-glfinish.so" ] || fail glfinish', '[ -f "$R/m19/m19-glfinish.so" ] || fail glfinish', ('GpuScript',)),
+    # R4l: KGSL cache maintenance over a late write, a second import, a delayed read.
+    ('present-probe.c', '            uint32_t op = strstr(name, "clean") ? M19_KGSL_CLEAN : M19_KGSL_FLUSH;', '            uint32_t op = M19_KGSL_FLUSH;', ('CardProbe',)),
+    ('present-probe.c', '            if (!strncmp(name, "obj-", 4)) {', '            if (1) {', ('CardProbe',)),
+    ('present-probe.c', '#define M19_KGSL_SYNC _IOW(0x09, 0x49,', '#define M19_KGSL_SYNC _IOW(0x09, 0x4A,', ('CardProbe',)),
+    ('present-probe.c', 'struct m19_kgsl_sync_obj object = {.length = size,', 'struct m19_kgsl_sync_obj object = {.length = size / 2,', ('CardProbe',)),
+    ('present-probe.c', '            (void)ioctl(k, M19_KGSL_FREE_ID, &release);\n', '', ('CardProbe',)),
+    ('present-probe.c', '    opened = k < 0 ? errno : 0;', '    opened = 0;', ('CardProbe',)),
+    ('present-probe.c', '        imported = ioctl(k, M19_KGSL_IMPORT, &request) ? errno : 0;\n        if (!imported) {', '        imported = ioctl(k, M19_KGSL_IMPORT, &request) ? errno : 0;\n        if (1) {', ('CardProbe',)),
+    ('present-probe.c', ' && !strcmp(argv[1], "xsync") && kgsl_op_known(argv[4]))', ' && !strcmp(argv[1], "xsync"))', ('PresentProbe',)),
+    ('present-probe.c', '        struct x_plan plan = {cpu_paint, &b, 0, 0, -1};', '        struct x_plan plan = {NULL, &b, 0, 0, -1};', ('PresentProbe',)),
+    ('report.c', '                {probe, "xwait", heap, NULL, NULL, NULL},\n', '', ('Gpu',)),
+    ('report.c', '                {probe, "xsync", heap, kgsl, "obj-clean", NULL},', '                {probe, "xsync", heap, kgsl, "obj-flush", NULL},', ('Gpu',)),
+    ('report.c', '!strncmp(r4l[i][1], "chain", 5) ? c->dmabuf_env : NULL', 'NULL', ('Gpu',)),
+    ('present-probe.c', ' || !strcmp(argv[1], "xagain") ||', ' ||', ('CardProbe',)),
+    ('present-probe.c', ' || !strcmp(argv[1], "chainagain")))', '))', ('CardProbe',)),
 )
 
 

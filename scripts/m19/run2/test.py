@@ -1089,7 +1089,9 @@ class PresentProbe(unittest.TestCase):
         for arguments in ((), ('copy',), ('copy', '1'), ('flip', 'x'), ('other', '10'), ('copy', '10', 'x'), ('compositor', 'x'), ('root', 'x'),
                           ('vblank', '10'), ('vblank', 'x', '/dev/null'), ('crtc', '1', '/dev/null'), ('crtc', '10', '/dev/null', 'x'),
                           ('vblank', '10001', '/dev/null'), ('xread',), ('xread', 'a', 'b'), ('gpuwrite', 'x'), ('chain', 'x'), ('xlate',),
-                          ('xlate', 'a', 'b'), ('chainlate', 'x'), ('chainlater',)):
+                          ('xlate', 'a', 'b'), ('chainlate', 'x'), ('chainlater',), ('xagain',), ('xwait', 'a', 'b'), ('kgslsync', 'a'),
+                          ('kgslsync', 'a', 'b', 'c'), ('xsync', 'a', 'b'), ('xsync', 'a', 'b', 'obj-wipe'), ('xsync', 'a', 'b', 'obj-clean', 'x'),
+                          ('chainsync', 'a'), ('chainsync', 'a', 'flush'), ('chainagain', 'x')):
             self.assertEqual(self.run_probe(*arguments).returncode, 64, arguments)
         done = self.run_probe('copy', '10', display=':119')
         self.assertEqual(done.returncode, 1)
@@ -1121,8 +1123,12 @@ class PresentProbe(unittest.TestCase):
             environment = {key: value for key, value in os.environ.items() if not key.startswith(('ASAN', 'UBSAN', 'M19_FAKE_'))}
             environment.update(DISPLAY=self.display, LD_PRELOAD=fake)
             done = subprocess.run([self.probe, 'xlate', str(heap)], capture_output=True, text=True, env=environment, timeout=60)
-        # Xvfb has no DRI3: no import, so nothing is written.
-        self.assertEqual((done.returncode, done.stdout), (1, 'M19 PRESENT xlate FAIL no dri3\n'))
+            # Xvfb has no DRI3: no import, so nothing is written.
+            self.assertEqual((done.returncode, done.stdout), (1, 'M19 PRESENT xlate FAIL no dri3\n'))
+            # R4l: nor by the modes built on xlate, KGSL's operation included.
+            for mode, extra in (('xsync', (str(heap), 'obj-clean')), ('xagain', ()), ('xwait', ())):
+                done = subprocess.run([self.probe, mode, str(heap), *extra], capture_output=True, text=True, env=environment, timeout=60)
+                self.assertEqual((done.returncode, done.stdout, done.stderr), (1, f'M19 PRESENT {mode} FAIL no dri3\n', ''), mode)
 
     def root(self, out):
         line = re.fullmatch(r'M19 PRESENT root (width=\S+ height=\S+ nonblack=\S+ mean=\S+)\nM19 PRESENT root ok\n', out).group(1)
@@ -1245,11 +1251,47 @@ class CardProbe(unittest.TestCase):
                                 ({}, str(self.card), 'M19 PRESENT xlate FAIL connect\n')):
             done = self.run_probe('xlate', path, **env)
             self.assertEqual((done.returncode, done.stdout), (1, want), env)
+        # R4l: the modes built on xlate fail as it does.
+        for mode, extra in (('xsync', (str(self.card), 'cache-flush')), ('xagain', ()), ('xwait', ())):
+            done = self.run_probe(mode, str(self.card) + '-missing', *extra)
+            self.assertEqual((done.returncode, done.stdout), (1, f'M19 PRESENT {mode} FAIL heap open errno=2\n'), mode)
+            done = self.run_probe(mode, str(self.card), *extra)
+            self.assertEqual((done.returncode, done.stdout, done.stderr), (1, f'M19 PRESENT {mode} FAIL connect\n', ''), mode)
+
+    def test_kgslsync_runs_each_cache_operation_alone(self):
+        done = self.run_probe('kgslsync', str(self.card), str(self.card))
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        lines = done.stdout.splitlines()
+        self.assertEqual((lines[0], lines[5:]), ('M19 PRESENT kgslsync cpu=1000', ['M19 PRESENT kgslsync ok']))
+        ops = [re.fullmatch(r'M19 PRESENT kgslsync kgsl op=(\S+) open=0 import=0 rc=0 us=\d+', line).group(1) for line in lines[1:5]]
+        self.assertEqual(ops, ['obj-clean', 'obj-flush', 'cache-clean', 'cache-flush'])
+        # Each over the whole buffer, from its start: CLEAN is 1, FLUSH 3; each import released once.
+        size = str(256 * 256 * 4)
+        self.assertEqual(re.findall(r'fake kgsl (\w+) op=(\d+) offset=(\d+) length=(\d+)\n', done.stderr),
+                         [('obj', '1', '0', size), ('obj', '3', '0', size), ('cache', '1', '0', size), ('cache', '3', '0', size)])
+        self.assertEqual(done.stderr.count('fake kgsl free id=42\n'), 4)
+
+    def test_kgsl_failures_read_as_errnos_and_unreached_steps_as_minus_one(self):
+        for env, node, want in (({'fail': 'kgsl-import'}, str(self.card), 'open=0 import=22 rc=-1 us=0'),
+                                ({}, str(self.card) + '-missing', 'open=2 import=-1 rc=-1 us=0')):
+            done = self.run_probe('kgslsync', str(self.card), node, **env)
+            self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+            self.assertEqual(len(re.findall(rf'M19 PRESENT kgslsync kgsl op=\S+ {want}\n', done.stdout)), 4, env)
+            self.assertNotIn('fake kgsl', done.stderr)
+        for fail, want in (('kgsl-obj', [('obj-clean', '22'), ('obj-flush', '22'), ('cache-clean', '0'), ('cache-flush', '0')]),
+                           ('kgsl-cache', [('obj-clean', '0'), ('obj-flush', '0'), ('cache-clean', '22'), ('cache-flush', '22')])):
+            done = self.run_probe('kgslsync', str(self.card), str(self.card), fail=fail)
+            self.assertEqual(re.findall(r'op=(\S+) open=0 import=0 rc=(\d+) us=\d+\n', done.stdout), want, fail)
+            self.assertEqual(done.stderr.count('fake kgsl free id=42\n'), 4)
 
     def test_gpuwrite_and_chain_need_egl(self):
         for mode in ('gpuwrite', 'chain', 'chainlate'):
             done = self.run_probe(mode, egl_lib='/nonexistent/libEGL.so.1')
             self.assertEqual((done.returncode, done.stdout), (1, f'M19 PRESENT {mode} FAIL egl load\n'), mode)
+        # R4l: and the late GPU modes, before any KGSL operation.
+        for arguments in (('chainsync', str(self.card), 'obj-flush'), ('chainagain',)):
+            done = self.run_probe(*arguments, egl_lib='/nonexistent/libEGL.so.1')
+            self.assertEqual((done.returncode, done.stdout, done.stderr), (1, f'M19 PRESENT {arguments[0]} FAIL egl load\n', ''), arguments)
         # EGL alone missing is enough, whatever GLES does.
         done = self.run_probe('gpuwrite', egl_lib='/nonexistent/libEGL.so.1', gles_lib='libc.so.6')
         self.assertEqual((done.returncode, done.stdout), (1, 'M19 PRESENT gpuwrite FAIL egl load\n'))
@@ -1606,6 +1648,13 @@ case "$1" in
  vblank) [ "$#" = 3 ] && [ "$2" = 120 ] && [ "${3##*/}" = card ] || exit 64; cat "$d/vblank-out"; exit "$(cat "$d/vblank-rc")";;
  crtc) [ "$#" = 3 ] && [ "$2" = 50 ] && [ "${3##*/}" = card ] || exit 64; cat "$d/crtc-$state-out"; exit "$(cat "$d/crtc-rc")";;
  xread|xlate) [ "$#" = 2 ] && [ "${2##*/}" = heap ] || exit 64; cat "$d/$1-out";;
+ xagain|xwait) [ "$#" = 2 ] && [ "${2##*/}" = heap ] || exit 64; echo "M19 PRESENT $1 read";;
+ kgslsync) [ "$#" = 3 ] && [ "${2##*/}" = heap ] && [ "${3##*/}" = kgsl-node ] || exit 64; echo "M19 PRESENT kgslsync ok";;
+ xsync) [ "$#" = 4 ] && [ "${2##*/}" = heap ] && [ "${3##*/}" = kgsl-node ] || exit 64; echo "M19 PRESENT xsync $4";;
+ chainsync) [ "$#" = 3 ] && [ "${2##*/}" = kgsl-node ] || exit 64
+  [ "${MESA_LOADER_DRIVER_OVERRIDE:-}" = kgsl ] || { echo "M19 PRESENT $1 FAIL egl init"; exit 1; }; echo "M19 PRESENT chainsync $3";;
+ chainagain) [ "$#" = 1 ] || exit 64
+  [ "${MESA_LOADER_DRIVER_OVERRIDE:-}" = kgsl ] || { echo "M19 PRESENT $1 FAIL egl init"; exit 1; }; echo "M19 PRESENT chainagain read";;
  gpuwrite|chain|chainlate) [ "$#" = 1 ] || exit 64
   [ "${MESA_LOADER_DRIVER_OVERRIDE:-}" = kgsl ] || { echo "M19 PRESENT $1 FAIL egl init"; exit 1; }; cat "$d/$1-out";;
  root) [ "$#" = 1 ] || exit 64
@@ -1761,6 +1810,18 @@ class Gpu(DesktopFixture):
                          ('1000', '993', '992', '995', '3', '2'))
         self.assertIn(f'M19 $ {self.test}/present-probe xlate {self.root}/heap\n', log)
         self.assertIn(f'M19 $ {DRI3} {self.test}/present-probe chainlate\n', log)
+        # R4l: nine runs in this order, each followed by what the probe printed; the GPU's with dri3.
+        probe, heap, kgsl = f'{self.test}/present-probe', f'{self.root}/heap', f'{self.root}/kgsl-node'
+        runs = [f'{probe} kgslsync {heap} {kgsl}\nM19 PRESENT kgslsync ok\n']
+        runs += [f'{probe} xsync {heap} {kgsl} {op}\nM19 PRESENT xsync {op}\n' for op in ('obj-clean', 'cache-clean', 'obj-flush')]
+        runs += [f'{probe} {mode} {heap}\nM19 PRESENT {mode} read\n' for mode in ('xagain', 'xwait')]
+        runs += [f'{DRI3} {probe} chainsync {kgsl} {op}\nM19 PRESENT chainsync {op}\n' for op in ('obj-flush', 'cache-flush')]
+        runs += [f'{DRI3} {probe} chainagain\nM19 PRESENT chainagain read\n']
+        at = 0
+        for run in runs:
+            found = log.find('M19 $ ' + run, at)
+            self.assertGreaterEqual(found, 0, run)
+            at = found + len(run)
         # R4e: the kernel's vblanks, then three views of the screen around R4d's compositor, on then off.
         self.assertEqual((g['wait_seq'], g['wait_us'], g['event_seq'], g['event_us'], g['late'], g['vblank_ok']),
                          ('1.00', '8355', '2.00', '16710', '120', '1'))

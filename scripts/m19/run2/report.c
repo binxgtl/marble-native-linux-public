@@ -1054,6 +1054,23 @@ static void gpu_phase(const struct m19_report *c, int tty, struct gpu *g)
             g->chainlate_cpu = field(text, "M19 PRESENT chainlate renderer=", "cpu");
             g->chainlate_pixmap = field(text, "M19 PRESENT chainlate pixmap=", "pixmap");
             g->chainlate_window = field(text, "M19 PRESENT chainlate pixmap=", "window");
+            /* R4l. Where the X server's view goes stale, and the least KGSL cache maintenance that makes a late
+             * write visible: each operation alone and timed, a second import, a delayed read. Recorded in the log
+             * as the probe prints them, not judged. */
+            char *probe = (char *)c->present_probe, *heap = (char *)c->dmabuf_heap, *kgsl = (char *)c->kgsl_node;
+            char *const r4l[][6] = {
+                {probe, "kgslsync", heap, kgsl, NULL, NULL},
+                {probe, "xsync", heap, kgsl, "obj-clean", NULL},
+                {probe, "xsync", heap, kgsl, "cache-clean", NULL},
+                {probe, "xsync", heap, kgsl, "obj-flush", NULL},
+                {probe, "xagain", heap, NULL, NULL, NULL},
+                {probe, "xwait", heap, NULL, NULL, NULL},
+                {probe, "chainsync", kgsl, "obj-flush", NULL, NULL},
+                {probe, "chainsync", kgsl, "cache-flush", NULL, NULL},
+                {probe, "chainagain", NULL, NULL, NULL, NULL},
+            };
+            for (unsigned i = 0; i < sizeof(r4l) / sizeof(r4l[0]); i++)
+                (void)section_env(r4l[i], !strncmp(r4l[i][1], "chain", 5) ? c->dmabuf_env : NULL, SECTION_CAP / 16, c->gpu_ms, &start, &length);
         }
     }
 

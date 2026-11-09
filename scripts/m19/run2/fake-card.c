@@ -7,6 +7,8 @@
  *   M19_FAKE_FAIL=X   one request fails: wait, event, deliver, resources, crtc, fb or heap
  *
  * (R4j) DMA_HEAP_IOCTL_ALLOC on any fd answers with a memfd of the size asked, and DMA_BUF_IOCTL_SYNC succeeds.
+ * (R4l) KGSL on any fd: importing a live dma-buf gives object 42, and each cache operation on it, and its release,
+ * succeeds and says on stderr what it was asked. M19_FAKE_FAIL=kgsl-import, kgsl-obj or kgsl-cache fails that one.
  *
  * Test-only: never built into an image. */
 #define _GNU_SOURCE
@@ -14,8 +16,10 @@
 #undef _FORTIFY_SOURCE
 #include <dlfcn.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <stdarg.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
@@ -43,6 +47,15 @@ struct fake_dmabuf_sync { uint64_t flags; };
 #define FAKE_DMABUF_SYNC _IOW('b', 0, struct fake_dmabuf_sync)
 #define FAKE_GET_CRTC _IOWR('d', 0xa1, struct fake_crtc)
 #define FAKE_GET_FB _IOWR('d', 0xad, struct fake_fb)
+struct fake_kgsl_import { uint64_t priv, priv_len, flags; uint32_t type, id; };
+struct fake_kgsl_sync_cache { unsigned long gpuaddr; uint32_t id, op; size_t offset, length; };
+struct fake_kgsl_sync_obj { uint64_t offset, length; uint32_t id, op; };
+struct fake_kgsl_sync { uint64_t objs; uint32_t obj_len, count; };
+struct fake_kgsl_free { uint32_t id, pad; };
+#define FAKE_KGSL_IMPORT _IOWR(0x09, 0x48, struct fake_kgsl_import)
+#define FAKE_KGSL_SYNC_CACHE _IOW(0x09, 0x37, struct fake_kgsl_sync_cache)
+#define FAKE_KGSL_SYNC _IOW(0x09, 0x49, struct fake_kgsl_sync)
+#define FAKE_KGSL_FREE_ID _IOWR(0x09, 0x35, struct fake_kgsl_free)
 
 static unsigned long long origin;
 static int event_fd = -1;
@@ -177,6 +190,39 @@ int ioctl(int fd, unsigned long request, ...)
     }
     if (request == FAKE_DMABUF_SYNC)
         return 0;
+    if (request == FAKE_KGSL_IMPORT) {
+        struct fake_kgsl_import *r = arg;
+        const int *buffer = (const int *)(uintptr_t)r->priv;
+        if (failing("kgsl-import") || r->type != 3 || r->priv_len != sizeof(int) || fcntl(*buffer, F_GETFD) < 0) {
+            errno = EINVAL;
+            return -1;
+        }
+        r->id = 42;
+        return 0;
+    }
+    if (request == FAKE_KGSL_SYNC) {
+        const struct fake_kgsl_sync *s = arg;
+        const struct fake_kgsl_sync_obj *o = (const struct fake_kgsl_sync_obj *)(uintptr_t)s->objs;
+        if (failing("kgsl-obj") || s->count != 1 || s->obj_len != sizeof(*o) || o->id != 42) {
+            errno = EINVAL;
+            return -1;
+        }
+        fprintf(stderr, "fake kgsl obj op=%u offset=%llu length=%llu\n", o->op, (unsigned long long)o->offset, (unsigned long long)o->length);
+        return 0;
+    }
+    if (request == FAKE_KGSL_SYNC_CACHE) {
+        const struct fake_kgsl_sync_cache *s = arg;
+        if (failing("kgsl-cache") || s->id != 42) {
+            errno = EINVAL;
+            return -1;
+        }
+        fprintf(stderr, "fake kgsl cache op=%u offset=%zu length=%zu\n", s->op, s->offset, s->length);
+        return 0;
+    }
+    if (request == FAKE_KGSL_FREE_ID) {
+        fprintf(stderr, "fake kgsl free id=%u\n", ((const struct fake_kgsl_free *)arg)->id);
+        return 0;
+    }
     if (request == FAKE_GET_FB) {
         /* Framebuffers 76 and 77: the panel's size, rows padded to 64 bytes. */
         struct fake_fb *f = arg;
