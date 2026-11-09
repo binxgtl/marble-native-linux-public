@@ -1779,12 +1779,14 @@ class Gpu(DesktopFixture):
 
     def test_an_unread_screen_reads_minus_one_and_black_is_not_visible(self):
         (self.test / 'root-copy-out').write_text('M19 PRESENT root FAIL connect\n')
-        (self.test / 'root-soft-out').write_text(ROOT.format(nonblack=4, mean=1))
+        # A line cut short: what it did give is not kept.
+        (self.test / 'root-soft-out').write_text('M19 PRESENT root width=1080 height=2400 nonblack=7\n')
+        (self.test / 'root-dri3-out').write_text(ROOT.format(nonblack=4, mean=1))
         _, log, _ = self.run_gpu()
         g = self.gpu(log)
-        self.assertEqual((g['ran'], g['visible'], g['shows_ok']), ('2', '0', '0'))
-        self.assertEqual(self.shows(log)['copy'], {'nonblack': '-1', 'mean': '-1'})
-        self.assertEqual(self.shows(log)['soft'], {'nonblack': '4', 'mean': '1'})
+        self.assertEqual((g['ran'], g['visible'], g['shows_ok']), ('1', '0', '0'))
+        self.assertEqual(self.shows(log), {'dri3': {'nonblack': '4', 'mean': '1'}, 'copy': {'nonblack': '-1', 'mean': '-1'},
+                                           'soft': {'nonblack': '-1', 'mean': '-1'}})
 
     def test_page_flips_and_the_composited_runs_are_recorded_not_judged(self):
         test = self.test
