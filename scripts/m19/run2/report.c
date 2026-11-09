@@ -595,7 +595,7 @@ static void desktop_phase(const struct m19_report *c, int tty, struct desktop *d
 /* R4e: one view of the screen. Who composites, whether xfwm4 has Mesa's GL mapped, what the CRTC scans out
  * and how often that changes, and what the X server holds for the whole screen. */
 struct view {
-    long owner, fb, fbs, changes, nonblack, mean;
+    long owner, fb, fbs, changes, pitch, nonblack, mean;
     int owner_ok, gl, crtc_ok, root_ok;
 };
 
@@ -822,9 +822,10 @@ static void observe(const struct m19_report *c, unsigned which, struct view *v)
     status = section_env(crtc, NULL, SECTION_CAP / 16, c->command_ms, &start, &length);
     at = strstr(section_text(start, length), "M19 PRESENT crtc id=");
     v->crtc_ok = status == 0 && at &&
-                 sscanf(at, "M19 PRESENT crtc id=%*u mode=%*s refresh=%*u fb=%ld fbs=%ld changes=%ld", &v->fb, &v->fbs, &v->changes) == 3;
+                 sscanf(at, "M19 PRESENT crtc id=%*u mode=%*s refresh=%*u fb=%ld fbs=%ld changes=%ld samples=%*d pitch=%ld", &v->fb, &v->fbs,
+                        &v->changes, &v->pitch) == 4;
     if (!v->crtc_ok)
-        v->fb = v->fbs = v->changes = -1;
+        v->fb = v->fbs = v->changes = v->pitch = -1;
     char *root[] = {(char *)c->present_probe, "root", NULL};
     status = section_env(root, NULL, SECTION_CAP / 16, c->command_ms, &start, &length);
     at = strstr(section_text(start, length), "M19 PRESENT root width=");
@@ -1290,8 +1291,8 @@ int m19_report_main(const struct m19_report *c)
                  "composited_cube_fps=%.1f compositor_ok=%d scanout_ok=%d\n", g.on_rc, g.off_rc, g.composited_done, g.composited_copies,
                  g.composited_flips, g.composited_msc, g.composited_cube_fps, g.compositor_ok, g.scanout_ok);
             for (unsigned i = 0; i < 3; i++)
-                addf("M19 R4 view %s owner=%ld gl=%d fb=%ld fbs=%ld changes=%ld nonblack=%ld mean=%ld\n", view_names[i], g.view[i].owner, g.view[i].gl,
-                     g.view[i].fb, g.view[i].fbs, g.view[i].changes, g.view[i].nonblack, g.view[i].mean);
+                addf("M19 R4 view %s owner=%ld gl=%d fb=%ld fbs=%ld changes=%ld pitch=%ld nonblack=%ld mean=%ld\n", view_names[i], g.view[i].owner,
+                     g.view[i].gl, g.view[i].fb, g.view[i].fbs, g.view[i].changes, g.view[i].pitch, g.view[i].nonblack, g.view[i].mean);
         }
     }
     int all_ok = init_ok && state_ok && targets_ok && writes_ok && ro_ok && mounts_ok && !write_warning && desktop_ok && gpu_ok;

@@ -4,7 +4,7 @@
  *
  *   M19_FAKE_LAG=N    every vblank a wait or an event waits for arrives N frames late
  *   M19_FAKE_FLIPS=1  CRTC 31 alternates between framebuffers 76 and 77, as page flips do
- *   M19_FAKE_FAIL=X   one request fails: wait, event, deliver, resources or crtc
+ *   M19_FAKE_FAIL=X   one request fails: wait, event, deliver, resources, crtc or fb
  *
  * Test-only: never built into an image. */
 #define _GNU_SOURCE
@@ -33,7 +33,9 @@ struct fake_crtc { uint64_t set_connectors; uint32_t count_connectors, crtc_id, 
                    uint16_t timings[10]; uint32_t vrefresh, flags, type; char name[32]; };
 #define FAKE_WAIT_VBLANK _IOWR('d', 0x3a, union fake_wait_vblank)
 #define FAKE_GET_RESOURCES _IOWR('d', 0xa0, struct fake_card_res)
+struct fake_fb { uint32_t fb_id, width, height, pitch, bpp, depth, handle; };
 #define FAKE_GET_CRTC _IOWR('d', 0xa1, struct fake_crtc)
+#define FAKE_GET_FB _IOWR('d', 0xad, struct fake_fb)
 
 static unsigned long long origin;
 static int event_fd = -1;
@@ -152,6 +154,20 @@ int ioctl(int fd, unsigned long request, ...)
         c->vrefresh = on ? 120 : 0;
         if (on)
             memcpy(c->name, "1080x2400x120 vid", 17);
+        return 0;
+    }
+    if (request == FAKE_GET_FB) {
+        /* Framebuffers 76 and 77: the panel's size, rows padded to 64 bytes. */
+        struct fake_fb *f = arg;
+        if (failing("fb") || (f->fb_id != 76 && f->fb_id != 77)) {
+            errno = EINVAL;
+            return -1;
+        }
+        f->width = 1080;
+        f->height = 2400;
+        f->pitch = 4352;
+        f->bpp = 32;
+        f->depth = 24;
         return 0;
     }
     int (*real)(int, unsigned long, ...) = (int (*)(int, unsigned long, ...))dlsym(RTLD_NEXT, "ioctl");

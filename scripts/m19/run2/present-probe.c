@@ -9,7 +9,7 @@
  *   vblank N C   (R4e) the kernel's vblanks on CRTC 0 of card C, without X: N one-frame waits, then N events,
  *                each queued for the vblank after the last, as the X server queues Present's
  *   crtc N C     (R4e) the framebuffer the first active CRTC of card C scans out, sampled N times 10 ms apart:
- *                it changes on every page flip
+ *                it changes on every page flip; (R4f) its pitch, which a pixmap must match to be flipped to
  *   root         (R4e) what the X server holds for the whole screen: the share of pixels that are not black
  *
  * Both windows are override-redirect, so no window manager moves or decorates them. Built against libxcb
@@ -47,9 +47,11 @@ struct m19_mode_info {
     char name[32];
 };
 struct m19_crtc { uint64_t set_connectors; uint32_t count_connectors, crtc_id, fb_id, x, y, gamma_size, mode_valid; struct m19_mode_info mode; };
+struct m19_fb { uint32_t fb_id, width, height, pitch, bpp, depth, handle; };
 #define M19_WAIT_VBLANK _IOWR('d', 0x3a, union m19_wait_vblank)
 #define M19_GET_RESOURCES _IOWR('d', 0xa0, struct m19_card_res)
 #define M19_GET_CRTC _IOWR('d', 0xa1, struct m19_crtc)
+#define M19_GET_FB _IOWR('d', 0xad, struct m19_fb)
 #define M19_VBLANK_RELATIVE 0x1u
 #define M19_VBLANK_EVENT 0x4000000u
 #define M19_EVENT_VBLANK 0x01u
@@ -241,7 +243,15 @@ static int crtc(long samples, const char *card)
         mode[i] = c.mode.name[i] > ' ' && c.mode.name[i] < 127 && c.mode.name[i] != '=' ? c.mode.name[i] : '_';
     mode[n] = 0;
     uint32_t refresh = c.mode.vrefresh, fb = c.fb_id, previous = fb, seen[8] = {fb};
-    long distinct = 1, changes = 0;
+    long distinct = 1, changes = 0, pitch = -1, bpp = -1;
+    /* Bytes a row of the scanned-out buffer: modesetting flips only to a pixmap of the same pitch. */
+    struct m19_fb f;
+    memset(&f, 0, sizeof(f));
+    f.fb_id = fb;
+    if (!ioctl(fd, M19_GET_FB, &f)) {
+        pitch = f.pitch;
+        bpp = f.bpp;
+    }
     for (long i = 0; i < samples; i++) {
         struct timespec pause = {0, 10000000};
         (void)nanosleep(&pause, NULL);
@@ -261,8 +271,8 @@ static int crtc(long samples, const char *card)
             seen[distinct++] = c.fb_id;
     }
     close(fd);
-    printf("M19 PRESENT crtc id=%u mode=%s refresh=%u fb=%u fbs=%ld changes=%ld samples=%ld\n", id, n ? mode : "none", refresh, fb, distinct, changes,
-           samples);
+    printf("M19 PRESENT crtc id=%u mode=%s refresh=%u fb=%u fbs=%ld changes=%ld samples=%ld pitch=%ld bpp=%ld\n", id, n ? mode : "none", refresh, fb,
+           distinct, changes, samples, pitch, bpp);
     printf("M19 PRESENT crtc ok\n");
     return 0;
 }

@@ -821,12 +821,14 @@ class Plan4(unittest.TestCase):
         cpu = r3plan.xorg_conf(r3plan.MODE_120)
         self.assertIn('    Option "AccelMethod" "glamor"\n    Option "DRI" "3"\n', glamor)
         self.assertIn('    Option "PageFlip" "true"\n', glamor)
+        self.assertIn('    Option "SWcursor" "false"\n', glamor)
         self.assertEqual(glamor.replace('    Option "AccelMethod" "glamor"\n    Option "DRI" "3"\n', '    Option "AccelMethod" "none"\n')
-                         .replace('"PageFlip" "true"', '"PageFlip" "false"'), cpu)
+                         .replace('"PageFlip" "true"', '"PageFlip" "false"').replace('"SWcursor" "false"', '"SWcursor" "true"'), cpu)
         for line in ('Option "PreferredMode" "1080x2400x120vid"', 'Option "Monitor-Virtual-1" "writeback"', 'Option "Ignore" "true"'):
             self.assertIn(line, glamor)
-        # The CPU fallback is R3c's, page flips off.
+        # The CPU fallback is R3c's, page flips off and the software cursor.
         self.assertIn('    Option "PageFlip" "false"\n', cpu)
+        self.assertIn('    Option "SWcursor" "true"\n', cpu)
 
     def test_xorg_units(self):
         self.assertIn('-config /run/m19/xorg-glamor.conf -logfile /var/log/Xorg.0.log ', r4plan.XORG)
@@ -1166,12 +1168,17 @@ class CardProbe(unittest.TestCase):
     def test_the_active_crtc_and_its_framebuffer(self):
         done = self.run_probe('crtc', '5', str(self.card))
         self.assertEqual((done.returncode, done.stdout), (0, 'M19 PRESENT crtc id=31 mode=1080x2400x120_vid refresh=120 fb=76 fbs=1 changes=0 '
-                                                             'samples=5\nM19 PRESENT crtc ok\n'))
+                                                             'samples=5 pitch=4352 bpp=32\nM19 PRESENT crtc ok\n'))
+
+    def test_an_unreadable_framebuffer_leaves_its_pitch_unknown(self):
+        done = self.run_probe('crtc', '5', str(self.card), fail='fb')
+        self.assertEqual((done.returncode, done.stdout), (0, 'M19 PRESENT crtc id=31 mode=1080x2400x120_vid refresh=120 fb=76 fbs=1 changes=0 '
+                                                             'samples=5 pitch=-1 bpp=-1\nM19 PRESENT crtc ok\n'))
 
     def test_page_flips_change_the_framebuffer(self):
         done = self.run_probe('crtc', '5', str(self.card), flips='1')
         self.assertEqual((done.returncode, done.stdout), (0, 'M19 PRESENT crtc id=31 mode=1080x2400x120_vid refresh=120 fb=76 fbs=2 changes=5 '
-                                                             'samples=5\nM19 PRESENT crtc ok\n'))
+                                                             'samples=5 pitch=4352 bpp=32\nM19 PRESENT crtc ok\n'))
 
     def test_crtc_failures(self):
         for fail, want in (('resources', 'M19 PRESENT crtc FAIL resources errno=22\n'), ('crtc', 'M19 PRESENT crtc FAIL no active crtc\n')):
@@ -1539,7 +1546,8 @@ TURNIP = 'Turnip Adreno (TM) 725'
 ZINK = 'zink Vulkan 1.4(Turnip Adreno (TM) 725 (MESA_TURNIP))'
 PRESENT = ('M19 PRESENT {mode} version=1.2\nM19 PRESENT {mode} frames=120 done={done} copies={copies} flips={flips} skips=0 others=0 '
            'msc_per_frame={msc} us_per_frame={us} wall_us_per_frame={us}\n')
-CRTC = 'M19 PRESENT crtc id=31 mode=1080x2400x120vid refresh=120 fb={fb} fbs={fbs} changes={changes} samples=50\nM19 PRESENT crtc ok\n'
+CRTC = ('M19 PRESENT crtc id=31 mode=1080x2400x120vid refresh=120 fb={fb} fbs={fbs} changes={changes} samples=50 pitch=4352 bpp=32\n'
+        'M19 PRESENT crtc ok\n')
 ROOT = 'M19 PRESENT root width=1080 height=2400 nonblack={nonblack} mean={mean}\nM19 PRESENT root ok\n'
 VBLANK = ('M19 PRESENT vblank frames=120 wait_seq=1.00 wait_us=8355 event_seq=2.00 event_us=16710 event_wall_us=16702 late=120\n'
           'M19 PRESENT vblank ok\n')
@@ -1635,9 +1643,9 @@ class Gpu(DesktopFixture):
                           g['compositor_ok'], g['scanout_ok']), ('0', '0', '120', '120', '0', '2.01', '1', '1'))
         self.assertGreater(float(g['composited_cube_fps']), 0)
         self.assertEqual(self.views(log), {
-            'session': {'owner': '0', 'gl': '0', 'fb': '76', 'fbs': '1', 'changes': '0', 'nonblack': '912', 'mean': '96'},
-            'on': {'owner': str(0x00c00003), 'gl': '1', 'fb': '77', 'fbs': '2', 'changes': '50', 'nonblack': '0', 'mean': '0'},
-            'off': {'owner': '0', 'gl': '0', 'fb': '76', 'fbs': '1', 'changes': '0', 'nonblack': '905', 'mean': '95'}})
+            'session': {'owner': '0', 'gl': '0', 'fb': '76', 'fbs': '1', 'changes': '0', 'pitch': '4352', 'nonblack': '912', 'mean': '96'},
+            'on': {'owner': str(0x00c00003), 'gl': '1', 'fb': '77', 'fbs': '2', 'changes': '50', 'pitch': '4352', 'nonblack': '0', 'mean': '0'},
+            'off': {'owner': '0', 'gl': '0', 'fb': '76', 'fbs': '1', 'changes': '0', 'pitch': '4352', 'nonblack': '905', 'mean': '95'}})
         self.assertEqual((self.test / 'compositor-calls').read_text().split(), ['show', 'on', 'show', 'off', 'show'])
         self.assertIn(f'M19 $ {self.test}/present-probe vblank 120 {self.root}/card\n', log)
         self.assertEqual(log.count(f'M19 $ {self.test}/present-probe crtc 50 {self.root}/card\n'), 3)
@@ -1714,9 +1722,12 @@ class Gpu(DesktopFixture):
         (self.test / 'owner-session').write_text('zz\n')
         _, log, _ = self.run_gpu()
         views = self.views(log)
-        self.assertEqual(views['session'], {'owner': '-1', 'gl': '0', 'fb': '76', 'fbs': '1', 'changes': '0', 'nonblack': '912', 'mean': '96'})
-        self.assertEqual(views['on'], {'owner': str(0x00c00003), 'gl': '1', 'fb': '-1', 'fbs': '-1', 'changes': '-1', 'nonblack': '0', 'mean': '0'})
-        self.assertEqual(views['off'], {'owner': '0', 'gl': '0', 'fb': '76', 'fbs': '1', 'changes': '0', 'nonblack': '-1', 'mean': '-1'})
+        self.assertEqual(views['session'], {'owner': '-1', 'gl': '0', 'fb': '76', 'fbs': '1', 'changes': '0', 'pitch': '4352', 'nonblack': '912',
+                                            'mean': '96'})
+        self.assertEqual(views['on'], {'owner': str(0x00c00003), 'gl': '1', 'fb': '-1', 'fbs': '-1', 'changes': '-1', 'pitch': '-1', 'nonblack': '0',
+                                       'mean': '0'})
+        self.assertEqual(views['off'], {'owner': '0', 'gl': '0', 'fb': '76', 'fbs': '1', 'changes': '0', 'pitch': '4352', 'nonblack': '-1',
+                                        'mean': '-1'})
 
     def test_page_flips_and_the_composited_runs_are_recorded_not_judged(self):
         test = self.test

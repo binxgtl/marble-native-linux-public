@@ -43,9 +43,12 @@ def _swap(text, old, new):
 
 def xorg_glamor_conf():
     """R3's 120 Hz configuration with glamor and DRI3, and (R4c) page flips for programs that cover the screen;
-    everything else, the writeback Ignore included, as R3c ran."""
+    (R4f) the hardware cursor, because modesetting refuses every flip while a software cursor is shown, and
+    falls back to the software cursor by itself where the kernel has none. Everything else, the writeback
+    Ignore included, as R3c ran."""
     conf = _swap(r3plan.xorg_conf(r3plan.MODE_120), '    Option "AccelMethod" "none"\n', '    Option "AccelMethod" "glamor"\n    Option "DRI" "3"\n')
-    return _swap(conf, '    Option "PageFlip" "false"\n', '    Option "PageFlip" "true"\n')
+    conf = _swap(conf, '    Option "PageFlip" "false"\n', '    Option "PageFlip" "true"\n')
+    return _swap(conf, '    Option "SWcursor" "true"\n', '    Option "SWcursor" "false"\n')
 
 
 GLAMOR_CONF = '/run/m19/xorg-glamor.conf'
