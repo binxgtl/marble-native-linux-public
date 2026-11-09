@@ -32,7 +32,7 @@ jobs:
         env:
           M19_MUTANTS: '0'
       - name: Vulkan and Present headers, lavapipe and Xvfb for the GPU and Present probes (no device)
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends libvulkan-dev mesa-vulkan-drivers libxcb-present-dev xvfb
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends libvulkan-dev mesa-vulkan-drivers libxcb-present-dev libxcb-dri3-dev xvfb
       - name: R2 to R4 hand-off, reporter, T9, desktop and GPU checks on synthetic trees, normal and ASan/UBSan, static PID 1 (no device)
         run: bash scripts/m19/run2/test.sh artifacts/m19/${{ runner.arch }}/run2
         env:
@@ -79,6 +79,6 @@ jobs:
       - uses: actions/checkout@v4
       - name: Vulkan and Present headers, lavapipe and Xvfb for the probe mutants (no device)
         if: matrix.suite == 'run2'
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends libvulkan-dev mesa-vulkan-drivers libxcb-present-dev xvfb
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends libvulkan-dev mesa-vulkan-drivers libxcb-present-dev libxcb-dri3-dev xvfb
       - name: Mutants of ${{ matrix.suite }} (no device)
         run: python3 ${{ matrix.script }}

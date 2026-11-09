@@ -74,6 +74,10 @@ struct m19_report {
      * starts, with the path's environment added in the shell that runs both. */
     const struct m19_show *shows;
     unsigned show_count, show_seconds;
+    /* R4j: which side loses a program's frame. The probe reads back a dma-buf from dmabuf_heap that the CPU filled
+     * and the X server imported; one the GPU wrote, run with dmabuf_env; and the two together. */
+    const char *dmabuf_heap;
+    const char *const *dmabuf_env;
 };
 
 /* R3's guard, a service of its own beside the desktop. It stops the desktop units and paints YELLOW

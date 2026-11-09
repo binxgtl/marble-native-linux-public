@@ -719,6 +719,7 @@ class Static(unittest.TestCase):
                       '.gpu_profile = "/run/m19/gpu-profile", .glmark2 = "/usr/bin/glmark2", .copy_env = copy_env',
                       '.present_probe = "/run/m19/m19-present-probe", .present_frames = 120, .judge_copy = 1, .shell = "/bin/sh", .shows = shows,',
                       '.show_count = sizeof(shows) / sizeof(shows[0]), .show_seconds = 3,',
+                      '.dmabuf_heap = "/dev/dma_heap/system", .dmabuf_env = dri3_env,',
                       '.xorg_logs = {"/var/log/Xorg.0.log", "/var/log/Xorg.cpu.log"}', '.battery_limit = 420, ', '.session_ms = 900000, ',
                       '.guard_unit = "m19-r3-guard.service"', '.units = {"marble-xfce.service", "marble-xorg.service", "marble-xorg-fallback.service"}'):
             self.assertIn(field, text)
@@ -1079,7 +1080,7 @@ class PresentProbe(unittest.TestCase):
     def test_usage_and_no_server(self):
         for arguments in ((), ('copy',), ('copy', '1'), ('flip', 'x'), ('other', '10'), ('copy', '10', 'x'), ('compositor', 'x'), ('root', 'x'),
                           ('vblank', '10'), ('vblank', 'x', '/dev/null'), ('crtc', '1', '/dev/null'), ('crtc', '10', '/dev/null', 'x'),
-                          ('vblank', '10001', '/dev/null')):
+                          ('vblank', '10001', '/dev/null'), ('xread',), ('xread', 'a', 'b'), ('gpuwrite', 'x'), ('chain', 'x')):
             self.assertEqual(self.run_probe(*arguments).returncode, 64, arguments)
         done = self.run_probe('copy', '10', display=':119')
         self.assertEqual(done.returncode, 1)
@@ -1088,6 +1089,18 @@ class PresentProbe(unittest.TestCase):
         self.assertEqual((done.returncode, done.stdout), (1, 'M19 PRESENT compositor FAIL connect\n'))
         done = self.run_probe('root', display=':119')
         self.assertEqual((done.returncode, done.stdout), (1, 'M19 PRESENT root FAIL connect\n'))
+
+    def test_xread_fills_its_buffer_then_needs_dri3(self):
+        fake = os.environ.get('M19_FAKE_CARD')
+        if not fake:
+            self.skipTest('fake card not built in this run')
+        with tempfile.TemporaryDirectory() as directory:
+            heap = Path(directory) / 'heap'
+            heap.write_text('')
+            environment = {key: value for key, value in os.environ.items() if not key.startswith(('ASAN', 'UBSAN', 'M19_FAKE_'))}
+            environment.update(DISPLAY=self.display, LD_PRELOAD=fake)
+            done = subprocess.run([self.probe, 'xread', str(heap)], capture_output=True, text=True, env=environment, timeout=60)
+        self.assertEqual((done.returncode, done.stdout), (1, 'M19 PRESENT xread cpu=1000\nM19 PRESENT xread FAIL no dri3\n'))
 
     def root(self, out):
         line = re.fullmatch(r'M19 PRESENT root (width=\S+ height=\S+ nonblack=\S+ mean=\S+)\nM19 PRESENT root ok\n', out).group(1)
@@ -1138,9 +1151,11 @@ class CardProbe(unittest.TestCase):
         self.card = Path(directory.name) / 'card0'
         self.card.write_text('')
 
-    def run_probe(self, *arguments, **fake):
-        environment = {key: value for key, value in os.environ.items() if not key.startswith(('ASAN', 'UBSAN', 'M19_FAKE_'))}
-        environment.update(LD_PRELOAD=self.fake, **{f'M19_FAKE_{key.upper()}': value for key, value in fake.items()})
+    def run_probe(self, *arguments, egl_lib=None, **fake):
+        environment = {key: value for key, value in os.environ.items() if not key.startswith(('ASAN', 'UBSAN', 'M19_FAKE_', 'DISPLAY', 'M19_EGL'))}
+        environment.update(LD_PRELOAD=self.fake, DISPLAY=':119', **{f'M19_FAKE_{key.upper()}': value for key, value in fake.items()})
+        if egl_lib:
+            environment['M19_EGL_LIB'] = egl_lib
         return subprocess.run([self.probe, *arguments], capture_output=True, text=True, env=environment, timeout=60)
 
     def vblank(self, out):
@@ -1192,6 +1207,18 @@ class CardProbe(unittest.TestCase):
         done = self.run_probe('crtc', '5', str(self.card), flips='1')
         self.assertEqual((done.returncode, done.stdout), (0, 'M19 PRESENT crtc id=31 mode=1080x2400x120_vid refresh=120 fb=76 fbs=2 changes=5 '
                                                              'samples=5 pitch=4352 bpp=32\nM19 PRESENT crtc ok\n'))
+
+    def test_xread_heap_failures_and_no_server(self):
+        for env, path, want in (({}, str(self.card) + '-missing', 'M19 PRESENT xread FAIL heap open errno=2\n'),
+                                ({'fail': 'heap'}, str(self.card), 'M19 PRESENT xread FAIL heap alloc errno=22\n'),
+                                ({}, str(self.card), 'M19 PRESENT xread cpu=1000\nM19 PRESENT xread FAIL connect\n')):
+            done = self.run_probe('xread', path, **env)
+            self.assertEqual((done.returncode, done.stdout), (1, want), env)
+
+    def test_gpuwrite_and_chain_need_egl(self):
+        for mode in ('gpuwrite', 'chain'):
+            done = self.run_probe(mode, egl_lib='/nonexistent/libEGL.so.1')
+            self.assertEqual((done.returncode, done.stdout), (1, f'M19 PRESENT {mode} FAIL egl load\n'), mode)
 
     def test_crtc_failures(self):
         for fail, want in (('resources', 'M19 PRESENT crtc FAIL resources errno=22\n'), ('crtc', 'M19 PRESENT crtc FAIL no active crtc\n')):
@@ -1544,6 +1571,9 @@ case "$1" in
   exit "$(cat "$d/present-$1-rc")";;
  vblank) [ "$#" = 3 ] && [ "$2" = 120 ] && [ "${3##*/}" = card ] || exit 64; cat "$d/vblank-out"; exit "$(cat "$d/vblank-rc")";;
  crtc) [ "$#" = 3 ] && [ "$2" = 50 ] && [ "${3##*/}" = card ] || exit 64; cat "$d/crtc-$state-out"; exit "$(cat "$d/crtc-rc")";;
+ xread) [ "$#" = 2 ] && [ "${2##*/}" = heap ] || exit 64; cat "$d/xread-out";;
+ gpuwrite|chain) [ "$#" = 1 ] || exit 64
+  [ "${MESA_LOADER_DRIVER_OVERRIDE:-}" = kgsl ] || { echo "M19 PRESENT $1 FAIL egl init"; exit 1; }; cat "$d/$1-out";;
  root) [ "$#" = 1 ] || exit 64
   if [ "${LIBGL_ALWAYS_SOFTWARE:-}" = 1 ]; then cat "$d/root-soft-out"
   elif [ "${MESA_VK_WSI_DEBUG:-}" = sw ]; then cat "$d/root-copy-out"
@@ -1624,6 +1654,12 @@ class Gpu(DesktopFixture):
                            # R4i: glxgears covering the screen, black through DRI3, drawn through the copy and software paths.
                            ('root-dri3-out', ROOT.format(nonblack=0, mean=0)), ('root-copy-out', ROOT.format(nonblack=140, mean=29)),
                            ('root-soft-out', ROOT.format(nonblack=152, mean=31)),
+                           # R4j: the X server reads the CPU's dma-buf, the CPU reads the GPU's, the X server loses the GPU's.
+                           ('xread-out', 'M19 PRESENT xread cpu=1000\nM19 PRESENT xread pixmap=1000 window=998\nM19 PRESENT xread ok\n'),
+                           ('gpuwrite-out', 'M19 PRESENT gpuwrite renderer=FD725 fourcc=34324241 modifier=0 stride=1024 cpu=997\n'
+                                            'M19 PRESENT gpuwrite ok\n'),
+                           ('chain-out', 'M19 PRESENT chain renderer=FD725 fourcc=34324241 modifier=0 stride=1024 cpu=996\n'
+                                         'M19 PRESENT chain pixmap=0 window=0\nM19 PRESENT chain ok\n'),
                            ('present-copy-on-out', PRESENT.format(mode='copy', done=120, copies=120, flips=0, msc='2.01', us=16750) +
                             'M19 PRESENT copy ok\n'),
                            ('present-flip-on-out', PRESENT.format(mode='flip', done=120, copies=120, flips=0, msc='2.01', us=16750) +
@@ -1643,7 +1679,7 @@ class Gpu(DesktopFixture):
 
     def gpu(self, log):
         fields = {}
-        for line in ('gpu', 'gpu-names', 'gpu-renderers', 'glamor', 'glamor-renderers', 'present', 'vblank', 'compositor', 'shows'):
+        for line in ('gpu', 'gpu-names', 'gpu-renderers', 'glamor', 'glamor-renderers', 'present', 'vblank', 'compositor', 'shows', 'dmabuf'):
             fields.update(item.split('=', 1) for item in re.search(rf'M19 R4 {line} (.*)\n', log).group(1).split())
         return fields
 
@@ -1675,6 +1711,12 @@ class Gpu(DesktopFixture):
         self.assertIn(f'M19 show dri3\nM19 $ {DRI3} /bin/sh -c {script}\n', log)
         self.assertIn(f'M19 show copy\nM19 $ {COPY} /bin/sh -c {script}\n', log)
         self.assertIn(f'M19 show soft\nM19 $ LIBGL_ALWAYS_SOFTWARE=1 /bin/sh -c {script}\n', log)
+        # R4j: the three dma-buf readings, gpuwrite and chain with the dri3 profile.
+        self.assertEqual((g['xread_cpu'], g['xread_pixmap'], g['xread_window'], g['gpu_cpu'], g['chain_cpu'], g['chain_pixmap'], g['chain_window'],
+                          g['dmabuf_renderer']), ('1000', '1000', '998', '997', '996', '0', '0', 'FD725'))
+        self.assertIn(f'M19 $ {self.test}/present-probe xread {self.root}/heap\n', log)
+        self.assertIn(f'M19 $ {DRI3} {self.test}/present-probe gpuwrite\n', log)
+        self.assertIn(f'M19 $ {DRI3} {self.test}/present-probe chain\n', log)
         # R4e: the kernel's vblanks, then three views of the screen around R4d's compositor, on then off.
         self.assertEqual((g['wait_seq'], g['wait_us'], g['event_seq'], g['event_us'], g['late'], g['vblank_ok']),
                          ('1.00', '8355', '2.00', '16710', '120', '1'))
@@ -1776,6 +1818,16 @@ class Gpu(DesktopFixture):
                                        'mean': '0'})
         self.assertEqual(views['off'], {'owner': '0', 'gl': '0', 'fb': '76', 'fbs': '1', 'changes': '0', 'pitch': '4352', 'nonblack': '-1',
                                         'mean': '-1'})
+
+    def test_failed_dma_buf_readings_read_minus_one_and_are_not_judged(self):
+        (self.test / 'xread-out').write_text('M19 PRESENT xread FAIL heap open errno=2\n')
+        (self.test / 'gpuwrite-out').write_text('M19 PRESENT gpuwrite FAIL export\n')
+        (self.test / 'chain-out').write_text('M19 PRESENT chain renderer=FD725 fourcc=0 modifier=0 stride=1024 cpu=x\nM19 PRESENT chain FAIL no dri3\n')
+        fields, log, _ = self.run_gpu()
+        g = self.gpu(log)
+        self.assertEqual((fields[3], g['gpu_ok']), ('1', '1'))
+        self.assertEqual((g['xread_cpu'], g['xread_pixmap'], g['xread_window'], g['gpu_cpu'], g['chain_cpu'], g['chain_pixmap'], g['chain_window'],
+                          g['dmabuf_renderer']), ('-1', '-1', '-1', '-1', '-1', '-1', '-1', 'none'))
 
     def test_an_unread_screen_reads_minus_one_and_black_is_not_visible(self):
         (self.test / 'root-copy-out').write_text('M19 PRESENT root FAIL connect\n')
@@ -1895,7 +1947,8 @@ class GpuScript(unittest.TestCase):
         for tool in ('usr/lib/aarch64-linux-gnu/libvulkan.so.1', 'usr/share/vulkan/icd.d/freedreno_icd.aarch64.json', 'usr/bin/vulkaninfo',
                      'usr/bin/vkcube', 'usr/bin/glxinfo', 'usr/bin/glxgears', 'usr/bin/eglinfo', 'usr/bin/glmark2',
                      'usr/lib/xorg/modules/libglamoregl.so', 'usr/lib/aarch64-linux-gnu/gbm/dri_gbm.so', 'usr/lib/aarch64-linux-gnu/dri/kgsl_dri.so',
-                     'usr/bin/xfconf-query'):
+                     'usr/bin/xfconf-query', 'usr/lib/aarch64-linux-gnu/libxcb-dri3.so.0', 'usr/lib/aarch64-linux-gnu/libEGL.so.1',
+                     'usr/lib/aarch64-linux-gnu/libGLESv2.so.2'):
             (self.new / tool).parent.mkdir(parents=True, exist_ok=True)
             (self.new / tool).write_text('x\n')
 
@@ -1976,6 +2029,9 @@ class GpuScript(unittest.TestCase):
         self.setUp()
         (self.new / 'usr/bin/xfconf-query').unlink()
         self.assertFails('missing usr/bin/xfconf-query')
+        self.setUp()
+        (self.new / 'usr/lib/aarch64-linux-gnu/libGLESv2.so.2').unlink()
+        self.assertFails('missing usr/lib/aarch64-linux-gnu/libGLESv2.so.2')
         self.setUp()
         (self.root / 'm19/r4/xorg-glamor.conf').unlink()
         self.assertFails('xorg-glamor')

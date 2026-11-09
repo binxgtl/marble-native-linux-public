@@ -69,7 +69,7 @@ static const struct m19_report report = {
     .vk_env = dri3_env, .gl_env = dri3_env, .egl_env = dri3_env, .glamor = 1, .xorg_unit = "marble-xorg.service",
     .gpu_profile = "/run/m19/gpu-profile", .glmark2 = "/usr/bin/glmark2", .copy_env = copy_env,
     .present_probe = "/run/m19/m19-present-probe", .present_frames = 120, .judge_copy = 1, .shell = "/bin/sh", .shows = shows,
-    .show_count = sizeof(shows) / sizeof(shows[0]), .show_seconds = 3,
+    .show_count = sizeof(shows) / sizeof(shows[0]), .show_seconds = 3, .dmabuf_heap = "/dev/dma_heap/system", .dmabuf_env = dri3_env,
 };
 /* R4h: no compositor views. R4e to R4g measured them; R4d's compositor would only black out the panel again. */
 

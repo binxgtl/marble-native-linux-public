@@ -115,7 +115,10 @@ MUTANTS = (
     ('present-probe.c', '    if (xcb_connection_has_error(c)) {\n        printf("M19 PRESENT compositor FAIL connect\\n");\n        return 1;', '    if (xcb_connection_has_error(c)) {\n        printf("M19 PRESENT compositor FAIL connect\\n");\n        return 0;', ('PresentProbe',)),
     ('r4plan.py', '-p /general/vblank_mode -n -t string -s xpresent', '-p /general/vblank_mode -n -t string -s glx', ('Plan4', 'CompositorScript')),
     ('r4plan.py', '  /usr/bin/xfconf-query -c xfwm4 -p /general/unredirect_overlays -n -t bool -s true &&\n', '', ('Plan4', 'CompositorScript')),
-    ('t9-gpu', ' usr/bin/xfconf-query; do', '; do', ('GpuScript',)),
+    ('t9-gpu', ' usr/bin/xfconf-query \
+', ' \
+', ('GpuScript',)),
+    ('t9-gpu', ' usr/lib/aarch64-linux-gnu/libEGL.so.1 usr/lib/aarch64-linux-gnu/libGLESv2.so.2; do', ' usr/lib/aarch64-linux-gnu/libEGL.so.1; do', ('GpuScript',)),
     ('report.c', 'g->flips * 10 >= (long)c->present_frames * 9 && ', '', ('Gpu',)),
     ('report.c', ' &&\n                     g->flip_msc <= 1.10;', ';', ('Gpu',)),
     ('report.c', 'g->flip_ok = status == 0 && g->flip_done == (long)c->present_frames &&', 'g->flip_ok = g->flip_done == (long)c->present_frames &&', ('Gpu',)),
@@ -253,6 +256,17 @@ MUTANTS = (
     ('pid4.c', '{"noubwc", noubwc_env}, ', '', ('Static',)),
     ('pid4.c', '"FD_MESA_DEBUG=noubwc,notile"', '"FD_MESA_DEBUG=noubwc"', ('Static',)),
     ('pid4.c', '.show_seconds = 3,', '.show_seconds = 0,', ('Static',)),
+    # R4j: which side loses a program's frame.
+    ('present-probe.c', '        memcpy(p + i, colour, 3);\n', '        memcpy(p + i, colour, 2);\n', ('CardProbe',)),
+    ('present-probe.c', '    if (failed) {\n        printf("M19 PRESENT xread FAIL heap alloc', '    if (0) {\n        printf("M19 PRESENT xread FAIL heap alloc', ('CardProbe',)),
+    ('present-probe.c', '    if (!extension || !extension->present) {\n        printf("M19 PRESENT %s FAIL no dri3', '    if (0) {\n        printf("M19 PRESENT %s FAIL no dri3', ('PresentProbe',)),
+    ('present-probe.c', '    if (!egl || !gles || !get_proc) {', '    if (!egl && !gles && !get_proc) {', ('CardProbe',)),
+    ('report.c', '            (void)section_env(gpuwrite, c->dmabuf_env,', '            (void)section_env(gpuwrite, NULL,', ('Gpu',)),
+    ('report.c', '            (void)section_env(chain, c->dmabuf_env,', '            (void)section_env(chain, NULL,', ('Gpu',)),
+    ('report.c', '    return end == at + strlen(pattern) ? -1 : value;', '    return value;', ('Gpu',)),
+    ('report.c', '    if (!at || at >= line + n)\n        return -1;', '    if (!at)\n        return -1;', ('Gpu',)),
+    ('report.c', '            g->xread_window = field(text, "M19 PRESENT xread pixmap=", "window");', '            g->xread_window = g->xread_pixmap;', ('Gpu',)),
+    ('pid4.c', '.dmabuf_env = dri3_env,', '.dmabuf_env = copy_env,', ('Static',)),
 )
 
 
@@ -287,7 +301,7 @@ def run(number, name, old, new, classes):
         if 'PresentProbe' in classes or 'CardProbe' in classes:
             # The Present probe on Xvfb and on the fake card, as test.sh builds and runs it.
             xvfb = shutil.which('Xvfb')
-            if not xvfb or subprocess.run(['gcc', '-std=c11', '-O2', '-w', 'present-probe.c', '-lxcb-present', '-lxcb', '-o', 'present-probe-test'],
+            if not xvfb or subprocess.run(['gcc', '-std=c11', '-O2', '-w', 'present-probe.c', '-lxcb-dri3', '-lxcb-present', '-lxcb', '-ldl', '-o', 'present-probe-test'],
                                           cwd=target, capture_output=True, timeout=120).returncode or subprocess.run(
                     ['gcc', '-std=c11', '-O2', '-w', '-shared', '-fPIC', 'fake-card.c', '-ldl', '-o', 'libfakecard.so'], cwd=target,
                     capture_output=True, timeout=120).returncode:

@@ -15,7 +15,7 @@ lvp=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json 2>/dev/null | head -n 1 || true)
 [[ -n $lvp ]] || { echo "lavapipe ICD missing: install mesa-vulkan-drivers" >&2; exit 1; }
 export M19_GPU_PROBE="$(cd "$out" && pwd)/gpu-probe-test" M19_LVP_ICD="$lvp"
 # The Present probe needs libxcb-present's headers; Xvfb, with its fake 60 Hz vblank, runs it.
-gcc -std=c11 -O2 -Wall -Wextra -Werror "$src/present-probe.c" -lxcb-present -lxcb -o "$out/present-probe-test"
+gcc -std=c11 -O2 -Wall -Wextra -Werror "$src/present-probe.c" -lxcb-dri3 -lxcb-present -lxcb -ldl -o "$out/present-probe-test"
 command -v Xvfb >/dev/null || { echo "Xvfb missing: install xvfb" >&2; exit 1; }
 # Its vblank and crtc modes run on a fake DRM card, preloaded. Test-only, like the fake libdrm.
 gcc -std=c11 -O2 -Wall -Wextra -Werror -shared -fPIC "$src/fake-card.c" -ldl -o "$out/libfakecard.so"
@@ -55,7 +55,7 @@ done
 cmp "$out/gpu-probe-a" "$out/gpu-probe-b"
 sha256sum "$out/gpu-probe-a" | tee -a "$out/run2-binaries.txt"
 for copy in a b; do
-  gcc -std=c11 -Os -Wall -Wextra -Werror -Wl,--build-id=none "$src/present-probe.c" -lxcb-present -lxcb -o "$out/present-probe-$copy"
+  gcc -std=c11 -Os -Wall -Wextra -Werror -Wl,--build-id=none "$src/present-probe.c" -lxcb-dri3 -lxcb-present -lxcb -ldl -o "$out/present-probe-$copy"
 done
 cmp "$out/present-probe-a" "$out/present-probe-b"
 sha256sum "$out/present-probe-a" | tee -a "$out/run2-binaries.txt"

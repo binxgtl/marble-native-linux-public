@@ -607,6 +607,8 @@ struct gpu {
     int node, probe, vk, cube, gl, gears, egl, glamor_init, glamor_on, xorg_unit, glamor_ok, flip_ok, copy_ok, compositor_ok, vblank_ok, scanout_ok,
         on_rc, off_rc, show_ran, show_visible, shows_ok;
     long show_nonblack[M19_SHOWS_MAX], show_mean[M19_SHOWS_MAX];
+    long xread_cpu, xread_pixmap, xread_window, gpu_cpu, chain_cpu, chain_pixmap, chain_window;
+    char dmabuf_renderer[64];
     long cube_ms, glmark2, copy_done, copies, flip_done, flips, late, composited_done, composited_copies, composited_flips;
     double cube_fps, gears_fps, xorg_cpu, copy_msc, copy_us, flip_msc, flip_us, gears_full_fps, wait_seq, wait_us, event_seq, event_us,
         composited_msc, composited_cube_fps;
@@ -839,6 +841,23 @@ static void observe(const struct m19_report *c, unsigned which, struct view *v)
         v->nonblack = v->mean = -1;
 }
 
+/* The number after name= on the first line holding key, or -1. */
+static long field(const char *text, const char *key, const char *name)
+{
+    const char *line = strstr(text, key);
+    if (!line)
+        return -1;
+    size_t n = strcspn(line, "\n");
+    char pattern[32];
+    snprintf(pattern, sizeof(pattern), " %s=", name);
+    const char *at = strstr(line, pattern);
+    if (!at || at >= line + n)
+        return -1;
+    char *end;
+    long value = strtol(at + strlen(pattern), &end, 10);
+    return end == at + strlen(pattern) ? -1 : value;
+}
+
 /* The kernel's vblank line from the probe; every value is -1 when it is missing. */
 static int vblank_line(const char *text, struct gpu *g)
 {
@@ -998,6 +1017,29 @@ static void gpu_phase(const struct m19_report *c, int tty, struct gpu *g)
             }
         }
         g->shows_ok = g->show_ran == (int)c->show_count;
+        if (c->dmabuf_heap) {
+            /* R4j. Which side loses a program's frame: the X server reading a dma-buf the CPU filled, the GPU
+             * writing one the CPU reads, and the GPU's handed to the X server. Recorded, not judged. */
+            char *xread[] = {(char *)c->present_probe, "xread", (char *)c->dmabuf_heap, NULL};
+            (void)section_env(xread, NULL, SECTION_CAP / 16, c->gpu_ms, &start, &length);
+            text = section_text(start, length);
+            g->xread_cpu = field(text, "M19 PRESENT xread cpu=", "cpu");
+            g->xread_pixmap = field(text, "M19 PRESENT xread pixmap=", "pixmap");
+            g->xread_window = field(text, "M19 PRESENT xread pixmap=", "window");
+            char *gpuwrite[] = {(char *)c->present_probe, "gpuwrite", NULL};
+            (void)section_env(gpuwrite, c->dmabuf_env, SECTION_CAP / 16, c->gpu_ms, &start, &length);
+            text = section_text(start, length);
+            g->gpu_cpu = field(text, "M19 PRESENT gpuwrite renderer=", "cpu");
+            const char *at = strstr(text, "M19 PRESENT gpuwrite renderer=");
+            if (!at || sscanf(at, "M19 PRESENT gpuwrite renderer=%63s", g->dmabuf_renderer) != 1)
+                snprintf(g->dmabuf_renderer, sizeof(g->dmabuf_renderer), "none");
+            char *chain[] = {(char *)c->present_probe, "chain", NULL};
+            (void)section_env(chain, c->dmabuf_env, SECTION_CAP / 16, c->gpu_ms, &start, &length);
+            text = section_text(start, length);
+            g->chain_cpu = field(text, "M19 PRESENT chain renderer=", "cpu");
+            g->chain_pixmap = field(text, "M19 PRESENT chain pixmap=", "pixmap");
+            g->chain_window = field(text, "M19 PRESENT chain pixmap=", "window");
+        }
     }
 
     /* A broader GL load, and GL through the copy profile for comparison. Recorded, not judged. */
@@ -1324,6 +1366,10 @@ int m19_report_main(const struct m19_report *c)
                 addf("M19 R4 view %s owner=%ld gl=%d fb=%ld fbs=%ld changes=%ld pitch=%ld nonblack=%ld mean=%ld\n", view_names[i], g.view[i].owner,
                      g.view[i].gl, g.view[i].fb, g.view[i].fbs, g.view[i].changes, g.view[i].pitch, g.view[i].nonblack, g.view[i].mean);
         }
+        if (c->dmabuf_heap)
+            addf("M19 R4 dmabuf xread_cpu=%ld xread_pixmap=%ld xread_window=%ld gpu_cpu=%ld chain_cpu=%ld chain_pixmap=%ld chain_window=%ld "
+                 "dmabuf_renderer=%s\n", g.xread_cpu, g.xread_pixmap, g.xread_window, g.gpu_cpu, g.chain_cpu, g.chain_pixmap, g.chain_window,
+                 g.dmabuf_renderer);
         if (c->show_count) {
             addf("M19 R4 shows ran=%d of=%u visible=%d shows_ok=%d\n", g.show_ran, c->show_count, g.show_visible, g.shows_ok);
             for (unsigned i = 0; i < c->show_count && i < M19_SHOWS_MAX; i++)

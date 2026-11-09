@@ -11,10 +11,17 @@
  *   crtc N C     (R4e) the framebuffer the first active CRTC of card C scans out, sampled N times 10 ms apart:
  *                it changes on every page flip; (R4f) its pitch, which a pixmap must match to be flipped to
  *   root         (R4e) what the X server holds for the whole screen: the share of pixels that are not black
+ *   xread H      (R4j) a 256x256 dma-buf from heap H, filled by the CPU with a known colour, handed to the X
+ *                server through DRI3 as a program's buffer is; read back from the pixmap and from a window
+ *   gpuwrite     (R4j) the same colour cleared by the GPU into a GL texture exported as a dma-buf, through
+ *                EGL without X (Mesa's surfaceless platform), and read back by the CPU
+ *   chain        (R4j) gpuwrite's dma-buf handed to the X server as xread's is, and read back
  *
- * Both windows are override-redirect, so no window manager moves or decorates them. Built against libxcb
- * and libxcb-present; it needs nothing else, libdrm included. card is only read: no mode is set. */
+ * Every reading is the share of pixels holding the colour, in thousandths. Both windows are override-redirect,
+ * so no window manager moves or decorates them. Built against libxcb, libxcb-present and libxcb-dri3; EGL and
+ * GLES are opened at run time; it needs nothing else, libdrm included. card is only read: no mode is set. */
 #define _POSIX_C_SOURCE 200809L
+#include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -23,8 +30,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/mman.h>
 #include <time.h>
 #include <unistd.h>
+#include <xcb/dri3.h>
 #include <xcb/present.h>
 #include <xcb/xcb.h>
 
@@ -314,9 +323,267 @@ static int root(void)
     return 0;
 }
 
+/* The dma-heap and dma-buf ABI from include/uapi/linux/dma-heap.h and dma-buf.h. */
+struct m19_heap_alloc { uint64_t len; uint32_t fd, fd_flags; uint64_t heap_flags; };
+struct m19_dmabuf_sync { uint64_t flags; };
+#define M19_HEAP_ALLOC _IOWR('H', 0x0, struct m19_heap_alloc)
+#define M19_DMABUF_SYNC _IOW('b', 0, struct m19_dmabuf_sync)
+#define M19_SYNC_READ 1u
+#define M19_SYNC_WRITE 2u
+#define M19_SYNC_END 4u
+#define M19_SIDE 256u
+
+/* The colour every dma-buf test writes, as its first three bytes in memory: R, G and B of a GL_RGBA texture,
+ * and B, G and R of an X pixel of depth 24. Equal bytes either way, so one comparison serves both. */
+static const uint8_t colour[3] = {0x40, 0x80, 0xbf};
+
+static void sync_dmabuf(int fd, uint64_t flags)
+{
+    struct m19_dmabuf_sync s = {flags};
+    (void)ioctl(fd, M19_DMABUF_SYNC, &s);
+}
+
+/* The share of side x side pixels, stride bytes a row, whose first three bytes are the colour, give or take 2. */
+static long holding(const uint8_t *p, size_t stride)
+{
+    unsigned long long hits = 0;
+    for (unsigned y = 0; y < M19_SIDE; y++)
+        for (unsigned x = 0; x < M19_SIDE; x++) {
+            const uint8_t *px = p + y * stride + x * 4;
+            int ok = 1;
+            for (int i = 0; i < 3; i++)
+                ok &= px[i] + 2 >= colour[i] && px[i] <= colour[i] + 2;
+            hits += (unsigned)ok;
+        }
+    return (long)(hits * 1000 / (M19_SIDE * M19_SIDE));
+}
+
+static long read_back(xcb_connection_t *c, xcb_drawable_t drawable)
+{
+    xcb_get_image_reply_t *image =
+        xcb_get_image_reply(c, xcb_get_image(c, XCB_IMAGE_FORMAT_Z_PIXMAP, drawable, 0, 0, M19_SIDE, M19_SIDE, ~0u), NULL);
+    long held = image && xcb_get_image_data_length(image) == (int)(M19_SIDE * M19_SIDE * 4) ? holding(xcb_get_image_data(image), M19_SIDE * 4) : -1;
+    free(image);
+    return held;
+}
+
+/* fd, a side x side dma-buf of stride bytes a row, goes to the X server through DRI3 as a program's buffer does
+ * (xcb closes it once sent). The pixmap is read back, then copied into a window, and the window read back. */
+static int x_show(const char *mode, int fd, unsigned stride)
+{
+    xcb_connection_t *c = xcb_connect(NULL, NULL);
+    if (xcb_connection_has_error(c)) {
+        printf("M19 PRESENT %s FAIL connect\n", mode);
+        close(fd);
+        return 1;
+    }
+    const xcb_query_extension_reply_t *extension = xcb_get_extension_data(c, &xcb_dri3_id);
+    if (!extension || !extension->present) {
+        printf("M19 PRESENT %s FAIL no dri3\n", mode);
+        close(fd);
+        xcb_disconnect(c);
+        return 1;
+    }
+    xcb_screen_t *screen = xcb_setup_roots_iterator(xcb_get_setup(c)).data;
+    xcb_pixmap_t pixmap = xcb_generate_id(c);
+    xcb_generic_error_t *error = xcb_request_check(
+        c, xcb_dri3_pixmap_from_buffer_checked(c, pixmap, screen->root, stride * M19_SIDE, M19_SIDE, M19_SIDE, (uint16_t)stride, 24, 32, fd));
+    if (error) {
+        printf("M19 PRESENT %s FAIL pixmap error=%u\n", mode, error->error_code);
+        free(error);
+        xcb_disconnect(c);
+        return 1;
+    }
+    long from_pixmap = read_back(c, pixmap);
+    xcb_window_t window = xcb_generate_id(c);
+    uint32_t values[] = {screen->black_pixel, 1};
+    xcb_create_window(c, XCB_COPY_FROM_PARENT, window, screen->root, 64, 64, M19_SIDE, M19_SIDE, 0, XCB_WINDOW_CLASS_INPUT_OUTPUT, screen->root_visual,
+                      XCB_CW_BACK_PIXEL | XCB_CW_OVERRIDE_REDIRECT, values);
+    xcb_map_window(c, window);
+    xcb_gcontext_t gc = xcb_generate_id(c);
+    xcb_create_gc(c, gc, window, 0, NULL);
+    xcb_copy_area(c, pixmap, window, gc, 0, 0, 0, 0, M19_SIDE, M19_SIDE);
+    free(xcb_get_input_focus_reply(c, xcb_get_input_focus(c), NULL));
+    long from_window = read_back(c, window);
+    printf("M19 PRESENT %s pixmap=%ld window=%ld\n", mode, from_pixmap, from_window);
+    xcb_disconnect(c);
+    printf("M19 PRESENT %s ok\n", mode);
+    return 0;
+}
+
+static int xread(const char *heap)
+{
+    unsigned stride = M19_SIDE * 4;
+    size_t size = (size_t)stride * M19_SIDE;
+    int h = open(heap, O_RDONLY | O_CLOEXEC);
+    if (h < 0) {
+        printf("M19 PRESENT xread FAIL heap open errno=%d\n", errno);
+        return 1;
+    }
+    struct m19_heap_alloc alloc = {.len = size, .fd_flags = O_RDWR | O_CLOEXEC};
+    int failed = ioctl(h, M19_HEAP_ALLOC, &alloc);
+    close(h);
+    if (failed) {
+        printf("M19 PRESENT xread FAIL heap alloc errno=%d\n", errno);
+        return 1;
+    }
+    int fd = (int)alloc.fd;
+    uint8_t *p = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (p == MAP_FAILED) {
+        printf("M19 PRESENT xread FAIL map errno=%d\n", errno);
+        close(fd);
+        return 1;
+    }
+    sync_dmabuf(fd, M19_SYNC_WRITE);
+    for (size_t i = 0; i < size; i += 4) {
+        memcpy(p + i, colour, 3);
+        p[i + 3] = 0xff;
+    }
+    sync_dmabuf(fd, M19_SYNC_WRITE | M19_SYNC_END);
+    printf("M19 PRESENT xread cpu=%ld\n", holding(p, stride));
+    munmap(p, size);
+    return x_show("xread", fd, stride);
+}
+
+/* EGL and GLES, opened at run time: the tree's libglvnd, which hands every call to Mesa. */
+#define M19_EGL_PLATFORM_SURFACELESS_MESA 0x31DD
+#define M19_EGL_OPENGL_ES_API 0x30A0
+#define M19_EGL_CONTEXT_CLIENT_VERSION 0x3098
+#define M19_EGL_NONE 0x3038
+#define M19_EGL_GL_TEXTURE_2D_KHR 0x30B1
+#define M19_GL_TEXTURE_2D 0x0DE1
+#define M19_GL_RGBA 0x1908
+#define M19_GL_UNSIGNED_BYTE 0x1401
+#define M19_GL_TEXTURE_MIN_FILTER 0x2801
+#define M19_GL_NEAREST 0x2600
+#define M19_GL_FRAMEBUFFER 0x8D40
+#define M19_GL_COLOR_ATTACHMENT0 0x8CE0
+#define M19_GL_FRAMEBUFFER_COMPLETE 0x8CD5
+#define M19_GL_COLOR_BUFFER_BIT 0x4000
+#define M19_GL_RENDERER 0x1F01
+
+static void *symbol(void *library, const char *name)
+{
+    return library ? dlsym(library, name) : NULL;
+}
+
+/* The colour cleared on the GPU into a texture exported as a dma-buf, then read by the CPU. On success *fd is the
+ * dma-buf and *stride its row length. */
+static int gpu_write(const char *mode, int *fd, unsigned *stride)
+{
+    const char *egl_name = getenv("M19_EGL_LIB"), *gles_name = getenv("M19_GLES_LIB");
+    void *egl = dlopen(egl_name ? egl_name : "libEGL.so.1", RTLD_NOW | RTLD_LOCAL);
+    void *gles = dlopen(gles_name ? gles_name : "libGLESv2.so.2", RTLD_NOW | RTLD_LOCAL);
+    void *(*get_proc)(const char *) = (void *(*)(const char *))symbol(egl, "eglGetProcAddress");
+    if (!egl || !gles || !get_proc) {
+        printf("M19 PRESENT %s FAIL egl load\n", mode);
+        return 1;
+    }
+#define M19_EGL(name) (dlsym(egl, name) ? dlsym(egl, name) : get_proc(name))
+    void *(*get_display)(unsigned, void *, const intptr_t *) = (void *(*)(unsigned, void *, const intptr_t *))M19_EGL("eglGetPlatformDisplay");
+    unsigned (*initialize)(void *, int *, int *) = (unsigned (*)(void *, int *, int *))M19_EGL("eglInitialize");
+    unsigned (*bind_api)(unsigned) = (unsigned (*)(unsigned))M19_EGL("eglBindAPI");
+    void *(*create_context)(void *, void *, void *, const int *) = (void *(*)(void *, void *, void *, const int *))M19_EGL("eglCreateContext");
+    unsigned (*make_current)(void *, void *, void *, void *) = (unsigned (*)(void *, void *, void *, void *))M19_EGL("eglMakeCurrent");
+    void *(*create_image)(void *, void *, unsigned, void *, const int *) =
+        (void *(*)(void *, void *, unsigned, void *, const int *))M19_EGL("eglCreateImageKHR");
+    unsigned (*export_query)(void *, void *, int *, int *, uint64_t *) =
+        (unsigned (*)(void *, void *, int *, int *, uint64_t *))M19_EGL("eglExportDMABUFImageQueryMESA");
+    unsigned (*export_image)(void *, void *, int *, int *, int *) = (unsigned (*)(void *, void *, int *, int *, int *))M19_EGL("eglExportDMABUFImageMESA");
+    void (*gen_textures)(int, unsigned *) = (void (*)(int, unsigned *))symbol(gles, "glGenTextures");
+    void (*bind_texture)(unsigned, unsigned) = (void (*)(unsigned, unsigned))symbol(gles, "glBindTexture");
+    void (*tex_image)(unsigned, int, int, int, int, int, unsigned, unsigned, const void *) =
+        (void (*)(unsigned, int, int, int, int, int, unsigned, unsigned, const void *))symbol(gles, "glTexImage2D");
+    void (*tex_parameter)(unsigned, unsigned, int) = (void (*)(unsigned, unsigned, int))symbol(gles, "glTexParameteri");
+    void (*gen_framebuffers)(int, unsigned *) = (void (*)(int, unsigned *))symbol(gles, "glGenFramebuffers");
+    void (*bind_framebuffer)(unsigned, unsigned) = (void (*)(unsigned, unsigned))symbol(gles, "glBindFramebuffer");
+    void (*framebuffer_texture)(unsigned, unsigned, unsigned, unsigned, int) =
+        (void (*)(unsigned, unsigned, unsigned, unsigned, int))symbol(gles, "glFramebufferTexture2D");
+    unsigned (*framebuffer_status)(unsigned) = (unsigned (*)(unsigned))symbol(gles, "glCheckFramebufferStatus");
+    void (*clear_colour)(float, float, float, float) = (void (*)(float, float, float, float))symbol(gles, "glClearColor");
+    void (*clear)(unsigned) = (void (*)(unsigned))symbol(gles, "glClear");
+    void (*finish)(void) = (void (*)(void))symbol(gles, "glFinish");
+    const char *(*get_string)(unsigned) = (const char *(*)(unsigned))symbol(gles, "glGetString");
+    if (!get_display || !initialize || !bind_api || !create_context || !make_current || !create_image || !export_query || !export_image ||
+        !gen_textures || !bind_texture || !tex_image || !tex_parameter || !gen_framebuffers || !bind_framebuffer || !framebuffer_texture ||
+        !framebuffer_status || !clear_colour || !clear || !finish || !get_string) {
+        printf("M19 PRESENT %s FAIL egl symbols\n", mode);
+        return 1;
+    }
+    int major, minor;
+    void *display = get_display(M19_EGL_PLATFORM_SURFACELESS_MESA, NULL, NULL);
+    if (!display || !initialize(display, &major, &minor) || !bind_api(M19_EGL_OPENGL_ES_API)) {
+        printf("M19 PRESENT %s FAIL egl init\n", mode);
+        return 1;
+    }
+    const int attributes[] = {M19_EGL_CONTEXT_CLIENT_VERSION, 2, M19_EGL_NONE};
+    void *context = create_context(display, NULL, NULL, attributes);
+    if (!context || !make_current(display, NULL, NULL, context)) {
+        printf("M19 PRESENT %s FAIL egl context\n", mode);
+        return 1;
+    }
+    unsigned texture = 0, framebuffer = 0;
+    gen_textures(1, &texture);
+    bind_texture(M19_GL_TEXTURE_2D, texture);
+    tex_parameter(M19_GL_TEXTURE_2D, M19_GL_TEXTURE_MIN_FILTER, M19_GL_NEAREST);
+    tex_image(M19_GL_TEXTURE_2D, 0, M19_GL_RGBA, M19_SIDE, M19_SIDE, 0, M19_GL_RGBA, M19_GL_UNSIGNED_BYTE, NULL);
+    /* Exported first, as a program's back buffer is shared before it is drawn into. */
+    void *image = create_image(display, context, M19_EGL_GL_TEXTURE_2D_KHR, (void *)(uintptr_t)texture, NULL);
+    int fourcc = 0, planes = 0, fds[4] = {-1, -1, -1, -1}, strides[4] = {0}, offsets[4] = {0};
+    uint64_t modifier = 0;
+    if (!image || !export_query(display, image, &fourcc, &planes, &modifier) || planes != 1 || !export_image(display, image, fds, strides, offsets) ||
+        fds[0] < 0) {
+        printf("M19 PRESENT %s FAIL export\n", mode);
+        return 1;
+    }
+    gen_framebuffers(1, &framebuffer);
+    bind_framebuffer(M19_GL_FRAMEBUFFER, framebuffer);
+    framebuffer_texture(M19_GL_FRAMEBUFFER, M19_GL_COLOR_ATTACHMENT0, M19_GL_TEXTURE_2D, texture, 0);
+    if (framebuffer_status(M19_GL_FRAMEBUFFER) != M19_GL_FRAMEBUFFER_COMPLETE) {
+        printf("M19 PRESENT %s FAIL framebuffer\n", mode);
+        return 1;
+    }
+    clear_colour(colour[0] / 255.0f, colour[1] / 255.0f, colour[2] / 255.0f, 1.0f);
+    clear(M19_GL_COLOR_BUFFER_BIT);
+    finish();
+    size_t size = (size_t)strides[0] * M19_SIDE + (size_t)offsets[0];
+    uint8_t *p = mmap(NULL, size, PROT_READ, MAP_SHARED, fds[0], 0);
+    long cpu = -1;
+    if (p != MAP_FAILED) {
+        sync_dmabuf(fds[0], M19_SYNC_READ);
+        cpu = holding(p + offsets[0], (size_t)strides[0]);
+        sync_dmabuf(fds[0], M19_SYNC_READ | M19_SYNC_END);
+        munmap(p, size);
+    }
+    char renderer[64];
+    snprintf(renderer, sizeof(renderer), "%s", get_string(M19_GL_RENDERER) ? get_string(M19_GL_RENDERER) : "none");
+    for (char *at = renderer; *at; at++)
+        if (*at == ' ' || *at == '=')
+            *at = '_';
+    printf("M19 PRESENT %s renderer=%s fourcc=%08x modifier=%llx stride=%d cpu=%ld\n", mode, renderer, (unsigned)fourcc,
+           (unsigned long long)modifier, strides[0], cpu);
+    *fd = fds[0];
+    *stride = (unsigned)strides[0];
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     setvbuf(stdout, NULL, _IOLBF, 0);
+    if (argc == 3 && !strcmp(argv[1], "xread"))
+        return xread(argv[2]);
+    if (argc == 2 && (!strcmp(argv[1], "gpuwrite") || !strcmp(argv[1], "chain"))) {
+        int fd = -1;
+        unsigned stride = 0;
+        if (gpu_write(argv[1], &fd, &stride))
+            return 1;
+        if (argv[1][0] == 'g') {
+            close(fd);
+            printf("M19 PRESENT gpuwrite ok\n");
+            return 0;
+        }
+        return x_show("chain", fd, stride);
+    }
     if (argc == 2 && !strcmp(argv[1], "compositor"))
         return compositor();
     if (argc == 2 && !strcmp(argv[1], "root"))
@@ -325,7 +592,7 @@ int main(int argc, char **argv)
     int flip = argc == 3 && !strcmp(argv[1], "flip"), copy = argc == 3 && !strcmp(argv[1], "copy");
     long frames = argc == 3 || card ? strtol(argv[2], NULL, 10) : 0;
     if ((!flip && !copy && !card) || frames < 2 || frames > 10000) {
-        fprintf(stderr, "usage: m19-present-probe copy|flip FRAMES, vblank|crtc COUNT CARD, compositor or root\n");
+        fprintf(stderr, "usage: m19-present-probe copy|flip FRAMES, vblank|crtc COUNT CARD, xread HEAP, compositor, root, gpuwrite or chain\n");
         return 64;
     }
     if (card)

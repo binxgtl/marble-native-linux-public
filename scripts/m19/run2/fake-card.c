@@ -4,7 +4,9 @@
  *
  *   M19_FAKE_LAG=N    every vblank a wait or an event waits for arrives N frames late
  *   M19_FAKE_FLIPS=1  CRTC 31 alternates between framebuffers 76 and 77, as page flips do
- *   M19_FAKE_FAIL=X   one request fails: wait, event, deliver, resources, crtc or fb
+ *   M19_FAKE_FAIL=X   one request fails: wait, event, deliver, resources, crtc, fb or heap
+ *
+ * (R4j) DMA_HEAP_IOCTL_ALLOC on any fd answers with a memfd of the size asked, and DMA_BUF_IOCTL_SYNC succeeds.
  *
  * Test-only: never built into an image. */
 #define _GNU_SOURCE
@@ -17,6 +19,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/mman.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -34,6 +37,10 @@ struct fake_crtc { uint64_t set_connectors; uint32_t count_connectors, crtc_id, 
 #define FAKE_WAIT_VBLANK _IOWR('d', 0x3a, union fake_wait_vblank)
 #define FAKE_GET_RESOURCES _IOWR('d', 0xa0, struct fake_card_res)
 struct fake_fb { uint32_t fb_id, width, height, pitch, bpp, depth, handle; };
+struct fake_heap_alloc { uint64_t len; uint32_t fd, fd_flags; uint64_t heap_flags; };
+struct fake_dmabuf_sync { uint64_t flags; };
+#define FAKE_HEAP_ALLOC _IOWR('H', 0x0, struct fake_heap_alloc)
+#define FAKE_DMABUF_SYNC _IOW('b', 0, struct fake_dmabuf_sync)
 #define FAKE_GET_CRTC _IOWR('d', 0xa1, struct fake_crtc)
 #define FAKE_GET_FB _IOWR('d', 0xad, struct fake_fb)
 
@@ -156,6 +163,20 @@ int ioctl(int fd, unsigned long request, ...)
             memcpy(c->name, "1080x2400x120 vid", 17);
         return 0;
     }
+    if (request == FAKE_HEAP_ALLOC) {
+        struct fake_heap_alloc *a = arg;
+        int fd = failing("heap") ? -1 : memfd_create("m19-fake-heap", MFD_CLOEXEC);
+        if (fd < 0 || ftruncate(fd, (off_t)a->len)) {
+            if (fd >= 0)
+                close(fd);
+            errno = EINVAL;
+            return -1;
+        }
+        a->fd = (uint32_t)fd;
+        return 0;
+    }
+    if (request == FAKE_DMABUF_SYNC)
+        return 0;
     if (request == FAKE_GET_FB) {
         /* Framebuffers 76 and 77: the panel's size, rows padded to 64 bytes. */
         struct fake_fb *f = arg;
