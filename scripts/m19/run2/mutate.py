@@ -146,7 +146,12 @@ MUTANTS = (
     ('pid4.c', '.vk_env = dri3_env, .gl_env = dri3_env,', '.vk_env = dri3_env, .gl_env = copy_env,', ('Static',)),
     ('pid4.c', '"FD_FORCE_KGSL=1", "FD_KGSL_ENABLE_DMABUF=1", M19_VK_ICD, NULL};', '"FD_FORCE_KGSL=1", M19_VK_ICD, NULL};', ('Static',)),
     ('r4plan.py', "GLAMOR_ENV = ('MESA_LOADER_DRIVER_OVERRIDE=kgsl', 'FD_FORCE_KGSL=1', 'FD_KGSL_ENABLE_DMABUF=1')", "GLAMOR_ENV = ('MESA_LOADER_DRIVER_OVERRIDE=kgsl', 'FD_FORCE_KGSL=1')", ('Static', 'Plan4')),
-    ('r4plan.py', "f'Environment=LD_PRELOAD={r3plan.SHIM}\\nEnvironment=M19_SHIM_GBM=1 ' + ' '.join(GLAMOR_ENV) + '\\n')", "f'Environment=LD_PRELOAD={r3plan.SHIM}\\nEnvironment=' + ' '.join(GLAMOR_ENV) + '\\n')", ('Plan4',)),
+    ('r4plan.py', "f'Environment=LD_PRELOAD={r3plan.SHIM}\\nEnvironment=M19_SHIM_GBM=1 M19_SHIM_NODIRTY=1 ' + ' '.join(GLAMOR_ENV) + '\\n')", "f'Environment=LD_PRELOAD={r3plan.SHIM}\\nEnvironment=M19_SHIM_NODIRTY=1 ' + ' '.join(GLAMOR_ENV) + '\\n')", ('Plan4',)),
+    # R4g: kernel dirty updates off for glamor's X server only.
+    ('r4plan.py', "M19_SHIM_GBM=1 M19_SHIM_NODIRTY=1 '", "M19_SHIM_GBM=1 '", ('Plan4',)),
+    ('xorg-shim.c', '        return -ENOSYS;\n    }\n    if (!real)\n        real = (dirty_fb_fn)', '    }\n    if (!real)\n        real = (dirty_fb_fn)', ('Shim',)),
+    ('xorg-shim.c', '    dirty_off = dirty && !strcmp(dirty, "1");', '    dirty_off = 1;', ('Shim',)),
+    ('xorg-shim.c', '        told = 1;\n', '', ('Shim',)),
     ('r4plan.py', '\'    Option "AccelMethod" "glamor"\\n    Option "DRI" "3"\\n\'', '\'    Option "AccelMethod" "none"\\n\'', ('Plan4',)),
     ('r4plan.py', "'Restart=no\\n', 'Restart=on-failure\\nRestartSec=2\\n')", "'Restart=no\\n', 'Restart=no\\n')", ('Plan4',)),
     ('r4plan.py', "/usr/bin/grep -q 'glamor initialized' /var/log/Xorg.0.log; then", 'true; then', ('SessionScript',)),

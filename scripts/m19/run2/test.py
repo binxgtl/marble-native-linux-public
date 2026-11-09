@@ -834,11 +834,13 @@ class Plan4(unittest.TestCase):
         self.assertIn('-config /run/m19/xorg-glamor.conf -logfile /var/log/Xorg.0.log ', r4plan.XORG)
         self.assertIn('OnFailure=marble-xorg-fallback.service\n', r4plan.XORG)
         self.assertIn('Environment=LD_PRELOAD=/run/m19/m19-xorg-shim.so\n', r4plan.XORG)
-        self.assertIn('Environment=M19_SHIM_GBM=1 MESA_LOADER_DRIVER_OVERRIDE=kgsl FD_FORCE_KGSL=1 FD_KGSL_ENABLE_DMABUF=1\n', r4plan.XORG)
+        self.assertIn('Environment=M19_SHIM_GBM=1 M19_SHIM_NODIRTY=1 MESA_LOADER_DRIVER_OVERRIDE=kgsl FD_FORCE_KGSL=1 FD_KGSL_ENABLE_DMABUF=1\n',
+                      r4plan.XORG)
         # The fallback is R3c's proven CPU Xorg at 120 Hz, with the shim but without the bridge.
         self.assertIn('-config /run/m19/xorg.conf -logfile /var/log/Xorg.cpu.log ', r4plan.XORG_FALLBACK)
         self.assertNotIn('OnFailure', r4plan.XORG_FALLBACK)
         self.assertNotIn('M19_SHIM_GBM', r4plan.XORG_FALLBACK)
+        self.assertNotIn('M19_SHIM_NODIRTY', r4plan.XORG_FALLBACK)
         self.assertNotIn('MESA', r4plan.XORG_FALLBACK)
         self.assertEqual(r4plan.FILES['systemd/system/marble-xorg.service'], r4plan.XORG)
         self.assertEqual(r4plan.FILES['systemd/system/marble-xorg-fallback.service'], r4plan.XORG_FALLBACK)
@@ -2086,7 +2088,8 @@ class Shim(unittest.TestCase):
             self.skipTest('shim not built in this run')
 
     def run_driver(self, mode, preload=True, **env):
-        environment = {key: value for key, value in os.environ.items() if not key.startswith(('ASAN', 'UBSAN', 'LD_PRELOAD', 'M19_SHIM_GBM'))}
+        environment = {key: value for key, value in os.environ.items()
+                       if not key.startswith(('ASAN', 'UBSAN', 'LD_PRELOAD', 'M19_SHIM_GBM', 'M19_SHIM_NODIRTY'))}
         if preload:
             environment['LD_PRELOAD'] = self.lib
         environment.update(env)
@@ -2121,6 +2124,19 @@ class Shim(unittest.TestCase):
         self.assertEqual(done.stdout.splitlines()[:5], ['a 4112', 'a again 4112', 'a plane1 4113', 'b 4128', 'c 4144'])
         self.assertIn('M19 SHIM gbm plane 0 keeps handle 4112', done.stderr)
         self.assertRegex(done.stdout, r'imports 0 closes 0 destroyed 3 ')
+
+    def test_kernel_dirty_updates_off_when_asked(self):
+        done = self.run_driver('dirty', M19_SHIM_NODIRTY='1')
+        self.assertEqual((done.returncode, done.stdout), (0, 'dirty -38 -38 calls 0\n'), done.stderr)
+        self.assertEqual(done.stderr.count('M19 SHIM dirtyfb off: fb 175 answered -ENOSYS\n'), 1)
+        self.assertIn('kernel dirty updates off\n', done.stderr)
+
+    def test_kernel_dirty_updates_on_unless_asked(self):
+        for preload, env in ((True, {}), (True, {'M19_SHIM_NODIRTY': '0'}), (False, {'M19_SHIM_NODIRTY': '1'})):
+            with self.subTest(preload=preload, env=env):
+                done = self.run_driver('dirty', preload=preload, **env)
+                self.assertEqual((done.returncode, done.stdout), (0, 'dirty 0 0 calls 2\n'), done.stderr)
+                self.assertNotIn('dirtyfb off', done.stderr)
 
     def test_only_range_enum_and_blob_properties_remain(self):
         done = self.run_driver('filter')

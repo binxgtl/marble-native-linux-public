@@ -53,8 +53,10 @@ def xorg_glamor_conf():
 
 GLAMOR_CONF = '/run/m19/xorg-glamor.conf'
 # glamor's Xorg first; on failure, R3c's CPU Xorg at 120 Hz. The 60 Hz configuration stays staged, unused.
+# (R4g) glamor's Xorg runs without kernel dirty updates: the panel is scanned out continuously.
 XORG = _swap(r3plan.xorg_unit('M19 R4 Xorg on DSI-1 at 120 Hz drawing on the GPU (glamor)', GLAMOR_CONF, '/var/log/Xorg.0.log', True),
-             f'Environment=LD_PRELOAD={r3plan.SHIM}\n', f'Environment=LD_PRELOAD={r3plan.SHIM}\nEnvironment=M19_SHIM_GBM=1 ' + ' '.join(GLAMOR_ENV) + '\n')
+             f'Environment=LD_PRELOAD={r3plan.SHIM}\n',
+             f'Environment=LD_PRELOAD={r3plan.SHIM}\nEnvironment=M19_SHIM_GBM=1 M19_SHIM_NODIRTY=1 ' + ' '.join(GLAMOR_ENV) + '\n')
 XORG_FALLBACK = r3plan.xorg_unit('M19 R4 Xorg on DSI-1 at 120 Hz on the CPU, after glamor failed', '/run/m19/xorg.conf', '/var/log/Xorg.cpu.log',
                                  False)
 

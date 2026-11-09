@@ -3,7 +3,8 @@
  *   null-call  install its own SIGSEGV handler, as Xorg does, then call a NULL function pointer
  *   null-read  the same, then read address 0
  *   gbm        ask for buffer handles as modesetting does; this program's own ioctl stands in for card0's
- *              PRIME import and GEM close, so it must be linked with -rdynamic */
+ *              PRIME import and GEM close, so it must be linked with -rdynamic
+ *   dirty      call drmModeDirtyFB twice, as modesetting's setup and block handler do */
 #define _POSIX_C_SOURCE 200809L
 #include <errno.h>
 #include <fcntl.h>
@@ -33,6 +34,8 @@ struct fake_connector {
 struct fake_connector *drmModeGetConnector(int fd, uint32_t id);
 struct fake_connector *drmModeGetConnectorCurrent(int fd, uint32_t id);
 void drmModeFreeConnector(struct fake_connector *c);
+int drmModeDirtyFB(int fd, uint32_t buffer_id, void *clips, uint32_t num_clips);
+extern int fake_dirty_calls;
 
 union fake_gbm_handle {
     void *ptr;
@@ -156,6 +159,11 @@ int main(int argc, char **argv)
         return 64;
     if (!strcmp(argv[1], "gbm"))
         return gbm_mode();
+    if (!strcmp(argv[1], "dirty")) {
+        int setup = drmModeDirtyFB(3, 175, NULL, 0), frame = drmModeDirtyFB(3, 175, NULL, 0);
+        printf("dirty %d %d calls %d\n", setup, frame, fake_dirty_calls);
+        return 0;
+    }
     if (!strcmp(argv[1], "filter")) {
         print("get", drmModeGetConnector(3, 42));
         print("current", drmModeGetConnectorCurrent(3, 43));

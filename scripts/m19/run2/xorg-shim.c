@@ -13,6 +13,12 @@
  *    know, so modesetting's AddFB would fail. The bridge hands modesetting card0's own handle instead:
  *    the buffer's dma-buf imported into the GBM device's DRM fd through PRIME, as M9 scanned out a
  *    dma-heap buffer. Imports are cached per buffer and plane, and closed when the buffer is destroyed.
+ * 4. Kernel dirty updates off (R4g), only with M19_SHIM_NODIRTY=1. modesetting tries drmModeDirtyFB once
+ *    at screen setup and, if the kernel takes it, sends it the damage of every frame from its block
+ *    handler. SDE takes it, and R4b to R4f measured every Present copy two vblanks long while the kernel's
+ *    own vblanks are one: the X server waits there. The panel is a video-mode panel, scanned out
+ *    continuously, so no update needs announcing. The wrapper answers -ENOSYS, which modesetting reads as
+ *    not needed, and it never asks again.
  *
  * It changes no file and no kernel state. libdrm's types are restated from xf86drmMode.h, a
  * stable ABI, so no libdrm headers are needed to build it. */
@@ -66,6 +72,7 @@ typedef int (*sigaction_fn)(int, const struct sigaction *, struct sigaction *);
 
 static sigaction_fn real_sigaction;
 static volatile sig_atomic_t guarded, faulting;
+static int dirty_off;
 
 /* Async-signal-safe: vsnprintf on a stack buffer and one write. */
 __attribute__((format(printf, 1, 2)))
@@ -268,6 +275,23 @@ void gbm_bo_destroy(struct gbm_bo *bo)
         real(bo);
 }
 
+/* libdrm returns 0 or a negative errno. With dirty updates off, the kernel is never asked. */
+typedef int (*dirty_fb_fn)(int, uint32_t, void *, uint32_t);
+int drmModeDirtyFB(int fd, uint32_t buffer_id, void *clips, uint32_t num_clips)
+{
+    static dirty_fb_fn real;
+    static int told;
+    if (dirty_off) {
+        if (!told)
+            say("M19 SHIM dirtyfb off: fb %u answered -ENOSYS\n", buffer_id);
+        told = 1;
+        return -ENOSYS;
+    }
+    if (!real)
+        real = (dirty_fb_fn)dlsym(RTLD_NEXT, "drmModeDirtyFB");
+    return real ? real(fd, buffer_id, clips, num_clips) : -ENOSYS;
+}
+
 static void maps(void)
 {
     char buffer[4096], line[512];
@@ -377,6 +401,8 @@ __attribute__((constructor)) static void install(void)
     guarded = 1;
     const char *gbm = getenv("M19_SHIM_GBM");
     bridge_on = gbm && !strcmp(gbm, "1");
-    say("M19 SHIM loaded: connector properties other than RANGE, ENUM and BLOB are dropped; faults are logged; gbm bridge %s\n",
-        bridge_on ? "on" : "off");
+    const char *dirty = getenv("M19_SHIM_NODIRTY");
+    dirty_off = dirty && !strcmp(dirty, "1");
+    say("M19 SHIM loaded: connector properties other than RANGE, ENUM and BLOB are dropped; faults are logged; gbm bridge %s; "
+        "kernel dirty updates %s\n", bridge_on ? "on" : "off", dirty_off ? "off" : "on");
 }

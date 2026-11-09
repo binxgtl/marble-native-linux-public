@@ -71,6 +71,18 @@ struct fake_connector *drmModeGetConnectorCurrent(int fd, uint32_t id)
     return make(id);
 }
 
+/* R4g: drmModeDirtyFB as a kernel that takes it, counting the calls. */
+int fake_dirty_calls;
+int drmModeDirtyFB(int fd, uint32_t buffer_id, void *clips, uint32_t num_clips)
+{
+    (void)fd;
+    (void)buffer_id;
+    (void)clips;
+    (void)num_clips;
+    fake_dirty_calls++;
+    return 0;
+}
+
 struct fake_property *drmModeGetProperty(int fd, uint32_t id)
 {
     (void)fd;
