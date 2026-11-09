@@ -1091,7 +1091,8 @@ class PresentProbe(unittest.TestCase):
                           ('vblank', '10001', '/dev/null'), ('xread',), ('xread', 'a', 'b'), ('gpuwrite', 'x'), ('chain', 'x'), ('xlate',),
                           ('xlate', 'a', 'b'), ('chainlate', 'x'), ('chainlater',), ('xagain',), ('xwait', 'a', 'b'), ('kgslsync', 'a'),
                           ('kgslsync', 'a', 'b', 'c'), ('xsync', 'a', 'b'), ('xsync', 'a', 'b', 'obj-wipe'), ('xsync', 'a', 'b', 'obj-clean', 'x'),
-                          ('chainsync', 'a'), ('chainsync', 'a', 'flush'), ('chainagain', 'x')):
+                          ('chainsync', 'a'), ('chainsync', 'a', 'flush'), ('chainagain', 'x'), ('xreimport',), ('glimport',),
+                          ('glimport', 'a', 'b'), ('gbmimport', 'a'), ('gbmimport', 'a', 'b', 'c')):
             self.assertEqual(self.run_probe(*arguments).returncode, 64, arguments)
         done = self.run_probe('copy', '10', display=':119')
         self.assertEqual(done.returncode, 1)
@@ -1126,7 +1127,7 @@ class PresentProbe(unittest.TestCase):
             # Xvfb has no DRI3: no import, so nothing is written.
             self.assertEqual((done.returncode, done.stdout), (1, 'M19 PRESENT xlate FAIL no dri3\n'))
             # R4l: nor by the modes built on xlate, KGSL's operation included.
-            for mode, extra in (('xsync', (str(heap), 'obj-clean')), ('xagain', ()), ('xwait', ())):
+            for mode, extra in (('xsync', (str(heap), 'obj-clean')), ('xagain', ()), ('xwait', ()), ('xreimport', ())):
                 done = subprocess.run([self.probe, mode, str(heap), *extra], capture_output=True, text=True, env=environment, timeout=60)
                 self.assertEqual((done.returncode, done.stdout, done.stderr), (1, f'M19 PRESENT {mode} FAIL no dri3\n', ''), mode)
 
@@ -1179,14 +1180,16 @@ class CardProbe(unittest.TestCase):
         self.card = Path(directory.name) / 'card0'
         self.card.write_text('')
 
-    def run_probe(self, *arguments, egl_lib=None, gles_lib=None, **fake):
+    def run_probe(self, *arguments, egl_lib=None, gles_lib=None, gbm_lib=None, **fake):
         environment = {key: value for key, value in os.environ.items()
-                       if not key.startswith(('ASAN', 'UBSAN', 'M19_FAKE_', 'DISPLAY', 'M19_EGL', 'M19_GLES'))}
+                       if not key.startswith(('ASAN', 'UBSAN', 'M19_FAKE_', 'DISPLAY', 'M19_EGL', 'M19_GLES', 'M19_GBM'))}
         environment.update(LD_PRELOAD=self.fake, DISPLAY=':119', **{f'M19_FAKE_{key.upper()}': value for key, value in fake.items()})
         if egl_lib:
             environment['M19_EGL_LIB'] = egl_lib
         if gles_lib:
             environment['M19_GLES_LIB'] = gles_lib
+        if gbm_lib:
+            environment['M19_GBM_LIB'] = gbm_lib
         return subprocess.run([self.probe, *arguments], capture_output=True, text=True, env=environment, timeout=60)
 
     def vblank(self, out):
@@ -1252,7 +1255,7 @@ class CardProbe(unittest.TestCase):
             done = self.run_probe('xlate', path, **env)
             self.assertEqual((done.returncode, done.stdout), (1, want), env)
         # R4l: the modes built on xlate fail as it does.
-        for mode, extra in (('xsync', (str(self.card), 'cache-flush')), ('xagain', ()), ('xwait', ())):
+        for mode, extra in (('xsync', (str(self.card), 'cache-flush')), ('xagain', ()), ('xwait', ()), ('xreimport', ())):
             done = self.run_probe(mode, str(self.card) + '-missing', *extra)
             self.assertEqual((done.returncode, done.stdout), (1, f'M19 PRESENT {mode} FAIL heap open errno=2\n'), mode)
             done = self.run_probe(mode, str(self.card), *extra)
@@ -1288,6 +1291,14 @@ class CardProbe(unittest.TestCase):
         for mode in ('gpuwrite', 'chain', 'chainlate'):
             done = self.run_probe(mode, egl_lib='/nonexistent/libEGL.so.1')
             self.assertEqual((done.returncode, done.stdout), (1, f'M19 PRESENT {mode} FAIL egl load\n'), mode)
+        # R4m: the imports without X take the heap first, then GBM on the card, then EGL; and print nothing else.
+        for arguments, want in ((('glimport', str(self.card) + '-missing'), 'FAIL heap open errno=2'),
+                                (('glimport', str(self.card)), 'FAIL egl load'),
+                                (('gbmimport', str(self.card) + '-missing', str(self.card)), 'FAIL heap open errno=2'),
+                                (('gbmimport', str(self.card), str(self.card) + '-missing'), 'FAIL card open errno=2'),
+                                (('gbmimport', str(self.card), str(self.card)), 'FAIL gbm')):
+            done = self.run_probe(*arguments, egl_lib='/nonexistent/libEGL.so.1', gbm_lib='/nonexistent/libgbm.so.1')
+            self.assertEqual((done.returncode, done.stdout), (1, f'M19 PRESENT {arguments[0]} {want}\n'), arguments)
         # R4l: and the late GPU modes, before any KGSL operation.
         for arguments in (('chainsync', str(self.card), 'obj-flush'), ('chainagain',)):
             done = self.run_probe(*arguments, egl_lib='/nonexistent/libEGL.so.1')
@@ -1606,9 +1617,10 @@ class Desktop(DesktopFixture):
 
 
 GPU_TOOLS = (('gpu-probe', '''#!/bin/sh
-[ "$1" = vulkan ] || exit 64
+case "$*" in vulkan) ;; "dmabuf ${2:-}") [ "${2##*/}" = heap ] || exit 64;; *) exit 64;; esac
 d=$(dirname "$0")
 if [ "$VK_DRIVER_FILES" != /usr/share/vulkan/icd.d/freedreno_icd.aarch64.json ]; then echo "M19 GPU vulkan FAIL no device result=-9"; exit 1; fi
+if [ "$1" = dmabuf ]; then echo "M19 GPU dmabuf cpu=1000 late=0 again=1000 first=0"; echo "M19 GPU dmabuf ok"; exit 0; fi
 cat "$d/probe-out"; exit "$(cat "$d/probe-rc")"
 '''), ('vulkaninfo', '''#!/bin/sh
 d=$(dirname "$0")
@@ -1648,7 +1660,11 @@ case "$1" in
  vblank) [ "$#" = 3 ] && [ "$2" = 120 ] && [ "${3##*/}" = card ] || exit 64; cat "$d/vblank-out"; exit "$(cat "$d/vblank-rc")";;
  crtc) [ "$#" = 3 ] && [ "$2" = 50 ] && [ "${3##*/}" = card ] || exit 64; cat "$d/crtc-$state-out"; exit "$(cat "$d/crtc-rc")";;
  xread|xlate) [ "$#" = 2 ] && [ "${2##*/}" = heap ] || exit 64; cat "$d/$1-out";;
- xagain|xwait) [ "$#" = 2 ] && [ "${2##*/}" = heap ] || exit 64; echo "M19 PRESENT $1 read";;
+ xagain|xwait|xreimport) [ "$#" = 2 ] && [ "${2##*/}" = heap ] || exit 64; echo "M19 PRESENT $1 read";;
+ glimport) [ "$#" = 2 ] && [ "${2##*/}" = heap ] || exit 64
+  [ "${MESA_LOADER_DRIVER_OVERRIDE:-}" = kgsl ] || { echo "M19 PRESENT $1 FAIL egl init"; exit 1; }; echo "M19 PRESENT glimport read";;
+ gbmimport) [ "$#" = 3 ] && [ "${2##*/}" = heap ] && [ "${3##*/}" = card ] || exit 64
+  [ "${MESA_LOADER_DRIVER_OVERRIDE:-}" = kgsl ] || { echo "M19 PRESENT $1 FAIL egl init"; exit 1; }; echo "M19 PRESENT gbmimport read";;
  kgslsync) [ "$#" = 3 ] && [ "${2##*/}" = heap ] && [ "${3##*/}" = kgsl-node ] || exit 64; echo "M19 PRESENT kgslsync ok";;
  xsync) [ "$#" = 4 ] && [ "${2##*/}" = heap ] && [ "${3##*/}" = kgsl-node ] || exit 64; echo "M19 PRESENT xsync $4";;
  chainsync) [ "$#" = 3 ] && [ "${2##*/}" = kgsl-node ] || exit 64
@@ -1817,6 +1833,10 @@ class Gpu(DesktopFixture):
         runs += [f'{probe} {mode} {heap}\nM19 PRESENT {mode} read\n' for mode in ('xagain', 'xwait')]
         runs += [f'{DRI3} {probe} chainsync {kgsl} {op}\nM19 PRESENT chainsync {op}\n' for op in ('obj-flush', 'cache-flush')]
         runs += [f'{DRI3} {probe} chainagain\nM19 PRESENT chainagain read\n']
+        # R4m: four more, after them: Mesa's two with dri3, Turnip's with the Vulkan profile, the X server's bare.
+        gpu, card = f'{self.test}/gpu-probe', f'{self.root}/card'
+        runs += [f'{DRI3} {probe} glimport {heap}\nM19 PRESENT glimport read\n', f'{DRI3} {probe} gbmimport {heap} {card}\nM19 PRESENT gbmimport read\n',
+                 f'{DRI3} {gpu} dmabuf {heap}\nM19 GPU dmabuf cpu=1000 late=0 again=1000 first=0\n', f'{probe} xreimport {heap}\nM19 PRESENT xreimport read\n']
         at = 0
         for run in runs:
             found = log.find('M19 $ ' + run, at)
@@ -2182,10 +2202,28 @@ class GpuProbe(unittest.TestCase):
         if not self.probe or not self.icd:
             self.skipTest('probe or lavapipe not available in this run')
 
-    def run_probe(self, *arguments, icd=None):
-        environment = {key: value for key, value in os.environ.items() if not key.startswith(('ASAN', 'UBSAN', 'VK_'))}
+    def run_probe(self, *arguments, icd=None, **fake):
+        environment = {key: value for key, value in os.environ.items() if not key.startswith(('ASAN', 'UBSAN', 'VK_', 'M19_FAKE_', 'LD_PRELOAD'))}
         environment['VK_DRIVER_FILES'] = icd or self.icd
+        if fake:
+            environment.update(LD_PRELOAD=os.environ['M19_FAKE_CARD'], **{f'M19_FAKE_{key.upper()}': value for key, value in fake.items()})
         return subprocess.run([self.probe, *arguments], capture_output=True, text=True, env=environment, timeout=120)
+
+    def test_dmabuf_reads_a_write_made_after_the_import(self):
+        if not os.environ.get('M19_FAKE_CARD'):
+            self.skipTest('fake card not built in this run')
+        with tempfile.TemporaryDirectory() as directory:
+            heap = Path(directory) / 'heap'
+            heap.write_text('')
+            done = self.run_probe('dmabuf', str(heap), '--allow-cpu', lag='0')
+            # Lavapipe imports by mapping the same memory: every read sees the write.
+            self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+            self.assertTrue(done.stdout.endswith('M19 GPU dmabuf cpu=1000 late=1000 again=1000 first=1000\nM19 GPU dmabuf ok\n'), done.stdout)
+            done = self.run_probe('dmabuf', str(heap) + '-missing', '--allow-cpu', lag='0')
+            self.assertEqual(done.returncode, 1)
+            self.assertTrue(done.stdout.endswith('M19 GPU dmabuf FAIL heap open errno=2\n'), done.stdout)
+            done = self.run_probe('dmabuf', str(heap), '--allow-cpu', fail='heap')
+            self.assertTrue(done.stdout.endswith('M19 GPU dmabuf FAIL heap alloc errno=22\n'), done.stdout)
 
     def test_fills_and_checks_every_word_on_an_allowed_cpu_device(self):
         done = self.run_probe('vulkan', '--allow-cpu')
@@ -2207,7 +2245,8 @@ class GpuProbe(unittest.TestCase):
         self.assertRegex(done.stdout, r'M19 GPU vulkan FAIL (instance|no device)')
 
     def test_usage(self):
-        for arguments in ((), ('vulkan', '--other'), ('gl',), ('vulkan', '--allow-cpu', 'x')):
+        for arguments in ((), ('vulkan', '--other'), ('gl',), ('vulkan', '--allow-cpu', 'x'), ('dmabuf',), ('dmabuf', 'h', '--other'),
+                          ('dmabuf', 'h', '--allow-cpu', 'x'), ('vulkan', 'h')):
             self.assertEqual(self.run_probe(*arguments).returncode, 64, arguments)
 
 

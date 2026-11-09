@@ -1071,6 +1071,19 @@ static void gpu_phase(const struct m19_report *c, int tty, struct gpu *g)
             };
             for (unsigned i = 0; i < sizeof(r4l) / sizeof(r4l[0]); i++)
                 (void)section_env(r4l[i], !strncmp(r4l[i][1], "chain", 5) ? c->dmabuf_env : NULL, SECTION_CAP / 16, c->gpu_ms, &start, &length);
+            /* R4m. Which layer keeps an import's stale view: the probe's own Mesa without X, glamor's calls
+             * repeated in the probe on card0, Turnip's own import, and the X server importing again once the
+             * first pixmap is freed. Recorded in the log as printed, not judged. */
+            char *card = (char *)c->card, *gpu = (char *)c->gpu_probe;
+            char *const r4m[][5] = {
+                {probe, "glimport", heap, NULL, NULL},
+                {probe, "gbmimport", heap, card, NULL},
+                {gpu, "dmabuf", heap, NULL, NULL},
+                {probe, "xreimport", heap, NULL, NULL},
+            };
+            const char *const *const r4m_env[] = {c->dmabuf_env, c->dmabuf_env, c->vk_env, NULL};
+            for (unsigned i = 0; i < sizeof(r4m) / sizeof(r4m[0]); i++)
+                (void)section_env(r4m[i], r4m_env[i], SECTION_CAP / 16, c->gpu_ms, &start, &length);
         }
     }
 

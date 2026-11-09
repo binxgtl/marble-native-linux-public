@@ -27,6 +27,12 @@
  *   xwait H      (R4l) xlate, with the pixmap read before the write and again a second after it
  *   chainsync K O (R4l) chainlate, then operation O on the buffer before the X server reads it
  *   chainagain   (R4l) chainlate, then the same buffer handed over a second time
+ *   xreimport H  (R4m) xagain, but the first pixmap is freed before the buffer is handed over again
+ *   glimport H   (R4m) the probe's own Mesa, without X: the buffer imported through EGL_LINUX_DMA_BUF_EXT as
+ *                ARGB8888, then written by the CPU, then read by the GPU (a copy into an ordinary texture) and by
+ *                glReadPixels; then imported again and read, and the first import read once more
+ *   gbmimport H C (R4m) glimport through glamor's own calls on card C: a GBM device, GBM_BO_IMPORT_FD, then
+ *                EGL_NATIVE_PIXMAP_KHR on EGL's GBM platform
  *
  * Every reading is the share of pixels holding the colour, in thousandths. Both windows are override-redirect,
  * so no window manager moves or decorates them. Built against libxcb, libxcb-present and libxcb-dri3; EGL and
@@ -355,7 +361,7 @@ static void sync_dmabuf(int fd, uint64_t flags)
 }
 
 /* The share of side x side pixels, stride bytes a row, whose first three bytes are the colour, give or take 2. */
-static long holding(const uint8_t *p, size_t stride)
+static long holding_of(const uint8_t *p, size_t stride, const uint8_t *want)
 {
     unsigned long long hits = 0;
     for (unsigned y = 0; y < M19_SIDE; y++)
@@ -363,11 +369,19 @@ static long holding(const uint8_t *p, size_t stride)
             const uint8_t *px = p + y * stride + x * 4;
             int ok = 1;
             for (int i = 0; i < 3; i++)
-                ok &= px[i] + 2 >= colour[i] && px[i] <= colour[i] + 2;
+                ok &= px[i] + 2 >= want[i] && px[i] <= want[i] + 2;
             hits += (unsigned)ok;
         }
     return (long)(hits * 1000 / (M19_SIDE * M19_SIDE));
 }
+
+static long holding(const uint8_t *p, size_t stride)
+{
+    return holding_of(p, stride, colour);
+}
+
+/* (R4m) The colour as ARGB8888 lays it out in memory (B, G, R, A), so that GL reads it back as the colour. */
+static const uint8_t colour_argb[3] = {0xbf, 0x80, 0x40};
 
 static long read_back(xcb_connection_t *c, xcb_drawable_t drawable)
 {
@@ -448,6 +462,7 @@ struct x_plan {
     int before;
     unsigned delay_ms;
     int again_fd;
+    int free_first;
 };
 
 /* fd, a side x side dma-buf of stride bytes a row, goes to the X server through DRI3 as a program's buffer does
@@ -511,6 +526,10 @@ static int x_show(const char *mode, int fd, unsigned stride, const struct x_plan
         printf("M19 PRESENT %s delayed=%ld\n", mode, read_back(c, pixmap));
     }
     if (again_fd >= 0) {
+        if (plan->free_first) {
+            xcb_free_pixmap(c, pixmap);
+            free(xcb_get_input_focus_reply(c, xcb_get_input_focus(c), NULL));
+        }
         xcb_pixmap_t again = xcb_generate_id(c);
         error = xcb_request_check(c, xcb_dri3_pixmap_from_buffer_checked(c, again, screen->root, stride * M19_SIDE, M19_SIDE, M19_SIDE,
                                                                          (uint16_t)stride, 24, 32, again_fd));
@@ -521,7 +540,7 @@ static int x_show(const char *mode, int fd, unsigned stride, const struct x_plan
             return 1;
         }
         long from_again = read_back(c, again);
-        printf("M19 PRESENT %s again=%ld first=%ld\n", mode, from_again, read_back(c, pixmap));
+        printf("M19 PRESENT %s again=%ld first=%ld\n", mode, from_again, plan->free_first ? -1L : read_back(c, pixmap));
     }
     xcb_disconnect(c);
     printf("M19 PRESENT %s ok\n", mode);
@@ -536,6 +555,7 @@ struct heap_buffer {
     size_t size;
     unsigned stride;
     const char *kgsl, *op;
+    const uint8_t *paint;
 };
 
 static int cpu_paint(void *context)
@@ -543,11 +563,11 @@ static int cpu_paint(void *context)
     struct heap_buffer *b = context;
     sync_dmabuf(b->fd, M19_SYNC_WRITE);
     for (size_t i = 0; i < b->size; i += 4) {
-        memcpy(b->p + i, colour, 3);
+        memcpy(b->p + i, b->paint, 3);
         b->p[i + 3] = 0xff;
     }
     sync_dmabuf(b->fd, M19_SYNC_WRITE | M19_SYNC_END);
-    printf("M19 PRESENT %s cpu=%ld\n", b->mode, holding(b->p, b->stride));
+    printf("M19 PRESENT %s cpu=%ld\n", b->mode, holding_of(b->p, b->stride, b->paint));
     return 0;
 }
 
@@ -561,28 +581,36 @@ static int cpu_paint_sync(void *context)
 }
 
 /* xread paints before the X server has the buffer; xlate (R4k) and R4l's after; kgslsync (R4l) never hands it over. */
-static int heap_read(const char *mode, const char *heap, const char *kgsl, const char *op)
+/* A side x side buffer from heap, mapped. */
+static int heap_alloc(struct heap_buffer *b, const char *heap)
 {
-    struct heap_buffer b = {mode, -1, NULL, (size_t)M19_SIDE * 4 * M19_SIDE, M19_SIDE * 4, kgsl, op};
     int h = open(heap, O_RDONLY | O_CLOEXEC);
     if (h < 0) {
-        printf("M19 PRESENT %s FAIL heap open errno=%d\n", mode, errno);
+        printf("M19 PRESENT %s FAIL heap open errno=%d\n", b->mode, errno);
         return 1;
     }
-    struct m19_heap_alloc alloc = {.len = b.size, .fd_flags = O_RDWR | O_CLOEXEC};
+    struct m19_heap_alloc alloc = {.len = b->size, .fd_flags = O_RDWR | O_CLOEXEC};
     int failed = ioctl(h, M19_HEAP_ALLOC, &alloc);
     close(h);
     if (failed) {
-        printf("M19 PRESENT %s FAIL heap alloc errno=%d\n", mode, errno);
+        printf("M19 PRESENT %s FAIL heap alloc errno=%d\n", b->mode, errno);
         return 1;
     }
-    b.fd = (int)alloc.fd;
-    b.p = mmap(NULL, b.size, PROT_READ | PROT_WRITE, MAP_SHARED, b.fd, 0);
-    if (b.p == MAP_FAILED) {
-        printf("M19 PRESENT %s FAIL map errno=%d\n", mode, errno);
-        close(b.fd);
+    b->fd = (int)alloc.fd;
+    b->p = mmap(NULL, b->size, PROT_READ | PROT_WRITE, MAP_SHARED, b->fd, 0);
+    if (b->p == MAP_FAILED) {
+        printf("M19 PRESENT %s FAIL map errno=%d\n", b->mode, errno);
+        close(b->fd);
         return 1;
     }
+    return 0;
+}
+
+static int heap_read(const char *mode, const char *heap, const char *kgsl, const char *op)
+{
+    struct heap_buffer b = {mode, -1, NULL, (size_t)M19_SIDE * 4 * M19_SIDE, M19_SIDE * 4, kgsl, op, colour};
+    if (heap_alloc(&b, heap))
+        return 1;
     if (!strcmp(mode, "xread")) {
         cpu_paint(&b);
         munmap(b.p, b.size);
@@ -595,11 +623,15 @@ static int heap_read(const char *mode, const char *heap, const char *kgsl, const
             kgsl_sync(mode, kgsl, b.fd, b.size, kgsl_ops[i]);
         printf("M19 PRESENT %s ok\n", mode);
     } else {
-        struct x_plan plan = {cpu_paint, &b, 0, 0, -1};
+        struct x_plan plan = {cpu_paint, &b, 0, 0, -1, 0};
         if (!strcmp(mode, "xsync"))
             plan.late = cpu_paint_sync;
         else if (!strcmp(mode, "xagain"))
             plan.again_fd = dup(b.fd);
+        else if (!strcmp(mode, "xreimport")) {
+            plan.again_fd = dup(b.fd);
+            plan.free_first = 1;
+        }
         else if (!strcmp(mode, "xwait")) {
             plan.before = 1;
             plan.delay_ms = 1000;
@@ -627,6 +659,19 @@ static int heap_read(const char *mode, const char *heap, const char *kgsl, const
 #define M19_GL_FRAMEBUFFER_COMPLETE 0x8CD5
 #define M19_GL_COLOR_BUFFER_BIT 0x4000
 #define M19_GL_RENDERER 0x1F01
+#define M19_EGL_PLATFORM_GBM_KHR 0x31D7
+#define M19_EGL_NATIVE_PIXMAP_KHR 0x30B0
+#define M19_EGL_LINUX_DMA_BUF_EXT 0x3270
+#define M19_EGL_LINUX_DRM_FOURCC_EXT 0x3271
+#define M19_EGL_DMA_BUF_PLANE0_FD_EXT 0x3272
+#define M19_EGL_DMA_BUF_PLANE0_OFFSET_EXT 0x3273
+#define M19_EGL_DMA_BUF_PLANE0_PITCH_EXT 0x3274
+#define M19_EGL_WIDTH 0x3057
+#define M19_EGL_HEIGHT 0x3056
+/* DRM_FORMAT_ARGB8888 ('AR24'), the format glamor imports a depth-24 pixmap as, and GBM_BO_IMPORT_FD. */
+#define M19_ARGB8888 0x34325241u
+#define M19_GBM_BO_IMPORT_FD 0x5503u
+struct m19_gbm_import_fd { int fd; uint32_t width, height, stride, format; };
 
 static void *symbol(void *library, const char *name)
 {
@@ -648,10 +693,23 @@ struct gl {
     int fourcc, fd, stride, offset;
     uint64_t modifier;
     const char *kgsl, *op;
+    /* (R4m) What imports and reads a buffer. */
+    void *display, *context;
+    void *(*create_image)(void *, void *, unsigned, void *, const int *);
+    unsigned (*export_query)(void *, void *, int *, int *, uint64_t *);
+    unsigned (*export_image)(void *, void *, int *, int *, int *);
+    void (*image_target)(unsigned, void *);
+    void (*gen_textures)(int, unsigned *);
+    void (*bind_texture)(unsigned, unsigned);
+    void (*tex_image)(unsigned, int, int, int, int, int, unsigned, unsigned, const void *);
+    void (*tex_parameter)(unsigned, unsigned, int);
+    void (*read_pixels)(int, int, int, int, unsigned, unsigned, void *);
+    void (*copy_tex)(unsigned, int, int, int, int, int, int, int);
+    unsigned (*get_error)(void);
 };
 
-/* EGL's surfaceless platform, a GLES context, a texture, and its export, before anything is drawn. */
-static int gl_open(const char *mode, struct gl *g)
+/* EGL on platform (with native, its display), a GLES context made current with no surface, and GL's calls. */
+static int gl_init(const char *mode, struct gl *g, unsigned platform, void *native)
 {
     memset(g, 0, sizeof(*g));
     g->mode = mode;
@@ -670,16 +728,17 @@ static int gl_open(const char *mode, struct gl *g)
     unsigned (*bind_api)(unsigned) = (unsigned (*)(unsigned))M19_EGL("eglBindAPI");
     void *(*create_context)(void *, void *, void *, const int *) = (void *(*)(void *, void *, void *, const int *))M19_EGL("eglCreateContext");
     unsigned (*make_current)(void *, void *, void *, void *) = (unsigned (*)(void *, void *, void *, void *))M19_EGL("eglMakeCurrent");
-    void *(*create_image)(void *, void *, unsigned, void *, const int *) =
-        (void *(*)(void *, void *, unsigned, void *, const int *))M19_EGL("eglCreateImageKHR");
-    unsigned (*export_query)(void *, void *, int *, int *, uint64_t *) =
-        (unsigned (*)(void *, void *, int *, int *, uint64_t *))M19_EGL("eglExportDMABUFImageQueryMESA");
-    unsigned (*export_image)(void *, void *, int *, int *, int *) = (unsigned (*)(void *, void *, int *, int *, int *))M19_EGL("eglExportDMABUFImageMESA");
-    void (*gen_textures)(int, unsigned *) = (void (*)(int, unsigned *))symbol(gles, "glGenTextures");
-    void (*bind_texture)(unsigned, unsigned) = (void (*)(unsigned, unsigned))symbol(gles, "glBindTexture");
-    void (*tex_image)(unsigned, int, int, int, int, int, unsigned, unsigned, const void *) =
-        (void (*)(unsigned, int, int, int, int, int, unsigned, unsigned, const void *))symbol(gles, "glTexImage2D");
-    void (*tex_parameter)(unsigned, unsigned, int) = (void (*)(unsigned, unsigned, int))symbol(gles, "glTexParameteri");
+    g->create_image = (void *(*)(void *, void *, unsigned, void *, const int *))M19_EGL("eglCreateImageKHR");
+    g->export_query = (unsigned (*)(void *, void *, int *, int *, uint64_t *))M19_EGL("eglExportDMABUFImageQueryMESA");
+    g->export_image = (unsigned (*)(void *, void *, int *, int *, int *))M19_EGL("eglExportDMABUFImageMESA");
+    g->image_target = (void (*)(unsigned, void *))M19_EGL("glEGLImageTargetTexture2DOES");
+    g->gen_textures = (void (*)(int, unsigned *))symbol(gles, "glGenTextures");
+    g->bind_texture = (void (*)(unsigned, unsigned))symbol(gles, "glBindTexture");
+    g->tex_image = (void (*)(unsigned, int, int, int, int, int, unsigned, unsigned, const void *))symbol(gles, "glTexImage2D");
+    g->tex_parameter = (void (*)(unsigned, unsigned, int))symbol(gles, "glTexParameteri");
+    g->read_pixels = (void (*)(int, int, int, int, unsigned, unsigned, void *))symbol(gles, "glReadPixels");
+    g->copy_tex = (void (*)(unsigned, int, int, int, int, int, int, int))symbol(gles, "glCopyTexSubImage2D");
+    g->get_error = (unsigned (*)(void))symbol(gles, "glGetError");
     g->gen_framebuffers = (void (*)(int, unsigned *))symbol(gles, "glGenFramebuffers");
     g->bind_framebuffer = (void (*)(unsigned, unsigned))symbol(gles, "glBindFramebuffer");
     g->framebuffer_texture = (void (*)(unsigned, unsigned, unsigned, unsigned, int))symbol(gles, "glFramebufferTexture2D");
@@ -688,33 +747,42 @@ static int gl_open(const char *mode, struct gl *g)
     g->clear = (void (*)(unsigned))symbol(gles, "glClear");
     g->finish = (void (*)(void))symbol(gles, "glFinish");
     g->get_string = (const char *(*)(unsigned))symbol(gles, "glGetString");
-    if (!get_display || !initialize || !bind_api || !create_context || !make_current || !create_image || !export_query || !export_image ||
-        !gen_textures || !bind_texture || !tex_image || !tex_parameter || !g->gen_framebuffers || !g->bind_framebuffer || !g->framebuffer_texture ||
-        !g->framebuffer_status || !g->clear_colour || !g->clear || !g->finish || !g->get_string) {
+    if (!get_display || !initialize || !bind_api || !create_context || !make_current || !g->create_image || !g->export_query || !g->export_image ||
+        !g->image_target || !g->gen_textures || !g->bind_texture || !g->tex_image || !g->tex_parameter || !g->gen_framebuffers ||
+        !g->bind_framebuffer || !g->framebuffer_texture || !g->framebuffer_status || !g->clear_colour || !g->clear || !g->finish ||
+        !g->get_string || !g->read_pixels || !g->copy_tex || !g->get_error) {
         printf("M19 PRESENT %s FAIL egl symbols\n", mode);
         return 1;
     }
     int major, minor;
-    void *display = get_display(M19_EGL_PLATFORM_SURFACELESS_MESA, NULL, NULL);
-    if (!display || !initialize(display, &major, &minor) || !bind_api(M19_EGL_OPENGL_ES_API)) {
+    g->display = get_display(platform, native, NULL);
+    if (!g->display || !initialize(g->display, &major, &minor) || !bind_api(M19_EGL_OPENGL_ES_API)) {
         printf("M19 PRESENT %s FAIL egl init\n", mode);
         return 1;
     }
     const int attributes[] = {M19_EGL_CONTEXT_CLIENT_VERSION, 2, M19_EGL_NONE};
-    void *context = create_context(display, NULL, NULL, attributes);
-    if (!context || !make_current(display, NULL, NULL, context)) {
+    g->context = create_context(g->display, NULL, NULL, attributes);
+    if (!g->context || !make_current(g->display, NULL, NULL, g->context)) {
         printf("M19 PRESENT %s FAIL egl context\n", mode);
         return 1;
     }
-    gen_textures(1, &g->texture);
-    bind_texture(M19_GL_TEXTURE_2D, g->texture);
-    tex_parameter(M19_GL_TEXTURE_2D, M19_GL_TEXTURE_MIN_FILTER, M19_GL_NEAREST);
-    tex_image(M19_GL_TEXTURE_2D, 0, M19_GL_RGBA, M19_SIDE, M19_SIDE, 0, M19_GL_RGBA, M19_GL_UNSIGNED_BYTE, NULL);
+    return 0;
+}
+
+/* EGL's surfaceless platform, a GLES context, a texture, and its export, before anything is drawn. */
+static int gl_open(const char *mode, struct gl *g)
+{
+    if (gl_init(mode, g, M19_EGL_PLATFORM_SURFACELESS_MESA, NULL))
+        return 1;
+    g->gen_textures(1, &g->texture);
+    g->bind_texture(M19_GL_TEXTURE_2D, g->texture);
+    g->tex_parameter(M19_GL_TEXTURE_2D, M19_GL_TEXTURE_MIN_FILTER, M19_GL_NEAREST);
+    g->tex_image(M19_GL_TEXTURE_2D, 0, M19_GL_RGBA, M19_SIDE, M19_SIDE, 0, M19_GL_RGBA, M19_GL_UNSIGNED_BYTE, NULL);
     /* Exported first, as a program's back buffer is shared before it is drawn into. */
-    void *image = create_image(display, context, M19_EGL_GL_TEXTURE_2D_KHR, (void *)(uintptr_t)g->texture, NULL);
+    void *image = g->create_image(g->display, g->context, M19_EGL_GL_TEXTURE_2D_KHR, (void *)(uintptr_t)g->texture, NULL);
     int planes = 0, fds[4] = {-1, -1, -1, -1}, strides[4] = {0}, offsets[4] = {0};
-    if (!image || !export_query(display, image, &g->fourcc, &planes, &g->modifier) || planes != 1 ||
-        !export_image(display, image, fds, strides, offsets) || fds[0] < 0) {
+    if (!image || !g->export_query(g->display, image, &g->fourcc, &planes, &g->modifier) || planes != 1 ||
+        !g->export_image(g->display, image, fds, strides, offsets) || fds[0] < 0) {
         printf("M19 PRESENT %s FAIL export\n", mode);
         return 1;
     }
@@ -778,7 +846,7 @@ static int gpu_read(const char *mode, const char *kgsl, const char *op)
     g.kgsl = kgsl;
     g.op = op;
     if (strcmp(mode, "gpuwrite") && strcmp(mode, "chain")) {
-        struct x_plan plan = {gl_paint, &g, 0, 0, -1};
+        struct x_plan plan = {gl_paint, &g, 0, 0, -1, 0};
         if (!strcmp(mode, "chainsync"))
             plan.late = gl_paint_sync;
         else if (!strcmp(mode, "chainagain"))
@@ -798,11 +866,125 @@ static int gpu_read(const char *mode, const char *kgsl, const char *op)
     return 0;
 }
 
+/* (R4m) GBM's import, for gbmimport: glamor's own calls. */
+struct importer {
+    void *gbm;
+    void *(*bo_import)(void *, uint32_t, void *, uint32_t);
+    void (*bo_destroy)(void *);
+};
+
+/* fd as a GL texture: through GBM and EGL_NATIVE_PIXMAP_KHR as glamor does, or through EGL_LINUX_DMA_BUF_EXT.
+ * 0 when it cannot be imported. */
+static unsigned import_texture(struct gl *g, const struct importer *im, int fd, unsigned stride)
+{
+    void *image;
+    if (im->gbm) {
+        struct m19_gbm_import_fd data = {fd, M19_SIDE, M19_SIDE, stride, M19_ARGB8888};
+        void *bo = im->bo_import(im->gbm, M19_GBM_BO_IMPORT_FD, &data, 0);
+        if (!bo)
+            return 0;
+        image = g->create_image(g->display, NULL, M19_EGL_NATIVE_PIXMAP_KHR, bo, NULL);
+        im->bo_destroy(bo);
+    } else {
+        const int attributes[] = {M19_EGL_WIDTH, M19_SIDE, M19_EGL_HEIGHT, M19_SIDE, M19_EGL_LINUX_DRM_FOURCC_EXT, (int)M19_ARGB8888,
+                                  M19_EGL_DMA_BUF_PLANE0_FD_EXT, fd, M19_EGL_DMA_BUF_PLANE0_OFFSET_EXT, 0, M19_EGL_DMA_BUF_PLANE0_PITCH_EXT,
+                                  (int)stride, M19_EGL_NONE};
+        image = g->create_image(g->display, NULL, M19_EGL_LINUX_DMA_BUF_EXT, NULL, attributes);
+    }
+    if (!image)
+        return 0;
+    unsigned texture = 0;
+    g->gen_textures(1, &texture);
+    g->bind_texture(M19_GL_TEXTURE_2D, texture);
+    g->tex_parameter(M19_GL_TEXTURE_2D, M19_GL_TEXTURE_MIN_FILTER, M19_GL_NEAREST);
+    g->image_target(M19_GL_TEXTURE_2D, image);
+    g->bind_texture(M19_GL_TEXTURE_2D, 0);
+    return texture;
+}
+
+/* What this context sees in texture, the share holding the colour: copied by the GPU into an ordinary texture
+ * and read from there (through_copy), or read with glReadPixels straight from a framebuffer around it. -2 when
+ * GL reported an error, -1 when the framebuffer is incomplete. */
+static long gl_read(struct gl *g, unsigned texture, int through_copy)
+{
+    unsigned source = 0, target = 0, copy = 0;
+    uint8_t *pixels = malloc((size_t)M19_SIDE * M19_SIDE * 4);
+    long held = -1;
+    while (g->get_error())
+        ;
+    g->gen_framebuffers(1, &source);
+    g->bind_framebuffer(M19_GL_FRAMEBUFFER, source);
+    g->framebuffer_texture(M19_GL_FRAMEBUFFER, M19_GL_COLOR_ATTACHMENT0, M19_GL_TEXTURE_2D, texture, 0);
+    if (pixels && g->framebuffer_status(M19_GL_FRAMEBUFFER) == M19_GL_FRAMEBUFFER_COMPLETE) {
+        if (through_copy) {
+            g->gen_textures(1, &copy);
+            g->bind_texture(M19_GL_TEXTURE_2D, copy);
+            g->tex_image(M19_GL_TEXTURE_2D, 0, M19_GL_RGBA, M19_SIDE, M19_SIDE, 0, M19_GL_RGBA, M19_GL_UNSIGNED_BYTE, NULL);
+            g->copy_tex(M19_GL_TEXTURE_2D, 0, 0, 0, 0, 0, M19_SIDE, M19_SIDE);
+            g->gen_framebuffers(1, &target);
+            g->bind_framebuffer(M19_GL_FRAMEBUFFER, target);
+            g->framebuffer_texture(M19_GL_FRAMEBUFFER, M19_GL_COLOR_ATTACHMENT0, M19_GL_TEXTURE_2D, copy, 0);
+        }
+        g->read_pixels(0, 0, M19_SIDE, M19_SIDE, M19_GL_RGBA, M19_GL_UNSIGNED_BYTE, pixels);
+        held = g->get_error() ? -2 : holding(pixels, (size_t)M19_SIDE * 4);
+    }
+    g->bind_framebuffer(M19_GL_FRAMEBUFFER, 0);
+    free(pixels);
+    return held;
+}
+
+/* glimport and gbmimport: imported, written by the CPU, read; imported again and read; the first read again. */
+static int gl_import(const char *mode, const char *heap, const char *card)
+{
+    struct heap_buffer b = {mode, -1, NULL, (size_t)M19_SIDE * 4 * M19_SIDE, M19_SIDE * 4, NULL, NULL, colour_argb};
+    struct importer im = {NULL, NULL, NULL};
+    unsigned platform = M19_EGL_PLATFORM_SURFACELESS_MESA;
+    if (heap_alloc(&b, heap))
+        return 1;
+    if (card) {
+        int card_fd = open(card, O_RDWR | O_CLOEXEC);
+        if (card_fd < 0) {
+            printf("M19 PRESENT %s FAIL card open errno=%d\n", mode, errno);
+            return 1;
+        }
+        const char *gbm_name = getenv("M19_GBM_LIB");
+        void *gbm = dlopen(gbm_name ? gbm_name : "libgbm.so.1", RTLD_NOW | RTLD_LOCAL);
+        void *(*create_device)(int) = (void *(*)(int))symbol(gbm, "gbm_create_device");
+        im.bo_import = (void *(*)(void *, uint32_t, void *, uint32_t))symbol(gbm, "gbm_bo_import");
+        im.bo_destroy = (void (*)(void *))symbol(gbm, "gbm_bo_destroy");
+        if (!create_device || !im.bo_import || !im.bo_destroy || !(im.gbm = create_device(card_fd))) {
+            printf("M19 PRESENT %s FAIL gbm\n", mode);
+            return 1;
+        }
+        platform = M19_EGL_PLATFORM_GBM_KHR;
+    }
+    struct gl g;
+    if (gl_init(mode, &g, platform, im.gbm))
+        return 1;
+    unsigned first = import_texture(&g, &im, b.fd, b.stride);
+    if (!first) {
+        printf("M19 PRESENT %s FAIL import\n", mode);
+        return 1;
+    }
+    cpu_paint(&b);
+    long blit = gl_read(&g, first, 1), read = gl_read(&g, first, 0);
+    unsigned second = import_texture(&g, &im, b.fd, b.stride);
+    long again = second ? gl_read(&g, second, 1) : -1;
+    printf("M19 PRESENT %s blit=%ld read=%ld again=%ld first=%ld\n", mode, blit, read, again, gl_read(&g, first, 1));
+    printf("M19 PRESENT %s ok\n", mode);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     setvbuf(stdout, NULL, _IOLBF, 0);
-    if (argc == 3 && (!strcmp(argv[1], "xread") || !strcmp(argv[1], "xlate") || !strcmp(argv[1], "xagain") || !strcmp(argv[1], "xwait")))
+    if (argc == 3 && (!strcmp(argv[1], "xread") || !strcmp(argv[1], "xlate") || !strcmp(argv[1], "xagain") || !strcmp(argv[1], "xwait") ||
+                      !strcmp(argv[1], "xreimport")))
         return heap_read(argv[1], argv[2], NULL, NULL);
+    if (argc == 3 && !strcmp(argv[1], "glimport"))
+        return gl_import(argv[1], argv[2], NULL);
+    if (argc == 4 && !strcmp(argv[1], "gbmimport"))
+        return gl_import(argv[1], argv[2], argv[3]);
     if (argc == 4 && !strcmp(argv[1], "kgslsync"))
         return heap_read(argv[1], argv[2], argv[3], NULL);
     if (argc == 5 && !strcmp(argv[1], "xsync") && kgsl_op_known(argv[4]))
@@ -819,7 +1001,7 @@ int main(int argc, char **argv)
     int flip = argc == 3 && !strcmp(argv[1], "flip"), copy = argc == 3 && !strcmp(argv[1], "copy");
     long frames = argc == 3 || card ? strtol(argv[2], NULL, 10) : 0;
     if ((!flip && !copy && !card) || frames < 2 || frames > 10000) {
-        fprintf(stderr, "usage: m19-present-probe copy|flip FRAMES, vblank|crtc COUNT CARD, xread|xlate|xagain|xwait HEAP, kgslsync HEAP KGSL, xsync HEAP KGSL OP, compositor, root, gpuwrite, chain, chainlate, "
+        fprintf(stderr, "usage: m19-present-probe copy|flip FRAMES, vblank|crtc COUNT CARD, xread|xlate|xagain|xwait|xreimport|glimport HEAP, gbmimport HEAP CARD, kgslsync HEAP KGSL, xsync HEAP KGSL OP, compositor, root, gpuwrite, chain, chainlate, "
                 "chainagain or chainsync KGSL OP\n");
         return 64;
     }

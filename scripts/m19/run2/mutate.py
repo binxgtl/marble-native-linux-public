@@ -257,7 +257,7 @@ MUTANTS = (
     ('pid4.c', '"FD_MESA_DEBUG=noubwc,notile"', '"FD_MESA_DEBUG=noubwc"', ('Static',)),
     ('pid4.c', '.show_seconds = 3,', '.show_seconds = 0,', ('Static',)),
     # R4j: which side loses a program's frame.
-    ('present-probe.c', '        memcpy(b->p + i, colour, 3);\n', '        memcpy(b->p + i, colour, 2);\n', ('CardProbe',)),
+    ('present-probe.c', '        memcpy(b->p + i, b->paint, 3);\n', '        memcpy(b->p + i, b->paint, 2);\n', ('CardProbe',)),
     ('present-probe.c', '    if (failed) {\n        printf("M19 PRESENT %s FAIL heap alloc', '    if (0) {\n        printf("M19 PRESENT %s FAIL heap alloc', ('CardProbe',)),
     ('present-probe.c', '    if (!extension || !extension->present) {\n        printf("M19 PRESENT %s FAIL no dri3', '    if (0) {\n        printf("M19 PRESENT %s FAIL no dri3', ('PresentProbe',)),
     ('present-probe.c', '    if (!egl || !gles || !get_proc) {', '    if (!egl && !gles && !get_proc) {', ('CardProbe',)),
@@ -271,7 +271,7 @@ MUTANTS = (
     ('present-probe.c', '    if (!strcmp(mode, "xread")) {\n        cpu_paint(&b);', '    if (strcmp(mode, "kgslsync")) {\n        cpu_paint(&b);', ('PresentProbe',)),
     ('present-probe.c', ' || !strcmp(argv[1], "xlate") ||', ' ||', ('PresentProbe',)),
     ('present-probe.c', ' || !strcmp(argv[1], "chainlate") ||', ' ||', ('CardProbe',)),
-    ('present-probe.c', '        printf("M19 PRESENT %s FAIL heap alloc errno=%d\\n", mode, errno);', '        printf("M19 PRESENT xread FAIL heap alloc errno=%d\\n", errno);', ('CardProbe',)),
+    ('present-probe.c', '        printf("M19 PRESENT %s FAIL heap alloc errno=%d\\n", b->mode, errno);', '        printf("M19 PRESENT xread FAIL heap alloc errno=%d\\n", errno);', ('CardProbe',)),
     ('glfinish.c', '    if (finish)\n        finish();\n', '', ('Shim',)),
     ('glfinish.c', '    if (finish)\n        finish();\n    if (real)\n        real(display, drawable);', '    if (real)\n        real(display, drawable);\n    if (finish)\n        finish();', ('Shim',)),
     ('glfinish.c', '        told = 1;\n', '', ('Shim',)),
@@ -298,6 +298,20 @@ MUTANTS = (
     ('report.c', '!strncmp(r4l[i][1], "chain", 5) ? c->dmabuf_env : NULL', 'NULL', ('Gpu',)),
     ('present-probe.c', ' || !strcmp(argv[1], "xagain") ||', ' ||', ('CardProbe',)),
     ('present-probe.c', ' || !strcmp(argv[1], "chainagain")))', '))', ('CardProbe',)),
+    # R4m: the layer that keeps an import's stale view.
+    ('present-probe.c', '    if (argc == 3 && !strcmp(argv[1], "glimport"))\n', '    if (0)\n', ('CardProbe',)),
+    ('present-probe.c', '    if (argc == 4 && !strcmp(argv[1], "gbmimport"))\n', '    if (0)\n', ('CardProbe',)),
+    ('present-probe.c', '        int card_fd = open(card, O_RDWR | O_CLOEXEC);', '        int card_fd = open(heap, O_RDWR | O_CLOEXEC);', ('CardProbe',)),
+    ('present-probe.c', '    if (heap_alloc(&b, heap))\n        return 1;\n    if (card) {', '    if (card) {', ('CardProbe',)),
+    ('gpu-probe.c', '.enabledExtensionCount = dmabuf ? 2u : 0u,', '.enabledExtensionCount = 0u,', ('GpuProbe',)),
+    ('gpu-probe.c', '        cpu[i] = LATE_WORD;', '        cpu[i] = LATE_WORD + 1u;', ('GpuProbe',)),
+    ('gpu-probe.c', '    if ((result = copy_share(l, second, &again)) != VK_SUCCESS || (result = copy_share(l, first, &first_again)) != VK_SUCCESS)',
+     '    if ((result = copy_share(l, second, &again)) != VK_SUCCESS)', ('GpuProbe',)),
+    ('gpu-probe.c', '    int allow_cpu = argc == base + 1 && !strcmp(argv[base], "--allow-cpu");', '    int allow_cpu = argc == base + 1;', ('GpuProbe',)),
+    ('report.c', '                {probe, "gbmimport", heap, card, NULL},', '                {probe, "gbmimport", heap, heap, NULL},', ('Gpu',)),
+    ('report.c', '                {gpu, "dmabuf", heap, NULL, NULL},\n', '', ('Gpu',)),
+    ('report.c', 'const char *const *const r4m_env[] = {c->dmabuf_env, c->dmabuf_env, c->vk_env, NULL};',
+     'const char *const *const r4m_env[] = {c->dmabuf_env, NULL, c->vk_env, NULL};', ('Gpu',)),
 )
 
 
@@ -339,12 +353,14 @@ def run(number, name, old, new, classes):
                 raise Broken(f'mutant {number}: no Xvfb, or the Present probe or the fake card does not compile')
             environment.update(M19_PRESENT_PROBE=str(target / 'present-probe-test'), M19_XVFB=xvfb, M19_FAKE_CARD=str(target / 'libfakecard.so'))
         if 'GpuProbe' in classes:
-            # The probe on lavapipe, as test.sh builds and runs it.
+            # The probe on lavapipe, as test.sh builds and runs it, with the fake card's heap (R4m).
             icds = sorted(Path('/usr/share/vulkan/icd.d').glob('lvp_icd*.json'))
             if not icds or subprocess.run(['gcc', '-std=c11', '-O2', '-w', 'gpu-probe.c', '-ldl', '-o', 'gpu-probe-test'], cwd=target,
-                                          capture_output=True, timeout=120).returncode:
+                                          capture_output=True, timeout=120).returncode or subprocess.run(
+                    ['gcc', '-std=c11', '-O2', '-w', '-shared', '-fPIC', 'fake-card.c', '-ldl', '-o', 'libfakecard.so'], cwd=target,
+                    capture_output=True, timeout=120).returncode:
                 raise Broken(f'mutant {number}: no lavapipe or the probe does not compile')
-            environment.update(M19_GPU_PROBE=str(target / 'gpu-probe-test'), M19_LVP_ICD=str(icds[0]))
+            environment.update(M19_GPU_PROBE=str(target / 'gpu-probe-test'), M19_LVP_ICD=str(icds[0]), M19_FAKE_CARD=str(target / 'libfakecard.so'))
         if 'Shim' in classes:
             # The preload library on the fake libdrm, as test.sh builds them.
             for command in (['gcc', '-std=c11', '-O2', '-w', '-shared', '-fPIC', 'fake-drm.c', '-o', 'libfakedrm.so'],
