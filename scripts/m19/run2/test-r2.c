@@ -223,6 +223,8 @@ static int report_desktop_mode(char **argv)
 #define TEST_VK_ICD "VK_DRIVER_FILES=/usr/share/vulkan/icd.d/freedreno_icd.aarch64.json"
 static const char *const test_dri3_env[] = {"MESA_LOADER_DRIVER_OVERRIDE=kgsl", "FD_FORCE_KGSL=1", "FD_KGSL_ENABLE_DMABUF=1", TEST_VK_ICD, NULL};
 static const char *const test_copy_env[] = {TEST_VK_ICD, "MESA_VK_WSI_DEBUG=sw", "MESA_LOADER_DRIVER_OVERRIDE=zink", "LIBGL_KOPPER_DRI2=1", NULL};
+static const char *const test_soft_env[] = {"LIBGL_ALWAYS_SOFTWARE=1", NULL};
+static const struct m19_show test_shows[] = {{"dri3", test_dri3_env}, {"copy", test_copy_env}, {"soft", test_soft_env}};
 
 static int report_gpu_mode(char **argv)
 {
@@ -251,7 +253,7 @@ static int report_gpu_mode(char **argv)
                            .egl_env = test_dri3_env, .glamor = 1, .xorg_unit = "marble-xorg.service", .gpu_profile = paths[28],
                            .glmark2 = paths[29], .copy_env = test_copy_env, .present_probe = paths[30], .present_frames = 120,
                            .shell = "/bin/sh", .compositor_script = paths[31], .vblank_frames = 120, .crtc_samples = 50, .compose_ms = 500,
-                           .judge_copy = 1};
+                           .judge_copy = 1, .shows = test_shows, .show_count = 3, .show_seconds = 0};
     /* R4h's PID 1 runs without the compositor views. */
     if (getenv("M19_TEST_NO_VIEWS"))
         c.compositor_script = NULL;

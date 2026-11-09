@@ -242,8 +242,17 @@ MUTANTS = (
     ('report.c', 'g->copy_ok = status == 0 && g->copy_done == (long)c->present_frames &&', 'g->copy_ok = g->copy_done == (long)c->present_frames &&', ('Gpu',)),
     ('report.c', 'g->copy_ok = status == 0 && g->copy_done == (long)c->present_frames &&', 'g->copy_ok = status == 0 &&', ('Gpu',)),
     ('report.c', ' && g->copy_msc > 0 && g->copy_msc <= 1.10;', ' && g->copy_msc > 0;', ('Gpu',)),
-    ('report.c', ' && (!c->judge_copy || g.copy_ok);', ';', ('Gpu',)),
+    ('report.c', ' && (!c->judge_copy || g.copy_ok) &&', ' &&', ('Gpu',)),
     ('pid4.c', '.judge_copy = 1,', '.judge_copy = 0,', ('Static',)),
+    # R4i: glxgears covering the screen through six paths, the screen read while it runs.
+    ('report.c', '                g->show_visible += g->show_nonblack[i] >= 5;', '                g->show_visible += g->show_nonblack[i] >= 4;', ('Gpu',)),
+    ('report.c', '        g->shows_ok = g->show_ran == (int)c->show_count;', '        g->shows_ok = 1;', ('Gpu',)),
+    ('report.c', ' &&\n                 (!c->show_count || g.shows_ok);', ';', ('Gpu',)),
+    ('report.c', '"%s -fullscreen & gears=$!;', '"%s & gears=$!;', ('Gpu',)),
+    ('report.c', '            } else {\n                g->show_nonblack[i] = g->show_mean[i] = -1;\n            }', '            }', ('Gpu',)),
+    ('pid4.c', '{"noubwc", noubwc_env}, ', '', ('Static',)),
+    ('pid4.c', '"FD_MESA_DEBUG=noubwc,notile"', '"FD_MESA_DEBUG=noubwc"', ('Static',)),
+    ('pid4.c', '.show_seconds = 3,', '.show_seconds = 0,', ('Static',)),
 )
 
 

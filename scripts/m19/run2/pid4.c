@@ -39,6 +39,18 @@ static struct m19_run run = {
 static const char *const dri3_env[] = {"MESA_LOADER_DRIVER_OVERRIDE=kgsl", "FD_FORCE_KGSL=1", "FD_KGSL_ENABLE_DMABUF=1", M19_VK_ICD, NULL};
 static const char *const copy_env[] = {M19_VK_ICD, "MESA_VK_WSI_DEBUG=sw", "MESA_LOADER_DRIVER_OVERRIDE=zink", "LIBGL_KOPPER_DRI2=1", NULL};
 
+/* R4i: the ways glxgears' frames can reach the X server. dri3 is the session's own and showed black in R4h; noubwc
+ * and linear keep it but without UBWC compression, then without tiling as well; zink renders through Turnip and
+ * presents through Vulkan's DRI3 swapchain, as vkcube does; copy is R4a's path through the CPU; soft is Mesa's
+ * software GL, drawn with plain X requests, the control. */
+#define M19_DRI3 "MESA_LOADER_DRIVER_OVERRIDE=kgsl", "FD_FORCE_KGSL=1", "FD_KGSL_ENABLE_DMABUF=1", M19_VK_ICD
+static const char *const noubwc_env[] = {M19_DRI3, "FD_MESA_DEBUG=noubwc", NULL};
+static const char *const linear_env[] = {M19_DRI3, "FD_MESA_DEBUG=noubwc,notile", NULL};
+static const char *const zink_env[] = {M19_VK_ICD, "MESA_LOADER_DRIVER_OVERRIDE=zink", NULL};
+static const char *const soft_env[] = {"LIBGL_ALWAYS_SOFTWARE=1", NULL};
+static const struct m19_show shows[] = {{"dri3", dri3_env}, {"noubwc", noubwc_env}, {"linear", linear_env}, {"zink", zink_env}, {"copy", copy_env},
+                                        {"soft", soft_env}};
+
 static const struct m19_report report = {
     .tty = "/dev/ttyGS0", .kmsg = "/dev/kmsg", .proc1_exe = "/proc/1/exe", .block = "/sys/block", .mountinfo = "/proc/self/mountinfo",
     .systemctl = "/usr/bin/systemctl", .journalctl = "/usr/bin/journalctl", .analyze = "/usr/bin/systemd-analyze",
@@ -56,7 +68,8 @@ static const struct m19_report report = {
     .vkcube = "/usr/bin/vkcube", .glxinfo = "/usr/bin/glxinfo", .glxgears = "/usr/bin/glxgears", .eglinfo = "/usr/bin/eglinfo",
     .vk_env = dri3_env, .gl_env = dri3_env, .egl_env = dri3_env, .glamor = 1, .xorg_unit = "marble-xorg.service",
     .gpu_profile = "/run/m19/gpu-profile", .glmark2 = "/usr/bin/glmark2", .copy_env = copy_env,
-    .present_probe = "/run/m19/m19-present-probe", .present_frames = 120, .judge_copy = 1,
+    .present_probe = "/run/m19/m19-present-probe", .present_frames = 120, .judge_copy = 1, .shell = "/bin/sh", .shows = shows,
+    .show_count = sizeof(shows) / sizeof(shows[0]), .show_seconds = 3,
 };
 /* R4h: no compositor views. R4e to R4g measured them; R4d's compositor would only black out the panel again. */
 

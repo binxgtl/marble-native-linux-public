@@ -601,9 +601,12 @@ struct view {
     int owner_ok, gl, crtc_ok, root_ok;
 };
 
+#define M19_SHOWS_MAX 8
+
 struct gpu {
     int node, probe, vk, cube, gl, gears, egl, glamor_init, glamor_on, xorg_unit, glamor_ok, flip_ok, copy_ok, compositor_ok, vblank_ok, scanout_ok,
-        on_rc, off_rc;
+        on_rc, off_rc, show_ran, show_visible, shows_ok;
+    long show_nonblack[M19_SHOWS_MAX], show_mean[M19_SHOWS_MAX];
     long cube_ms, glmark2, copy_done, copies, flip_done, flips, late, composited_done, composited_copies, composited_flips;
     double cube_fps, gears_fps, xorg_cpu, copy_msc, copy_us, flip_msc, flip_us, gears_full_fps, wait_seq, wait_us, event_seq, event_us,
         composited_msc, composited_cube_fps;
@@ -975,6 +978,26 @@ static void gpu_phase(const struct m19_report *c, int tty, struct gpu *g)
             for (unsigned i = 0; i < 3; i++)
                 g->scanout_ok = g->scanout_ok && g->view[i].crtc_ok && g->view[i].root_ok;
         }
+        /* R4i. What glxgears covering the screen shows through each path, read off the screen while it runs:
+         * the share of pixels that are not black, in thousandths. */
+        for (unsigned i = 0; i < c->show_count && i < M19_SHOWS_MAX; i++) {
+            char script[1024];
+            snprintf(script, sizeof(script), "%s -fullscreen & gears=$!; sleep %u; %s root; kill $gears; wait $gears; exit 0", c->glxgears,
+                     c->show_seconds, c->present_probe);
+            char *argv[] = {(char *)c->shell, "-c", script, NULL};
+            addf("M19 show %s\n", c->shows[i].name);
+            status = section_env(argv, c->shows[i].env, SECTION_CAP / 8, c->gpu_ms, &start, &length);
+            const char *at = strstr(section_text(start, length), "M19 PRESENT root width=");
+            g->show_nonblack[i] = g->show_mean[i] = -1;
+            if (status == 0 && at &&
+                sscanf(at, "M19 PRESENT root width=%*u height=%*u nonblack=%ld mean=%ld", &g->show_nonblack[i], &g->show_mean[i]) == 2) {
+                g->show_ran++;
+                g->show_visible += g->show_nonblack[i] >= 5;
+            } else {
+                g->show_nonblack[i] = g->show_mean[i] = -1;
+            }
+        }
+        g->shows_ok = g->show_ran == (int)c->show_count;
     }
 
     /* A broader GL load, and GL through the copy profile for comparison. Recorded, not judged. */
@@ -997,8 +1020,9 @@ static void gpu_phase(const struct m19_report *c, int tty, struct gpu *g)
     status = section_env(egl, c->egl_env, SECTION_CAP / 4, c->gpu_ms, &start, &length);
     line_value(section_text(start, length), "renderer", g->egl_renderer, sizeof(g->egl_renderer));
     g->egl = status == 0 && adreno_named(g->egl_renderer);
-    (void)m19_wire_line(tty, c->pace_ms, M19_DEVICE_STEP " T12-gpu END %d %d %d %d %d %d %d %d %d %d %d %d %d", g->node, g->probe, g->vk, g->cube,
-                        g->gl, g->gears, g->egl, g->glamor_ok, g->flip_ok, g->compositor_ok, g->vblank_ok, g->scanout_ok, g->copy_ok);
+    (void)m19_wire_line(tty, c->pace_ms, M19_DEVICE_STEP " T12-gpu END %d %d %d %d %d %d %d %d %d %d %d %d %d %d", g->node, g->probe, g->vk,
+                        g->cube, g->gl, g->gears, g->egl, g->glamor_ok, g->flip_ok, g->compositor_ok, g->vblank_ok, g->scanout_ok, g->copy_ok,
+                        g->shows_ok);
 }
 
 static void desktop_sections(const struct m19_report *c)
@@ -1274,7 +1298,8 @@ int m19_report_main(const struct m19_report *c)
     if (c->gpu) {
         /* Page flips and the composited runs are recorded, not judged: R4e measures where they fail. */
         gpu_ok = g.node && g.probe && g.vk && g.cube && g.gl && g.gears && (!c->glamor || g.glamor_ok) &&
-                 (!c->compositor_script || (g.compositor_ok && g.vblank_ok && g.scanout_ok)) && (!c->judge_copy || g.copy_ok);
+                 (!c->compositor_script || (g.compositor_ok && g.vblank_ok && g.scanout_ok)) && (!c->judge_copy || g.copy_ok) &&
+                 (!c->show_count || g.shows_ok);
         /* Three lines, each well inside addf's buffer however long the names run. */
         addf("M19 R4 gpu node=%d probe=%d vk=%d cube=%d cube_ms=%ld cube_fps=%.1f gl=%d gears=%d gears_fps=%.1f egl=%d gpu_ok=%d\n", g.node, g.probe,
              g.vk, g.cube, g.cube_ms, g.cube_fps, g.gl, g.gears, g.gears_fps, g.egl, gpu_ok);
@@ -1298,6 +1323,11 @@ int m19_report_main(const struct m19_report *c)
             for (unsigned i = 0; i < 3; i++)
                 addf("M19 R4 view %s owner=%ld gl=%d fb=%ld fbs=%ld changes=%ld pitch=%ld nonblack=%ld mean=%ld\n", view_names[i], g.view[i].owner,
                      g.view[i].gl, g.view[i].fb, g.view[i].fbs, g.view[i].changes, g.view[i].pitch, g.view[i].nonblack, g.view[i].mean);
+        }
+        if (c->show_count) {
+            addf("M19 R4 shows ran=%d of=%u visible=%d shows_ok=%d\n", g.show_ran, c->show_count, g.show_visible, g.shows_ok);
+            for (unsigned i = 0; i < c->show_count && i < M19_SHOWS_MAX; i++)
+                addf("M19 R4 show %s nonblack=%ld mean=%ld\n", c->shows[i].name, g.show_nonblack[i], g.show_mean[i]);
         }
     }
     int all_ok = init_ok && state_ok && targets_ok && writes_ok && ro_ok && mounts_ok && !write_warning && desktop_ok && gpu_ok;

@@ -34,6 +34,12 @@ int m19_sweep(const struct m19_handoff *h, int kill_them);
  * the root had already changed, so the caller knows which display binary is reachable. */
 int m19_handoff(int tty_fd, const struct m19_handoff *h, int *moved);
 
+/* R4i: one way a program's frames reach the X server, as the environment that selects it. */
+struct m19_show {
+    const char *name;
+    const char *const *env;
+};
+
 struct m19_report {
     const char *tty, *kmsg, *proc1_exe, *block, *mountinfo, *systemctl, *journalctl, *analyze, *display, *expected_init;
     unsigned settle_ms, poll_ms, beat_ms, pace_ms, log_ms, command_ms, final_ms, tty_wait_ms;
@@ -64,6 +70,10 @@ struct m19_report {
     unsigned vblank_frames, crtc_samples, compose_ms;
     /* R4h: the probe's windowed copy must take one vblank a frame (R4g's whole-rate Present). */
     unsigned judge_copy;
+    /* R4i: what glxgears covering the screen shows through each path: the screen is read show_seconds after it
+     * starts, with the path's environment added in the shell that runs both. */
+    const struct m19_show *shows;
+    unsigned show_count, show_seconds;
 };
 
 /* R3's guard, a service of its own beside the desktop. It stops the desktop units and paints YELLOW

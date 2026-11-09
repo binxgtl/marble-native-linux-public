@@ -717,12 +717,22 @@ class Static(unittest.TestCase):
                       '.glxinfo = "/usr/bin/glxinfo"', '.glxgears = "/usr/bin/glxgears"', '.eglinfo = "/usr/bin/eglinfo"',
                       '.vk_env = dri3_env, .gl_env = dri3_env, .egl_env = dri3_env, .glamor = 1, .xorg_unit = "marble-xorg.service"',
                       '.gpu_profile = "/run/m19/gpu-profile", .glmark2 = "/usr/bin/glmark2", .copy_env = copy_env',
-                      '.present_probe = "/run/m19/m19-present-probe", .present_frames = 120, .judge_copy = 1,',
+                      '.present_probe = "/run/m19/m19-present-probe", .present_frames = 120, .judge_copy = 1, .shell = "/bin/sh", .shows = shows,',
+                      '.show_count = sizeof(shows) / sizeof(shows[0]), .show_seconds = 3,',
                       '.xorg_logs = {"/var/log/Xorg.0.log", "/var/log/Xorg.cpu.log"}', '.battery_limit = 420, ', '.session_ms = 900000, ',
                       '.guard_unit = "m19-r3-guard.service"', '.units = {"marble-xfce.service", "marble-xorg.service", "marble-xorg-fallback.service"}'):
             self.assertIn(field, text)
         # R4h: no compositor views; R4d's compositor would black out the panel again.
         self.assertNotIn('.compositor_script', text)
+        # R4i: six ways glxgears' frames can reach the X server, in this order.
+        table = re.search(r'static const struct m19_show shows\[\] = \{(.*?)\};', text, re.S).group(1)
+        self.assertEqual(re.findall(r'\{"(\w+)", (\w+)\}', table), [('dri3', 'dri3_env'), ('noubwc', 'noubwc_env'), ('linear', 'linear_env'),
+                                                                     ('zink', 'zink_env'), ('copy', 'copy_env'), ('soft', 'soft_env')])
+        dri3 = '"MESA_LOADER_DRIVER_OVERRIDE=kgsl", "FD_FORCE_KGSL=1", "FD_KGSL_ENABLE_DMABUF=1", M19_VK_ICD'
+        self.assertIn(f'#define M19_DRI3 {dri3}\n', text)
+        for name, items in (('noubwc', 'M19_DRI3, "FD_MESA_DEBUG=noubwc", NULL'), ('linear', 'M19_DRI3, "FD_MESA_DEBUG=noubwc,notile", NULL'),
+                            ('zink', 'M19_VK_ICD, "MESA_LOADER_DRIVER_OVERRIDE=zink", NULL'), ('soft', '"LIBGL_ALWAYS_SOFTWARE=1", NULL')):
+            self.assertIn(f'static const char *const {name}_env[] = {{{items}}};', text)
         # The reporter tests with exactly the variables the session's profiles carry.
         icd = re.search(r'#define M19_VK_ICD "([^"]+)"', text).group(1)
         for name, want in (('dri3_env', r4plan.DRI3_ENV), ('copy_env', r4plan.COPY_ENV)):
@@ -1534,7 +1544,11 @@ case "$1" in
   exit "$(cat "$d/present-$1-rc")";;
  vblank) [ "$#" = 3 ] && [ "$2" = 120 ] && [ "${3##*/}" = card ] || exit 64; cat "$d/vblank-out"; exit "$(cat "$d/vblank-rc")";;
  crtc) [ "$#" = 3 ] && [ "$2" = 50 ] && [ "${3##*/}" = card ] || exit 64; cat "$d/crtc-$state-out"; exit "$(cat "$d/crtc-rc")";;
- root) [ "$#" = 1 ] || exit 64; cat "$d/root-$state-out";;
+ root) [ "$#" = 1 ] || exit 64
+  if [ "${LIBGL_ALWAYS_SOFTWARE:-}" = 1 ]; then cat "$d/root-soft-out"
+  elif [ "${MESA_VK_WSI_DEBUG:-}" = sw ]; then cat "$d/root-copy-out"
+  elif [ "${MESA_LOADER_DRIVER_OVERRIDE:-}" = kgsl ]; then cat "$d/root-dri3-out"
+  else cat "$d/root-$state-out"; fi;;
  *) exit 64;;
 esac
 '''), ('gpu-compositor', '''d=$(dirname "$0")
@@ -1607,6 +1621,9 @@ class Gpu(DesktopFixture):
                            ('crtc-on-out', CRTC.format(fb=77, fbs=2, changes=50)), ('crtc-off-out', CRTC.format(fb=76, fbs=1, changes=0)),
                            ('root-session-out', ROOT.format(nonblack=912, mean=96)), ('root-on-out', ROOT.format(nonblack=0, mean=0)),
                            ('root-off-out', ROOT.format(nonblack=905, mean=95)),
+                           # R4i: glxgears covering the screen, black through DRI3, drawn through the copy and software paths.
+                           ('root-dri3-out', ROOT.format(nonblack=0, mean=0)), ('root-copy-out', ROOT.format(nonblack=140, mean=29)),
+                           ('root-soft-out', ROOT.format(nonblack=152, mean=31)),
                            ('present-copy-on-out', PRESENT.format(mode='copy', done=120, copies=120, flips=0, msc='2.01', us=16750) +
                             'M19 PRESENT copy ok\n'),
                            ('present-flip-on-out', PRESENT.format(mode='flip', done=120, copies=120, flips=0, msc='2.01', us=16750) +
@@ -1626,9 +1643,12 @@ class Gpu(DesktopFixture):
 
     def gpu(self, log):
         fields = {}
-        for line in ('gpu', 'gpu-names', 'gpu-renderers', 'glamor', 'glamor-renderers', 'present', 'vblank', 'compositor'):
+        for line in ('gpu', 'gpu-names', 'gpu-renderers', 'glamor', 'glamor-renderers', 'present', 'vblank', 'compositor', 'shows'):
             fields.update(item.split('=', 1) for item in re.search(rf'M19 R4 {line} (.*)\n', log).group(1).split())
         return fields
+
+    def shows(self, log):
+        return {name: dict(item.split('=', 1) for item in fields.split()) for name, fields in re.findall(r'M19 R4 show (\w+) (.*)\n', log)}
 
     def views(self, log):
         return {name: dict(item.split('=', 1) for item in fields.split()) for name, fields in re.findall(r'M19 R4 view (\w+) (.*)\n', log)}
@@ -1646,7 +1666,15 @@ class Gpu(DesktopFixture):
         self.assertGreater(float(g['cube_fps']), 0)
         self.assertEqual(self.desktop(log)['touch_ok'], '1')
         self.assertIn('M19STEP T12-gpu START', steps)
-        self.assertIn('M19STEP T12-gpu END 1 1 1 1 1 1 1 1 1 1 1 1 1', steps)
+        self.assertIn('M19STEP T12-gpu END 1 1 1 1 1 1 1 1 1 1 1 1 1 1', steps)
+        # R4i: glxgears covering the screen through each path, the screen read while it runs.
+        self.assertEqual((g['ran'], g['of'], g['visible'], g['shows_ok']), ('3', '3', '2', '1'))
+        self.assertEqual(self.shows(log), {'dri3': {'nonblack': '0', 'mean': '0'}, 'copy': {'nonblack': '140', 'mean': '29'},
+                                           'soft': {'nonblack': '152', 'mean': '31'}})
+        script = f'{self.test}/glxgears -fullscreen & gears=$!; sleep 0; {self.test}/present-probe root; kill $gears; wait $gears; exit 0'
+        self.assertIn(f'M19 show dri3\nM19 $ {DRI3} /bin/sh -c {script}\n', log)
+        self.assertIn(f'M19 show copy\nM19 $ {COPY} /bin/sh -c {script}\n', log)
+        self.assertIn(f'M19 show soft\nM19 $ LIBGL_ALWAYS_SOFTWARE=1 /bin/sh -c {script}\n', log)
         # R4e: the kernel's vblanks, then three views of the screen around R4d's compositor, on then off.
         self.assertEqual((g['wait_seq'], g['wait_us'], g['event_seq'], g['event_us'], g['late'], g['vblank_ok']),
                          ('1.00', '8355', '2.00', '16710', '120', '1'))
@@ -1723,6 +1751,8 @@ class Gpu(DesktopFixture):
                                                                                           us=8333)), 'copy_ok', '0', {}),
             'failed_copy_run': (lambda: (test / 'present-copy-rc').write_text('1\n'), 'copy_ok', '0', {}),
             'no_copy_line': (lambda: (test / 'present-copy-out').write_text('M19 PRESENT copy FAIL connect\n'), 'copy_done', '-1', {}),
+            # R4i: every path's screen must be read.
+            'show_unread': (lambda: (test / 'root-copy-out').write_text('M19 PRESENT root FAIL connect\n'), 'shows_ok', '0', {}),
         }
         for change, (apply, flag, value, env) in changes.items():
             with self.subTest(change=change):
@@ -1746,6 +1776,15 @@ class Gpu(DesktopFixture):
                                        'mean': '0'})
         self.assertEqual(views['off'], {'owner': '0', 'gl': '0', 'fb': '76', 'fbs': '1', 'changes': '0', 'pitch': '4352', 'nonblack': '-1',
                                         'mean': '-1'})
+
+    def test_an_unread_screen_reads_minus_one_and_black_is_not_visible(self):
+        (self.test / 'root-copy-out').write_text('M19 PRESENT root FAIL connect\n')
+        (self.test / 'root-soft-out').write_text(ROOT.format(nonblack=4, mean=1))
+        _, log, _ = self.run_gpu()
+        g = self.gpu(log)
+        self.assertEqual((g['ran'], g['visible'], g['shows_ok']), ('2', '0', '0'))
+        self.assertEqual(self.shows(log)['copy'], {'nonblack': '-1', 'mean': '-1'})
+        self.assertEqual(self.shows(log)['soft'], {'nonblack': '4', 'mean': '1'})
 
     def test_page_flips_and_the_composited_runs_are_recorded_not_judged(self):
         test = self.test
@@ -1785,7 +1824,7 @@ class Gpu(DesktopFixture):
     def test_without_views_the_compositor_is_never_touched(self):
         fields, log, steps = self.run_gpu(M19_TEST_NO_VIEWS='1')
         self.assertEqual(fields[3:], ['1', '0'])
-        self.assertIn('M19STEP T12-gpu END 1 1 1 1 1 1 1 1 1 0 0 0 1', steps)
+        self.assertIn('M19STEP T12-gpu END 1 1 1 1 1 1 1 1 1 0 0 0 1 1', steps)
         for text in ('M19 R4 vblank', 'M19 R4 compositor', 'M19 R4 view', 'M19 view', 'present-probe vblank', 'present-probe crtc', 'gpu-compositor'):
             self.assertNotIn(text, log)
         self.assertFalse((self.test / 'compositor-calls').exists())
@@ -1805,7 +1844,7 @@ class Gpu(DesktopFixture):
         self.assertLess(time.monotonic() - started, 25)
         g = self.gpu(log)
         self.assertEqual((fields[3], g['cube'], g['gl'], g['gears'], g['glamor_ok']), ('0', '0', '1', '1', '1'))
-        self.assertIn('M19STEP T12-gpu END 1 1 1 0 1 1 1 1 1 1 1 1 1', steps)
+        self.assertIn('M19STEP T12-gpu END 1 1 1 0 1 1 1 1 1 1 1 1 1 1', steps)
 
 LOADER = '''#!/bin/sh
 echo "$*" >> "$M19_TEST/load.log"
