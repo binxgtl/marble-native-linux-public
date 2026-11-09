@@ -1151,11 +1151,14 @@ class CardProbe(unittest.TestCase):
         self.card = Path(directory.name) / 'card0'
         self.card.write_text('')
 
-    def run_probe(self, *arguments, egl_lib=None, **fake):
-        environment = {key: value for key, value in os.environ.items() if not key.startswith(('ASAN', 'UBSAN', 'M19_FAKE_', 'DISPLAY', 'M19_EGL'))}
+    def run_probe(self, *arguments, egl_lib=None, gles_lib=None, **fake):
+        environment = {key: value for key, value in os.environ.items()
+                       if not key.startswith(('ASAN', 'UBSAN', 'M19_FAKE_', 'DISPLAY', 'M19_EGL', 'M19_GLES'))}
         environment.update(LD_PRELOAD=self.fake, DISPLAY=':119', **{f'M19_FAKE_{key.upper()}': value for key, value in fake.items()})
         if egl_lib:
             environment['M19_EGL_LIB'] = egl_lib
+        if gles_lib:
+            environment['M19_GLES_LIB'] = gles_lib
         return subprocess.run([self.probe, *arguments], capture_output=True, text=True, env=environment, timeout=60)
 
     def vblank(self, out):
@@ -1219,6 +1222,9 @@ class CardProbe(unittest.TestCase):
         for mode in ('gpuwrite', 'chain'):
             done = self.run_probe(mode, egl_lib='/nonexistent/libEGL.so.1')
             self.assertEqual((done.returncode, done.stdout), (1, f'M19 PRESENT {mode} FAIL egl load\n'), mode)
+        # EGL alone missing is enough, whatever GLES does.
+        done = self.run_probe('gpuwrite', egl_lib='/nonexistent/libEGL.so.1', gles_lib='libc.so.6')
+        self.assertEqual((done.returncode, done.stdout), (1, 'M19 PRESENT gpuwrite FAIL egl load\n'))
 
     def test_crtc_failures(self):
         for fail, want in (('resources', 'M19 PRESENT crtc FAIL resources errno=22\n'), ('crtc', 'M19 PRESENT crtc FAIL no active crtc\n')):
@@ -1821,13 +1827,14 @@ class Gpu(DesktopFixture):
 
     def test_failed_dma_buf_readings_read_minus_one_and_are_not_judged(self):
         (self.test / 'xread-out').write_text('M19 PRESENT xread FAIL heap open errno=2\n')
-        (self.test / 'gpuwrite-out').write_text('M19 PRESENT gpuwrite FAIL export\n')
+        # A line without its value: what a later line holds is not taken for it.
+        (self.test / 'gpuwrite-out').write_text('M19 PRESENT gpuwrite renderer=FD725 fourcc=0 modifier=0 stride=1024\nM19 PRESENT later cpu=5\n')
         (self.test / 'chain-out').write_text('M19 PRESENT chain renderer=FD725 fourcc=0 modifier=0 stride=1024 cpu=x\nM19 PRESENT chain FAIL no dri3\n')
         fields, log, _ = self.run_gpu()
         g = self.gpu(log)
         self.assertEqual((fields[3], g['gpu_ok']), ('1', '1'))
         self.assertEqual((g['xread_cpu'], g['xread_pixmap'], g['xread_window'], g['gpu_cpu'], g['chain_cpu'], g['chain_pixmap'], g['chain_window'],
-                          g['dmabuf_renderer']), ('-1', '-1', '-1', '-1', '-1', '-1', '-1', 'none'))
+                          g['dmabuf_renderer']), ('-1', '-1', '-1', '-1', '-1', '-1', '-1', 'FD725'))
 
     def test_an_unread_screen_reads_minus_one_and_black_is_not_visible(self):
         (self.test / 'root-copy-out').write_text('M19 PRESENT root FAIL connect\n')
