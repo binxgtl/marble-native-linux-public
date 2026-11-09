@@ -717,11 +717,12 @@ class Static(unittest.TestCase):
                       '.glxinfo = "/usr/bin/glxinfo"', '.glxgears = "/usr/bin/glxgears"', '.eglinfo = "/usr/bin/eglinfo"',
                       '.vk_env = dri3_env, .gl_env = dri3_env, .egl_env = dri3_env, .glamor = 1, .xorg_unit = "marble-xorg.service"',
                       '.gpu_profile = "/run/m19/gpu-profile", .glmark2 = "/usr/bin/glmark2", .copy_env = copy_env',
-                      '.present_probe = "/run/m19/m19-present-probe", .present_frames = 120, .shell = "/bin/sh", '
-                      '.compositor_script = "/etc/m19/gpu-compositor",', '.vblank_frames = 120, .crtc_samples = 50, .compose_ms = 10000,',
+                      '.present_probe = "/run/m19/m19-present-probe", .present_frames = 120, .judge_copy = 1,',
                       '.xorg_logs = {"/var/log/Xorg.0.log", "/var/log/Xorg.cpu.log"}', '.battery_limit = 420, ', '.session_ms = 900000, ',
                       '.guard_unit = "m19-r3-guard.service"', '.units = {"marble-xfce.service", "marble-xorg.service", "marble-xorg-fallback.service"}'):
             self.assertIn(field, text)
+        # R4h: no compositor views; R4d's compositor would black out the panel again.
+        self.assertNotIn('.compositor_script', text)
         # The reporter tests with exactly the variables the session's profiles carry.
         icd = re.search(r'#define M19_VK_ICD "([^"]+)"', text).group(1)
         for name, want in (('dri3_env', r4plan.DRI3_ENV), ('copy_env', r4plan.COPY_ENV)):
@@ -1440,9 +1441,16 @@ class Desktop(DesktopFixture):
                 elif change == 'irq':
                     (self.test / 'interrupts-after').unlink()
                 else:
-                    (self.test / 'xi2').write_text('EVENT type 6 (Motion)\n')
+                    (self.test / 'xi2').write_text('EVENT type 9 (FocusIn)\nEVENT type 7 (Enter)\n')
                 fields, log, _ = self.parse(self.run_desktop()[0])
                 self.assertEqual((fields[3], self.desktop(log)['touch_ok']), ('0', '0'))
+
+    def test_a_swipe_already_under_way_counts_by_its_updates(self):
+        (self.test / 'xi2').write_text('EVENT type 19 (TouchUpdate)\nEVENT type 23 (RawTouchUpdate)\nEVENT type 6 (Motion)\n'
+                                       'EVENT type 17 (RawMotion)\nEVENT type 19 (TouchUpdate)\n')
+        fields, log, steps = self.parse(self.run_desktop()[0])
+        self.assertEqual((fields[3], self.desktop(log)['touch_events'], self.desktop(log)['touch_ok']), ('1', '5', '1'))
+        self.assertIn('M19STEP T12-touch END 12 5', steps)
 
     def test_a_tripped_or_stopped_guard_fails_the_run(self):
         (self.root / 'guard-tripped').write_text('battery')
@@ -1523,7 +1531,7 @@ case "$1" in
   if [ "$state" = on ]; then n=$(($(cat "$d/on-queries") + 1)); echo "$n" >"$d/on-queries"; [ "$n" -gt 1 ] || owner=0x00000000; fi
   echo "M19 PRESENT compositor owner=$owner"; exit "$(cat "$d/present-compositor-rc")";;
  copy|flip) [ "$#" = 2 ] && [ "$2" = 120 ] || exit 64; mode=$1; [ "$state" != on ] || mode=$1-on; cat "$d/present-$mode-out"
-  [ "$1" = copy ] || exit "$(cat "$d/present-flip-rc")";;
+  exit "$(cat "$d/present-$1-rc")";;
  vblank) [ "$#" = 3 ] && [ "$2" = 120 ] && [ "${3##*/}" = card ] || exit 64; cat "$d/vblank-out"; exit "$(cat "$d/vblank-rc")";;
  crtc) [ "$#" = 3 ] && [ "$2" = 50 ] && [ "${3##*/}" = card ] || exit 64; cat "$d/crtc-$state-out"; exit "$(cat "$d/crtc-rc")";;
  root) [ "$#" = 1 ] || exit 64; cat "$d/root-$state-out";;
@@ -1587,7 +1595,8 @@ class Gpu(DesktopFixture):
         (self.test / 'glmark2-rc').write_text('0\n')
         (self.test / 'eglinfo-out').write_text('Surfaceless platform:\nEGL vendor string: Mesa Project\nOpenGL ES profile renderer: FD725\n')
         (self.test / 'eglinfo-rc').write_text('0\n')
-        (self.test / 'present-copy-out').write_text(PRESENT.format(mode='copy', done=120, copies=120, flips=0, msc='2.00', us=16667) + 'M19 PRESENT copy ok\n')
+        (self.test / 'present-copy-out').write_text(PRESENT.format(mode='copy', done=120, copies=120, flips=0, msc='1.00', us=8333) + 'M19 PRESENT copy ok\n')
+        (self.test / 'present-copy-rc').write_text('0\n')
         (self.test / 'present-flip-out').write_text(PRESENT.format(mode='flip', done=120, copies=2, flips=118, msc='1.00', us=8333) + 'M19 PRESENT flip ok\n')
         (self.test / 'present-flip-rc').write_text('0\n')
         (self.test / 'present-compositor-rc').write_text('0\n')
@@ -1637,7 +1646,7 @@ class Gpu(DesktopFixture):
         self.assertGreater(float(g['cube_fps']), 0)
         self.assertEqual(self.desktop(log)['touch_ok'], '1')
         self.assertIn('M19STEP T12-gpu START', steps)
-        self.assertIn('M19STEP T12-gpu END 1 1 1 1 1 1 1 1 1 1 1 1', steps)
+        self.assertIn('M19STEP T12-gpu END 1 1 1 1 1 1 1 1 1 1 1 1 1', steps)
         # R4e: the kernel's vblanks, then three views of the screen around R4d's compositor, on then off.
         self.assertEqual((g['wait_seq'], g['wait_us'], g['event_seq'], g['event_us'], g['late'], g['vblank_ok']),
                          ('1.00', '8355', '2.00', '16710', '120', '1'))
@@ -1659,9 +1668,9 @@ class Gpu(DesktopFixture):
         self.assertEqual(order, sorted(order))
         self.assertIn('use_compositing=true\nvblank_mode=on\n', log)
         self.assertLess(steps.index('M19STEP T12-touch END 12 2'), steps.index('M19STEP T12-gpu START'))
-        # Page flips: the probe's copy run is recorded as it is, the flip run passes; glxgears also ran fullscreen.
-        self.assertEqual((g['copy_done'], g['copy_msc'], g['copy_us'], g['flip_done'], g['flips'], g['flip_msc'], g['flip_us'], g['gears_full_fps'],
-                          g['flip_ok']), ('120', '2.00', '16667', '120', '118', '1.00', '8333', '119.9', '1'))
+        # The copy run takes one vblank a frame (judged since R4h); the flip run is recorded; glxgears also ran fullscreen.
+        self.assertEqual((g['copy_done'], g['copy_msc'], g['copy_us'], g['copy_ok'], g['flip_done'], g['flips'], g['flip_msc'], g['flip_us'],
+                          g['gears_full_fps'], g['flip_ok']), ('120', '1.00', '8333', '1', '120', '118', '1.00', '8333', '119.9', '1'))
         self.assertIn(f'M19 $ {self.test}/present-probe copy 120\n', log)
         self.assertIn(f'M19 $ {self.test}/present-probe flip 120\n', log)
         self.assertIn(f'M19 $ {DRI3} {self.test}/glxgears -fullscreen\n', log)
@@ -1707,6 +1716,13 @@ class Gpu(DesktopFixture):
             'crtc_rc': (lambda: (test / 'crtc-rc').write_text('1\n'), 'scanout_ok', '0', {}),
             'crtc_line': (lambda: (test / 'crtc-on-out').write_text('M19 PRESENT crtc FAIL sample errno=22\n'), 'scanout_ok', '0', {}),
             'root_line': (lambda: (test / 'root-off-out').write_text('M19 PRESENT root FAIL connect\n'), 'scanout_ok', '0', {}),
+            # R4h: a windowed copy must take one vblank a frame, every frame.
+            'slow_copy': (lambda: (test / 'present-copy-out').write_text(PRESENT.format(mode='copy', done=120, copies=120, flips=0, msc='2.00',
+                                                                                         us=16667)), 'copy_ok', '0', {}),
+            'short_copy': (lambda: (test / 'present-copy-out').write_text(PRESENT.format(mode='copy', done=119, copies=119, flips=0, msc='1.00',
+                                                                                          us=8333)), 'copy_ok', '0', {}),
+            'failed_copy_run': (lambda: (test / 'present-copy-rc').write_text('1\n'), 'copy_ok', '0', {}),
+            'no_copy_line': (lambda: (test / 'present-copy-out').write_text('M19 PRESENT copy FAIL connect\n'), 'copy_done', '-1', {}),
         }
         for change, (apply, flag, value, env) in changes.items():
             with self.subTest(change=change):
@@ -1766,11 +1782,15 @@ class Gpu(DesktopFixture):
         g = self.gpu(log)
         self.assertEqual((fields[3], g['egl'], g['glmark2'], g['gpu_ok']), ('1', '0', '-1', '1'))
 
-    def test_the_copy_path_is_recorded_not_judged(self):
-        (self.test / 'present-copy-out').write_text('M19 PRESENT copy FAIL timeout after 3\n')
-        fields, log, _ = self.run_gpu()
-        g = self.gpu(log)
-        self.assertEqual((fields[3], g['copy_done'], g['flip_ok'], g['gpu_ok']), ('1', '-1', '1', '1'))
+    def test_without_views_the_compositor_is_never_touched(self):
+        fields, log, steps = self.run_gpu(M19_TEST_NO_VIEWS='1')
+        self.assertEqual(fields[3:], ['1', '0'])
+        self.assertIn('M19STEP T12-gpu END 1 1 1 1 1 1 1 1 1 0 0 0 1', steps)
+        for text in ('M19 R4 vblank', 'M19 R4 compositor', 'M19 R4 view', 'M19 view', 'present-probe vblank', 'present-probe crtc', 'gpu-compositor'):
+            self.assertNotIn(text, log)
+        self.assertFalse((self.test / 'compositor-calls').exists())
+        self.assertRegex(log, r'M19 R4 present copy_done=120 copy_msc=1.00 .* copy_ok=1\n')
+        self.assertRegex(log, r'M19 R4 gpu node=1 .* gpu_ok=1\n')
 
     def test_without_x_the_gpu_phase_does_not_run(self):
         (self.test / 'x-up').unlink()
@@ -1785,7 +1805,7 @@ class Gpu(DesktopFixture):
         self.assertLess(time.monotonic() - started, 25)
         g = self.gpu(log)
         self.assertEqual((fields[3], g['cube'], g['gl'], g['gears'], g['glamor_ok']), ('0', '0', '1', '1', '1'))
-        self.assertIn('M19STEP T12-gpu END 1 1 1 0 1 1 1 1 1 1 1 1', steps)
+        self.assertIn('M19STEP T12-gpu END 1 1 1 0 1 1 1 1 1 1 1 1 1', steps)
 
 LOADER = '''#!/bin/sh
 echo "$*" >> "$M19_TEST/load.log"

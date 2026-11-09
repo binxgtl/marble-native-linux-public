@@ -250,7 +250,11 @@ static int report_gpu_mode(char **argv)
                            .glxgears = paths[26], .eglinfo = paths[27], .vk_env = test_dri3_env, .gl_env = test_dri3_env,
                            .egl_env = test_dri3_env, .glamor = 1, .xorg_unit = "marble-xorg.service", .gpu_profile = paths[28],
                            .glmark2 = paths[29], .copy_env = test_copy_env, .present_probe = paths[30], .present_frames = 120,
-                           .shell = "/bin/sh", .compositor_script = paths[31], .vblank_frames = 120, .crtc_samples = 50, .compose_ms = 500};
+                           .shell = "/bin/sh", .compositor_script = paths[31], .vblank_frames = 120, .crtc_samples = 50, .compose_ms = 500,
+                           .judge_copy = 1};
+    /* R4h's PID 1 runs without the compositor views. */
+    if (getenv("M19_TEST_NO_VIEWS"))
+        c.compositor_script = NULL;
     return m19_report_main(&c);
 }
 

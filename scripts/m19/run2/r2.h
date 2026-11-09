@@ -62,6 +62,8 @@ struct m19_report {
      * framebuffer crtc_samples times and reads the root window. The compositor gets compose_ms to come or go. */
     const char *shell, *compositor_script;
     unsigned vblank_frames, crtc_samples, compose_ms;
+    /* R4h: the probe's windowed copy must take one vblank a frame (R4g's whole-rate Present). */
+    unsigned judge_copy;
 };
 
 /* R3's guard, a service of its own beside the desktop. It stops the desktop units and paints YELLOW

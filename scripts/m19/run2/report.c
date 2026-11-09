@@ -586,8 +586,10 @@ static void desktop_phase(const struct m19_report *c, int tty, struct desktop *d
     events[taken] = 0;
     long after = touch_irqs(c);
     d->irq_delta = before >= 0 && after >= 0 ? after - before : -1;
+    /* (R4h) Updates and motion too: a swipe begun before the window gives no begin event. */
     d->events = count_text(events, "(TouchBegin)") + count_text(events, "(RawTouchBegin)") + count_text(events, "(ButtonPress)") +
-                count_text(events, "(RawButtonPress)");
+                count_text(events, "(RawButtonPress)") + count_text(events, "(TouchUpdate)") + count_text(events, "(RawTouchUpdate)") +
+                count_text(events, "(Motion)") + count_text(events, "(RawMotion)");
     d->touch_ok = d->touch_device && d->irq_delta > 0 && d->events > 0;
     (void)m19_wire_line(tty, c->pace_ms, M19_DEVICE_STEP " T12-touch END %ld %d", d->irq_delta, d->events);
 }
@@ -600,8 +602,8 @@ struct view {
 };
 
 struct gpu {
-    int node, probe, vk, cube, gl, gears, egl, glamor_init, glamor_on, xorg_unit, glamor_ok, flip_ok, compositor_ok, vblank_ok, scanout_ok, on_rc,
-        off_rc;
+    int node, probe, vk, cube, gl, gears, egl, glamor_init, glamor_on, xorg_unit, glamor_ok, flip_ok, copy_ok, compositor_ok, vblank_ok, scanout_ok,
+        on_rc, off_rc;
     long cube_ms, glmark2, copy_done, copies, flip_done, flips, late, composited_done, composited_copies, composited_flips;
     double cube_fps, gears_fps, xorg_cpu, copy_msc, copy_us, flip_msc, flip_us, gears_full_fps, wait_seq, wait_us, event_seq, event_us,
         composited_msc, composited_cube_fps;
@@ -926,9 +928,11 @@ static void gpu_phase(const struct m19_report *c, int tty, struct gpu *g)
         char frames_text[16];
         snprintf(frames_text, sizeof(frames_text), "%u", c->present_frames);
         char *copy[] = {(char *)c->present_probe, "copy", frames_text, NULL};
-        (void)section_env(copy, NULL, SECTION_CAP / 8, c->gpu_ms, &start, &length);
+        status = section_env(copy, NULL, SECTION_CAP / 8, c->gpu_ms, &start, &length);
         long ignored;
         present_line(section_text(start, length), "copy", &g->copy_done, &ignored, &ignored, &g->copy_msc, &g->copy_us);
+        /* (R4h) A windowed copy completes on the vblank it asks for: one vblank a frame, at the panel's rate. */
+        g->copy_ok = status == 0 && g->copy_done == (long)c->present_frames && g->copy_msc > 0 && g->copy_msc <= 1.10;
         char *flip[] = {(char *)c->present_probe, "flip", frames_text, NULL};
         status = section_env(flip, NULL, SECTION_CAP / 8, c->gpu_ms, &start, &length);
         long flip_copies;
@@ -993,8 +997,8 @@ static void gpu_phase(const struct m19_report *c, int tty, struct gpu *g)
     status = section_env(egl, c->egl_env, SECTION_CAP / 4, c->gpu_ms, &start, &length);
     line_value(section_text(start, length), "renderer", g->egl_renderer, sizeof(g->egl_renderer));
     g->egl = status == 0 && adreno_named(g->egl_renderer);
-    (void)m19_wire_line(tty, c->pace_ms, M19_DEVICE_STEP " T12-gpu END %d %d %d %d %d %d %d %d %d %d %d %d", g->node, g->probe, g->vk, g->cube,
-                        g->gl, g->gears, g->egl, g->glamor_ok, g->flip_ok, g->compositor_ok, g->vblank_ok, g->scanout_ok);
+    (void)m19_wire_line(tty, c->pace_ms, M19_DEVICE_STEP " T12-gpu END %d %d %d %d %d %d %d %d %d %d %d %d %d", g->node, g->probe, g->vk, g->cube,
+                        g->gl, g->gears, g->egl, g->glamor_ok, g->flip_ok, g->compositor_ok, g->vblank_ok, g->scanout_ok, g->copy_ok);
 }
 
 static void desktop_sections(const struct m19_report *c)
@@ -1270,7 +1274,7 @@ int m19_report_main(const struct m19_report *c)
     if (c->gpu) {
         /* Page flips and the composited runs are recorded, not judged: R4e measures where they fail. */
         gpu_ok = g.node && g.probe && g.vk && g.cube && g.gl && g.gears && (!c->glamor || g.glamor_ok) &&
-                 (!c->compositor_script || (g.compositor_ok && g.vblank_ok && g.scanout_ok));
+                 (!c->compositor_script || (g.compositor_ok && g.vblank_ok && g.scanout_ok)) && (!c->judge_copy || g.copy_ok);
         /* Three lines, each well inside addf's buffer however long the names run. */
         addf("M19 R4 gpu node=%d probe=%d vk=%d cube=%d cube_ms=%ld cube_fps=%.1f gl=%d gears=%d gears_fps=%.1f egl=%d gpu_ok=%d\n", g.node, g.probe,
              g.vk, g.cube, g.cube_ms, g.cube_fps, g.gl, g.gears, g.gears_fps, g.egl, gpu_ok);
@@ -1283,7 +1287,8 @@ int m19_report_main(const struct m19_report *c)
         }
         if (c->present_probe)
             addf("M19 R4 present copy_done=%ld copy_msc=%.2f copy_us=%.0f flip_done=%ld flips=%ld flip_msc=%.2f flip_us=%.0f gears_full_fps=%.1f "
-                 "flip_ok=%d\n", g.copy_done, g.copy_msc, g.copy_us, g.flip_done, g.flips, g.flip_msc, g.flip_us, g.gears_full_fps, g.flip_ok);
+                 "flip_ok=%d copy_ok=%d\n", g.copy_done, g.copy_msc, g.copy_us, g.flip_done, g.flips, g.flip_msc, g.flip_us, g.gears_full_fps, g.flip_ok,
+                 g.copy_ok);
         if (c->compositor_script) {
             addf("M19 R4 vblank wait_seq=%.2f wait_us=%.0f event_seq=%.2f event_us=%.0f late=%ld vblank_ok=%d\n", g.wait_seq, g.wait_us, g.event_seq,
                  g.event_us, g.late, g.vblank_ok);

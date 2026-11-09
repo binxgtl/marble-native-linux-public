@@ -212,9 +212,9 @@ MUTANTS = (
     ('report.c', ' && g->view[1].owner > 0 && g->view[2].owner == 0;', ' && g->view[1].owner > 0;', ('Gpu',)),
     ('report.c', 'g->scanout_ok = g->scanout_ok && g->view[i].crtc_ok && g->view[i].root_ok;', 'g->scanout_ok = g->scanout_ok && g->view[i].crtc_ok;', ('Gpu',)),
     ('report.c', 'g->scanout_ok = g->scanout_ok && g->view[i].crtc_ok && g->view[i].root_ok;', 'g->scanout_ok = g->scanout_ok && g->view[i].root_ok;', ('Gpu',)),
-    ('report.c', '(!c->compositor_script || (g.compositor_ok && g.vblank_ok && g.scanout_ok));', '(!c->compositor_script || (g.vblank_ok && g.scanout_ok));', ('Gpu',)),
-    ('report.c', '(!c->compositor_script || (g.compositor_ok && g.vblank_ok && g.scanout_ok));', '(!c->compositor_script || (g.compositor_ok && g.scanout_ok));', ('Gpu',)),
-    ('report.c', '(!c->compositor_script || (g.compositor_ok && g.vblank_ok && g.scanout_ok));', '(!c->compositor_script || (g.compositor_ok && g.vblank_ok));', ('Gpu',)),
+    ('report.c', '(!c->compositor_script || (g.compositor_ok && g.vblank_ok && g.scanout_ok)) &&', '(!c->compositor_script || (g.vblank_ok && g.scanout_ok)) &&', ('Gpu',)),
+    ('report.c', '(!c->compositor_script || (g.compositor_ok && g.vblank_ok && g.scanout_ok)) &&', '(!c->compositor_script || (g.compositor_ok && g.scanout_ok)) &&', ('Gpu',)),
+    ('report.c', '(!c->compositor_script || (g.compositor_ok && g.vblank_ok && g.scanout_ok)) &&', '(!c->compositor_script || (g.compositor_ok && g.vblank_ok)) &&', ('Gpu',)),
     ('report.c', '    v->gl = xfwm4_gl(c);\n', '    v->gl = 0;\n', ('Gpu',)),
     ('report.c', '        keep = have < 63 ? have : 63;\n', '        keep = 0;\n', ('Gpu',)),
     ('report.c', '    snprintf(samples, sizeof(samples), "%u", c->crtc_samples);', '    snprintf(samples, sizeof(samples), "%u", 5u);', ('Gpu',)),
@@ -236,8 +236,14 @@ MUTANTS = (
     ('r4plan.py', ' export DBUS_SESSION_BUS_ADDRESS\n', '', ('CompositorScript',)),
     ('r4plan.py', '-n -t string -s xpresent &&\n', '-n -t string -s xpresent\n', ('CompositorScript',)),
     ('r4plan.py', ' 2>/dev/null) || value=unset\n', ' 2>/dev/null) || :\n', ('CompositorScript',)),
-    ('pid4.c', '.compositor_script = "/etc/m19/gpu-compositor",', '.compositor_script = "/etc/m19/gpu-session",', ('Static',)),
-    ('pid4.c', '.compose_ms = 10000,', '.compose_ms = 1000,', ('Static',)),
+    # R4h: touch counted by updates and motion too, the copy judged at one vblank, no compositor views.
+    ('report.c', ' + count_text(events, "(TouchUpdate)") + count_text(events, "(RawTouchUpdate)") +', ' +', ('Desktop',)),
+    ('report.c', '                count_text(events, "(Motion)") + count_text(events, "(RawMotion)");', '                0;', ('Desktop',)),
+    ('report.c', 'g->copy_ok = status == 0 && g->copy_done == (long)c->present_frames &&', 'g->copy_ok = g->copy_done == (long)c->present_frames &&', ('Gpu',)),
+    ('report.c', 'g->copy_ok = status == 0 && g->copy_done == (long)c->present_frames &&', 'g->copy_ok = status == 0 &&', ('Gpu',)),
+    ('report.c', ' && g->copy_msc > 0 && g->copy_msc <= 1.10;', ' && g->copy_msc > 0;', ('Gpu',)),
+    ('report.c', ' && (!c->judge_copy || g.copy_ok);', ';', ('Gpu',)),
+    ('pid4.c', '.judge_copy = 1,', '.judge_copy = 0,', ('Static',)),
 )
 
 
