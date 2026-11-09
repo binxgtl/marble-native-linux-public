@@ -80,6 +80,10 @@ for probe in gpu-probe present-probe; do
  $BB cp "$R/m19/m19-$probe" "$new/run/m19/m19-$probe" || fail "$probe"
  $BB chmod 755 "$new/run/m19/m19-$probe" || fail "$probe"
 done
+# R4k: the glFinish preload library, for two of the reporter's glxgears runs only; never for the X server or the session.
+[ -f "$R/m19/m19-glfinish.so" ] && [ ! -L "$R/m19/m19-glfinish.so" ] || fail glfinish
+$BB cp "$R/m19/m19-glfinish.so" "$new/run/m19/m19-glfinish.so" || fail glfinish
+$BB chmod 644 "$new/run/m19/m19-glfinish.so" || fail glfinish
 $BB cp "$plan/xorg-glamor.conf" "$new/run/m19/xorg-glamor.conf" || fail xorg-glamor
 for tool in usr/lib/aarch64-linux-gnu/libvulkan.so.1 usr/share/vulkan/icd.d/freedreno_icd.aarch64.json usr/bin/vulkaninfo usr/bin/vkcube \
  usr/bin/glxinfo usr/bin/glxgears usr/bin/eglinfo usr/bin/glmark2 usr/lib/xorg/modules/libglamoregl.so \

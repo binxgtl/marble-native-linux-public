@@ -16,6 +16,8 @@
  *   gpuwrite     (R4j) the same colour cleared by the GPU into a GL texture exported as a dma-buf, through
  *                EGL without X (Mesa's surfaceless platform), and read back by the CPU
  *   chain        (R4j) gpuwrite's dma-buf handed to the X server as xread's is, and read back
+ *   xlate H      (R4k) xread, but the CPU writes the colour after the X server has imported the buffer
+ *   chainlate    (R4k) chain, but the GPU draws after the X server has imported the buffer, as a program does
  *
  * Every reading is the share of pixels holding the colour, in thousandths. Both windows are override-redirect,
  * so no window manager moves or decorates them. Built against libxcb, libxcb-present and libxcb-dri3; EGL and
@@ -367,9 +369,13 @@ static long read_back(xcb_connection_t *c, xcb_drawable_t drawable)
     return held;
 }
 
+/* (R4k) What happens after the X server has the buffer and before it is read back: the late writes. */
+typedef int (*late_fn)(void *context);
+
 /* fd, a side x side dma-buf of stride bytes a row, goes to the X server through DRI3 as a program's buffer does
- * (xcb closes it once sent). The pixmap is read back, then copied into a window, and the window read back. */
-static int x_show(const char *mode, int fd, unsigned stride)
+ * (xcb closes it once sent). late, when set, runs next. The pixmap is read back, then copied into a window, and
+ * the window read back. */
+static int x_show(const char *mode, int fd, unsigned stride, late_fn late, void *context)
 {
     xcb_connection_t *c = xcb_connect(NULL, NULL);
     if (xcb_connection_has_error(c)) {
@@ -394,6 +400,10 @@ static int x_show(const char *mode, int fd, unsigned stride)
         xcb_disconnect(c);
         return 1;
     }
+    if (late && late(context)) {
+        xcb_disconnect(c);
+        return 1;
+    }
     long from_pixmap = read_back(c, pixmap);
     xcb_window_t window = xcb_generate_id(c);
     uint32_t values[] = {screen->black_pixel, 1};
@@ -411,38 +421,60 @@ static int x_show(const char *mode, int fd, unsigned stride)
     return 0;
 }
 
-static int xread(const char *heap)
+/* A dma-buf from the heap, mapped, and the CPU's writes of the colour into it. */
+struct heap_buffer {
+    const char *mode;
+    int fd;
+    uint8_t *p;
+    size_t size;
+    unsigned stride;
+};
+
+static int cpu_paint(void *context)
 {
-    unsigned stride = M19_SIDE * 4;
-    size_t size = (size_t)stride * M19_SIDE;
+    struct heap_buffer *b = context;
+    sync_dmabuf(b->fd, M19_SYNC_WRITE);
+    for (size_t i = 0; i < b->size; i += 4) {
+        memcpy(b->p + i, colour, 3);
+        b->p[i + 3] = 0xff;
+    }
+    sync_dmabuf(b->fd, M19_SYNC_WRITE | M19_SYNC_END);
+    printf("M19 PRESENT %s cpu=%ld\n", b->mode, holding(b->p, b->stride));
+    return 0;
+}
+
+/* xread paints before the X server has the buffer; xlate (R4k) after. */
+static int heap_read(const char *mode, const char *heap, int late)
+{
+    struct heap_buffer b = {mode, -1, NULL, (size_t)M19_SIDE * 4 * M19_SIDE, M19_SIDE * 4};
     int h = open(heap, O_RDONLY | O_CLOEXEC);
     if (h < 0) {
-        printf("M19 PRESENT xread FAIL heap open errno=%d\n", errno);
+        printf("M19 PRESENT %s FAIL heap open errno=%d\n", mode, errno);
         return 1;
     }
-    struct m19_heap_alloc alloc = {.len = size, .fd_flags = O_RDWR | O_CLOEXEC};
+    struct m19_heap_alloc alloc = {.len = b.size, .fd_flags = O_RDWR | O_CLOEXEC};
     int failed = ioctl(h, M19_HEAP_ALLOC, &alloc);
     close(h);
     if (failed) {
-        printf("M19 PRESENT xread FAIL heap alloc errno=%d\n", errno);
+        printf("M19 PRESENT %s FAIL heap alloc errno=%d\n", mode, errno);
         return 1;
     }
-    int fd = (int)alloc.fd;
-    uint8_t *p = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-    if (p == MAP_FAILED) {
-        printf("M19 PRESENT xread FAIL map errno=%d\n", errno);
-        close(fd);
+    b.fd = (int)alloc.fd;
+    b.p = mmap(NULL, b.size, PROT_READ | PROT_WRITE, MAP_SHARED, b.fd, 0);
+    if (b.p == MAP_FAILED) {
+        printf("M19 PRESENT %s FAIL map errno=%d\n", mode, errno);
+        close(b.fd);
         return 1;
     }
-    sync_dmabuf(fd, M19_SYNC_WRITE);
-    for (size_t i = 0; i < size; i += 4) {
-        memcpy(p + i, colour, 3);
-        p[i + 3] = 0xff;
+    if (!late) {
+        cpu_paint(&b);
+        munmap(b.p, b.size);
+        return x_show(mode, b.fd, b.stride, NULL, NULL);
     }
-    sync_dmabuf(fd, M19_SYNC_WRITE | M19_SYNC_END);
-    printf("M19 PRESENT xread cpu=%ld\n", holding(p, stride));
-    munmap(p, size);
-    return x_show("xread", fd, stride);
+    int rc = x_show(mode, dup(b.fd), b.stride, cpu_paint, &b);
+    munmap(b.p, b.size);
+    close(b.fd);
+    return rc;
 }
 
 /* EGL and GLES, opened at run time: the tree's libglvnd, which hands every call to Mesa. */
@@ -467,10 +499,28 @@ static void *symbol(void *library, const char *name)
     return library ? dlsym(library, name) : NULL;
 }
 
-/* The colour cleared on the GPU into a texture exported as a dma-buf, then read by the CPU. On success *fd is the
- * dma-buf and *stride its row length. */
-static int gpu_write(const char *mode, int *fd, unsigned *stride)
+/* A GL texture exported as a dma-buf, and what clears it on the GPU. */
+struct gl {
+    const char *mode;
+    void (*gen_framebuffers)(int, unsigned *);
+    void (*bind_framebuffer)(unsigned, unsigned);
+    void (*framebuffer_texture)(unsigned, unsigned, unsigned, unsigned, int);
+    unsigned (*framebuffer_status)(unsigned);
+    void (*clear_colour)(float, float, float, float);
+    void (*clear)(unsigned);
+    void (*finish)(void);
+    const char *(*get_string)(unsigned);
+    unsigned texture;
+    int fourcc, fd, stride, offset;
+    uint64_t modifier;
+};
+
+/* EGL's surfaceless platform, a GLES context, a texture, and its export, before anything is drawn. */
+static int gl_open(const char *mode, struct gl *g)
 {
+    memset(g, 0, sizeof(*g));
+    g->mode = mode;
+    g->fd = -1;
     const char *egl_name = getenv("M19_EGL_LIB"), *gles_name = getenv("M19_GLES_LIB");
     void *egl = dlopen(egl_name ? egl_name : "libEGL.so.1", RTLD_NOW | RTLD_LOCAL);
     void *gles = dlopen(gles_name ? gles_name : "libGLESv2.so.2", RTLD_NOW | RTLD_LOCAL);
@@ -495,18 +545,17 @@ static int gpu_write(const char *mode, int *fd, unsigned *stride)
     void (*tex_image)(unsigned, int, int, int, int, int, unsigned, unsigned, const void *) =
         (void (*)(unsigned, int, int, int, int, int, unsigned, unsigned, const void *))symbol(gles, "glTexImage2D");
     void (*tex_parameter)(unsigned, unsigned, int) = (void (*)(unsigned, unsigned, int))symbol(gles, "glTexParameteri");
-    void (*gen_framebuffers)(int, unsigned *) = (void (*)(int, unsigned *))symbol(gles, "glGenFramebuffers");
-    void (*bind_framebuffer)(unsigned, unsigned) = (void (*)(unsigned, unsigned))symbol(gles, "glBindFramebuffer");
-    void (*framebuffer_texture)(unsigned, unsigned, unsigned, unsigned, int) =
-        (void (*)(unsigned, unsigned, unsigned, unsigned, int))symbol(gles, "glFramebufferTexture2D");
-    unsigned (*framebuffer_status)(unsigned) = (unsigned (*)(unsigned))symbol(gles, "glCheckFramebufferStatus");
-    void (*clear_colour)(float, float, float, float) = (void (*)(float, float, float, float))symbol(gles, "glClearColor");
-    void (*clear)(unsigned) = (void (*)(unsigned))symbol(gles, "glClear");
-    void (*finish)(void) = (void (*)(void))symbol(gles, "glFinish");
-    const char *(*get_string)(unsigned) = (const char *(*)(unsigned))symbol(gles, "glGetString");
+    g->gen_framebuffers = (void (*)(int, unsigned *))symbol(gles, "glGenFramebuffers");
+    g->bind_framebuffer = (void (*)(unsigned, unsigned))symbol(gles, "glBindFramebuffer");
+    g->framebuffer_texture = (void (*)(unsigned, unsigned, unsigned, unsigned, int))symbol(gles, "glFramebufferTexture2D");
+    g->framebuffer_status = (unsigned (*)(unsigned))symbol(gles, "glCheckFramebufferStatus");
+    g->clear_colour = (void (*)(float, float, float, float))symbol(gles, "glClearColor");
+    g->clear = (void (*)(unsigned))symbol(gles, "glClear");
+    g->finish = (void (*)(void))symbol(gles, "glFinish");
+    g->get_string = (const char *(*)(unsigned))symbol(gles, "glGetString");
     if (!get_display || !initialize || !bind_api || !create_context || !make_current || !create_image || !export_query || !export_image ||
-        !gen_textures || !bind_texture || !tex_image || !tex_parameter || !gen_framebuffers || !bind_framebuffer || !framebuffer_texture ||
-        !framebuffer_status || !clear_colour || !clear || !finish || !get_string) {
+        !gen_textures || !bind_texture || !tex_image || !tex_parameter || !g->gen_framebuffers || !g->bind_framebuffer || !g->framebuffer_texture ||
+        !g->framebuffer_status || !g->clear_colour || !g->clear || !g->finish || !g->get_string) {
         printf("M19 PRESENT %s FAIL egl symbols\n", mode);
         return 1;
     }
@@ -522,68 +571,88 @@ static int gpu_write(const char *mode, int *fd, unsigned *stride)
         printf("M19 PRESENT %s FAIL egl context\n", mode);
         return 1;
     }
-    unsigned texture = 0, framebuffer = 0;
-    gen_textures(1, &texture);
-    bind_texture(M19_GL_TEXTURE_2D, texture);
+    gen_textures(1, &g->texture);
+    bind_texture(M19_GL_TEXTURE_2D, g->texture);
     tex_parameter(M19_GL_TEXTURE_2D, M19_GL_TEXTURE_MIN_FILTER, M19_GL_NEAREST);
     tex_image(M19_GL_TEXTURE_2D, 0, M19_GL_RGBA, M19_SIDE, M19_SIDE, 0, M19_GL_RGBA, M19_GL_UNSIGNED_BYTE, NULL);
     /* Exported first, as a program's back buffer is shared before it is drawn into. */
-    void *image = create_image(display, context, M19_EGL_GL_TEXTURE_2D_KHR, (void *)(uintptr_t)texture, NULL);
-    int fourcc = 0, planes = 0, fds[4] = {-1, -1, -1, -1}, strides[4] = {0}, offsets[4] = {0};
-    uint64_t modifier = 0;
-    if (!image || !export_query(display, image, &fourcc, &planes, &modifier) || planes != 1 || !export_image(display, image, fds, strides, offsets) ||
-        fds[0] < 0) {
+    void *image = create_image(display, context, M19_EGL_GL_TEXTURE_2D_KHR, (void *)(uintptr_t)g->texture, NULL);
+    int planes = 0, fds[4] = {-1, -1, -1, -1}, strides[4] = {0}, offsets[4] = {0};
+    if (!image || !export_query(display, image, &g->fourcc, &planes, &g->modifier) || planes != 1 ||
+        !export_image(display, image, fds, strides, offsets) || fds[0] < 0) {
         printf("M19 PRESENT %s FAIL export\n", mode);
         return 1;
     }
-    gen_framebuffers(1, &framebuffer);
-    bind_framebuffer(M19_GL_FRAMEBUFFER, framebuffer);
-    framebuffer_texture(M19_GL_FRAMEBUFFER, M19_GL_COLOR_ATTACHMENT0, M19_GL_TEXTURE_2D, texture, 0);
-    if (framebuffer_status(M19_GL_FRAMEBUFFER) != M19_GL_FRAMEBUFFER_COMPLETE) {
-        printf("M19 PRESENT %s FAIL framebuffer\n", mode);
+    g->fd = fds[0];
+    g->stride = strides[0];
+    g->offset = offsets[0];
+    return 0;
+}
+
+/* The colour cleared into the texture on the GPU, waited for, then read by the CPU from the dma-buf. */
+static int gl_paint(void *context)
+{
+    struct gl *g = context;
+    unsigned framebuffer = 0;
+    g->gen_framebuffers(1, &framebuffer);
+    g->bind_framebuffer(M19_GL_FRAMEBUFFER, framebuffer);
+    g->framebuffer_texture(M19_GL_FRAMEBUFFER, M19_GL_COLOR_ATTACHMENT0, M19_GL_TEXTURE_2D, g->texture, 0);
+    if (g->framebuffer_status(M19_GL_FRAMEBUFFER) != M19_GL_FRAMEBUFFER_COMPLETE) {
+        printf("M19 PRESENT %s FAIL framebuffer\n", g->mode);
         return 1;
     }
-    clear_colour(colour[0] / 255.0f, colour[1] / 255.0f, colour[2] / 255.0f, 1.0f);
-    clear(M19_GL_COLOR_BUFFER_BIT);
-    finish();
-    size_t size = (size_t)strides[0] * M19_SIDE + (size_t)offsets[0];
-    uint8_t *p = mmap(NULL, size, PROT_READ, MAP_SHARED, fds[0], 0);
+    g->clear_colour(colour[0] / 255.0f, colour[1] / 255.0f, colour[2] / 255.0f, 1.0f);
+    g->clear(M19_GL_COLOR_BUFFER_BIT);
+    g->finish();
+    size_t size = (size_t)g->stride * M19_SIDE + (size_t)g->offset;
+    uint8_t *p = mmap(NULL, size, PROT_READ, MAP_SHARED, g->fd, 0);
     long cpu = -1;
     if (p != MAP_FAILED) {
-        sync_dmabuf(fds[0], M19_SYNC_READ);
-        cpu = holding(p + offsets[0], (size_t)strides[0]);
-        sync_dmabuf(fds[0], M19_SYNC_READ | M19_SYNC_END);
+        sync_dmabuf(g->fd, M19_SYNC_READ);
+        cpu = holding(p + g->offset, (size_t)g->stride);
+        sync_dmabuf(g->fd, M19_SYNC_READ | M19_SYNC_END);
         munmap(p, size);
     }
     char renderer[64];
-    snprintf(renderer, sizeof(renderer), "%s", get_string(M19_GL_RENDERER) ? get_string(M19_GL_RENDERER) : "none");
+    snprintf(renderer, sizeof(renderer), "%s", g->get_string(M19_GL_RENDERER) ? g->get_string(M19_GL_RENDERER) : "none");
     for (char *at = renderer; *at; at++)
         if (*at == ' ' || *at == '=')
             *at = '_';
-    printf("M19 PRESENT %s renderer=%s fourcc=%08x modifier=%llx stride=%d cpu=%ld\n", mode, renderer, (unsigned)fourcc,
-           (unsigned long long)modifier, strides[0], cpu);
-    *fd = fds[0];
-    *stride = (unsigned)strides[0];
+    printf("M19 PRESENT %s renderer=%s fourcc=%08x modifier=%llx stride=%d cpu=%ld\n", g->mode, renderer, (unsigned)g->fourcc,
+           (unsigned long long)g->modifier, g->stride, cpu);
+    return 0;
+}
+
+/* gpuwrite: drawn, then read by the CPU. chain: then handed to the X server. chainlate (R4k): handed to the X
+ * server first, then drawn. */
+static int gpu_read(const char *mode)
+{
+    struct gl g;
+    if (gl_open(mode, &g))
+        return 1;
+    if (!strcmp(mode, "chainlate")) {
+        int rc = x_show(mode, dup(g.fd), (unsigned)g.stride, gl_paint, &g);
+        close(g.fd);
+        return rc;
+    }
+    if (gl_paint(&g)) {
+        close(g.fd);
+        return 1;
+    }
+    if (!strcmp(mode, "chain"))
+        return x_show(mode, g.fd, (unsigned)g.stride, NULL, NULL);
+    close(g.fd);
+    printf("M19 PRESENT %s ok\n", mode);
     return 0;
 }
 
 int main(int argc, char **argv)
 {
     setvbuf(stdout, NULL, _IOLBF, 0);
-    if (argc == 3 && !strcmp(argv[1], "xread"))
-        return xread(argv[2]);
-    if (argc == 2 && (!strcmp(argv[1], "gpuwrite") || !strcmp(argv[1], "chain"))) {
-        int fd = -1;
-        unsigned stride = 0;
-        if (gpu_write(argv[1], &fd, &stride))
-            return 1;
-        if (argv[1][0] == 'g') {
-            close(fd);
-            printf("M19 PRESENT gpuwrite ok\n");
-            return 0;
-        }
-        return x_show("chain", fd, stride);
-    }
+    if (argc == 3 && (!strcmp(argv[1], "xread") || !strcmp(argv[1], "xlate")))
+        return heap_read(argv[1], argv[2], argv[1][1] == 'l');
+    if (argc == 2 && (!strcmp(argv[1], "gpuwrite") || !strcmp(argv[1], "chain") || !strcmp(argv[1], "chainlate")))
+        return gpu_read(argv[1]);
     if (argc == 2 && !strcmp(argv[1], "compositor"))
         return compositor();
     if (argc == 2 && !strcmp(argv[1], "root"))
@@ -592,7 +661,7 @@ int main(int argc, char **argv)
     int flip = argc == 3 && !strcmp(argv[1], "flip"), copy = argc == 3 && !strcmp(argv[1], "copy");
     long frames = argc == 3 || card ? strtol(argv[2], NULL, 10) : 0;
     if ((!flip && !copy && !card) || frames < 2 || frames > 10000) {
-        fprintf(stderr, "usage: m19-present-probe copy|flip FRAMES, vblank|crtc COUNT CARD, xread HEAP, compositor, root, gpuwrite or chain\n");
+        fprintf(stderr, "usage: m19-present-probe copy|flip FRAMES, vblank|crtc COUNT CARD, xread|xlate HEAP, compositor, root, gpuwrite, chain or chainlate\n");
         return 64;
     }
     if (card)

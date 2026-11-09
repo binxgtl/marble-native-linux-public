@@ -8,7 +8,9 @@ wraps=-Wl,--wrap=umount2,--wrap=mount,--wrap=chroot,--wrap=chdir,--wrap=execve,-
 gcc -std=c11 -O2 -Wall -Wextra -Werror -shared -fPIC "$src/fake-drm.c" -o "$out/libfakedrm.so"
 gcc -std=c11 -O2 -Wall -Wextra -Werror -shared -fPIC "$src/xorg-shim.c" -ldl -o "$out/xorg-shim-test.so"
 gcc -std=c11 -O0 -Wall -Wextra -Werror -rdynamic "$src/test-shim.c" -L"$out" -lfakedrm -Wl,-rpath,"$(cd "$out" && pwd)" -o "$out/test-shim"
-export M19_SHIM_LIB="$(cd "$out" && pwd)/xorg-shim-test.so" M19_SHIM_DRIVER="$(cd "$out" && pwd)/test-shim"
+# R4k: the glFinish preload library, on the same driver.
+gcc -std=c11 -O2 -Wall -Wextra -Werror -shared -fPIC "$src/glfinish.c" -ldl -o "$out/glfinish-test.so"
+export M19_SHIM_LIB="$(cd "$out" && pwd)/xorg-shim-test.so" M19_SHIM_DRIVER="$(cd "$out" && pwd)/test-shim" M19_GLFINISH_LIB="$(cd "$out" && pwd)/glfinish-test.so"
 # The GPU probe needs Vulkan's headers to build. Lavapipe, the runner's only Vulkan device, runs it.
 gcc -std=c11 -O2 -Wall -Wextra -Werror "$src/gpu-probe.c" -ldl -o "$out/gpu-probe-test"
 lvp=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json 2>/dev/null | head -n 1 || true)
@@ -48,6 +50,11 @@ for copy in a b; do
 done
 cmp "$out/xorg-shim-a.so" "$out/xorg-shim-b.so"
 sha256sum "$out/xorg-shim-a.so" | tee -a "$out/run2-binaries.txt"
+for copy in a b; do
+  gcc -std=c11 -Os -Wall -Wextra -Werror -shared -fPIC -Wl,--build-id=none "$src/glfinish.c" -ldl -o "$out/glfinish-$copy.so"
+done
+cmp "$out/glfinish-a.so" "$out/glfinish-b.so"
+sha256sum "$out/glfinish-a.so" | tee -a "$out/run2-binaries.txt"
 # Dynamic on purpose: it opens the tree's own Vulkan loader. Built on the tree's Ubuntu release.
 for copy in a b; do
   gcc -std=c11 -Os -Wall -Wextra -Werror -Wl,--build-id=none "$src/gpu-probe.c" -ldl -o "$out/gpu-probe-$copy"

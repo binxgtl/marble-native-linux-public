@@ -60,6 +60,8 @@ jobs:
             artifacts/m19/**/present-probe-b
             artifacts/m19/**/xorg-shim-a.so
             artifacts/m19/**/xorg-shim-b.so
+            artifacts/m19/**/glfinish-a.so
+            artifacts/m19/**/glfinish-b.so
             artifacts/m19/**/load-heaps-a
             artifacts/m19/**/load-heaps-b
             artifacts/m19/**/*.txt

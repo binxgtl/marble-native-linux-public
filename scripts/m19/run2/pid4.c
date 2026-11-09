@@ -48,8 +48,13 @@ static const char *const noubwc_env[] = {M19_DRI3, "FD_MESA_DEBUG=noubwc", NULL}
 static const char *const linear_env[] = {M19_DRI3, "FD_MESA_DEBUG=noubwc,notile", NULL};
 static const char *const zink_env[] = {M19_VK_ICD, "MESA_LOADER_DRIVER_OVERRIDE=zink", NULL};
 static const char *const soft_env[] = {"LIBGL_ALWAYS_SOFTWARE=1", NULL};
+/* R4k: dri3 and zink again, with glxgears finishing its GPU work before every swap (glfinish.c). If they show,
+ * the X server copied frames the GPU had not drawn yet. */
+#define M19_FINISH "LD_PRELOAD=/run/m19/m19-glfinish.so"
+static const char *const finish_env[] = {M19_DRI3, M19_FINISH, NULL};
+static const char *const zinkfinish_env[] = {M19_VK_ICD, "MESA_LOADER_DRIVER_OVERRIDE=zink", M19_FINISH, NULL};
 static const struct m19_show shows[] = {{"dri3", dri3_env}, {"noubwc", noubwc_env}, {"linear", linear_env}, {"zink", zink_env}, {"copy", copy_env},
-                                        {"soft", soft_env}};
+                                        {"soft", soft_env}, {"finish", finish_env}, {"zinkfinish", zinkfinish_env}};
 
 static const struct m19_report report = {
     .tty = "/dev/ttyGS0", .kmsg = "/dev/kmsg", .proc1_exe = "/proc/1/exe", .block = "/sys/block", .mountinfo = "/proc/self/mountinfo",

@@ -4,6 +4,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include <fcntl.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -69,6 +70,17 @@ struct fake_connector *drmModeGetConnectorCurrent(int fd, uint32_t id)
 {
     (void)fd;
     return make(id);
+}
+
+/* R4k: GL's glFinish and GLX's swap, saying each call, for glfinish.c. */
+void glFinish(void)
+{
+    printf("finish\n");
+}
+
+void glXSwapBuffers(void *display, unsigned long drawable)
+{
+    printf("swap %lu%s\n", drawable, display ? " display" : "");
 }
 
 /* R4g: drmModeDirtyFB as a kernel that takes it, counting the calls. */

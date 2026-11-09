@@ -608,6 +608,7 @@ struct gpu {
         on_rc, off_rc, show_ran, show_visible, shows_ok;
     long show_nonblack[M19_SHOWS_MAX], show_mean[M19_SHOWS_MAX];
     long xread_cpu, xread_pixmap, xread_window, gpu_cpu, chain_cpu, chain_pixmap, chain_window;
+    long xlate_cpu, xlate_pixmap, xlate_window, chainlate_cpu, chainlate_pixmap, chainlate_window;
     char dmabuf_renderer[64];
     long cube_ms, glmark2, copy_done, copies, flip_done, flips, late, composited_done, composited_copies, composited_flips;
     double cube_fps, gears_fps, xorg_cpu, copy_msc, copy_us, flip_msc, flip_us, gears_full_fps, wait_seq, wait_us, event_seq, event_us,
@@ -1039,6 +1040,20 @@ static void gpu_phase(const struct m19_report *c, int tty, struct gpu *g)
             g->chain_cpu = field(text, "M19 PRESENT chain renderer=", "cpu");
             g->chain_pixmap = field(text, "M19 PRESENT chain pixmap=", "pixmap");
             g->chain_window = field(text, "M19 PRESENT chain pixmap=", "window");
+            /* R4k. The same two, written after the X server imported the buffer, as a program draws into its back
+             * buffer after handing it over: by the CPU, then by freedreno. Recorded, not judged. */
+            char *xlate[] = {(char *)c->present_probe, "xlate", (char *)c->dmabuf_heap, NULL};
+            (void)section_env(xlate, NULL, SECTION_CAP / 16, c->gpu_ms, &start, &length);
+            text = section_text(start, length);
+            g->xlate_cpu = field(text, "M19 PRESENT xlate cpu=", "cpu");
+            g->xlate_pixmap = field(text, "M19 PRESENT xlate pixmap=", "pixmap");
+            g->xlate_window = field(text, "M19 PRESENT xlate pixmap=", "window");
+            char *chainlate[] = {(char *)c->present_probe, "chainlate", NULL};
+            (void)section_env(chainlate, c->dmabuf_env, SECTION_CAP / 16, c->gpu_ms, &start, &length);
+            text = section_text(start, length);
+            g->chainlate_cpu = field(text, "M19 PRESENT chainlate renderer=", "cpu");
+            g->chainlate_pixmap = field(text, "M19 PRESENT chainlate pixmap=", "pixmap");
+            g->chainlate_window = field(text, "M19 PRESENT chainlate pixmap=", "window");
         }
     }
 
@@ -1370,6 +1385,9 @@ int m19_report_main(const struct m19_report *c)
             addf("M19 R4 dmabuf xread_cpu=%ld xread_pixmap=%ld xread_window=%ld gpu_cpu=%ld chain_cpu=%ld chain_pixmap=%ld chain_window=%ld "
                  "dmabuf_renderer=%s\n", g.xread_cpu, g.xread_pixmap, g.xread_window, g.gpu_cpu, g.chain_cpu, g.chain_pixmap, g.chain_window,
                  g.dmabuf_renderer);
+        if (c->dmabuf_heap)
+            addf("M19 R4 late xlate_cpu=%ld xlate_pixmap=%ld xlate_window=%ld chainlate_cpu=%ld chainlate_pixmap=%ld chainlate_window=%ld\n",
+                 g.xlate_cpu, g.xlate_pixmap, g.xlate_window, g.chainlate_cpu, g.chainlate_pixmap, g.chainlate_window);
         if (c->show_count) {
             addf("M19 R4 shows ran=%d of=%u visible=%d shows_ok=%d\n", g.show_ran, c->show_count, g.show_visible, g.shows_ok);
             for (unsigned i = 0; i < c->show_count && i < M19_SHOWS_MAX; i++)

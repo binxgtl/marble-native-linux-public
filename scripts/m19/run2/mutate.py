@@ -257,8 +257,8 @@ MUTANTS = (
     ('pid4.c', '"FD_MESA_DEBUG=noubwc,notile"', '"FD_MESA_DEBUG=noubwc"', ('Static',)),
     ('pid4.c', '.show_seconds = 3,', '.show_seconds = 0,', ('Static',)),
     # R4j: which side loses a program's frame.
-    ('present-probe.c', '        memcpy(p + i, colour, 3);\n', '        memcpy(p + i, colour, 2);\n', ('CardProbe',)),
-    ('present-probe.c', '    if (failed) {\n        printf("M19 PRESENT xread FAIL heap alloc', '    if (0) {\n        printf("M19 PRESENT xread FAIL heap alloc', ('CardProbe',)),
+    ('present-probe.c', '        memcpy(b->p + i, colour, 3);\n', '        memcpy(b->p + i, colour, 2);\n', ('CardProbe',)),
+    ('present-probe.c', '    if (failed) {\n        printf("M19 PRESENT %s FAIL heap alloc', '    if (0) {\n        printf("M19 PRESENT %s FAIL heap alloc', ('CardProbe',)),
     ('present-probe.c', '    if (!extension || !extension->present) {\n        printf("M19 PRESENT %s FAIL no dri3', '    if (0) {\n        printf("M19 PRESENT %s FAIL no dri3', ('PresentProbe',)),
     ('present-probe.c', '    if (!egl || !gles || !get_proc) {', '    if (!egl && !gles && !get_proc) {', ('CardProbe',)),
     ('report.c', '            (void)section_env(gpuwrite, c->dmabuf_env,', '            (void)section_env(gpuwrite, NULL,', ('Gpu',)),
@@ -267,6 +267,23 @@ MUTANTS = (
     ('report.c', '    if (!at || at >= line + n)\n        return -1;', '    if (!at)\n        return -1;', ('Gpu',)),
     ('report.c', '            g->xread_window = field(text, "M19 PRESENT xread pixmap=", "window");', '            g->xread_window = g->xread_pixmap;', ('Gpu',)),
     ('pid4.c', '.dmabuf_env = dri3_env,', '.dmabuf_env = copy_env,', ('Static',)),
+    # R4k: writes after the import, and glxgears finishing its GPU work before every swap.
+    ('present-probe.c', "return heap_read(argv[1], argv[2], argv[1][1] == 'l');", 'return heap_read(argv[1], argv[2], 0);', ('PresentProbe',)),
+    ('present-probe.c', ' || !strcmp(argv[1], "xlate")))', '))', ('PresentProbe',)),
+    ('present-probe.c', ' || !strcmp(argv[1], "chainlate")))', '))', ('CardProbe',)),
+    ('present-probe.c', '        printf("M19 PRESENT %s FAIL heap alloc errno=%d\\n", mode, errno);', '        printf("M19 PRESENT xread FAIL heap alloc errno=%d\\n", errno);', ('CardProbe',)),
+    ('glfinish.c', '    if (finish)\n        finish();\n', '', ('Shim',)),
+    ('glfinish.c', '    if (finish)\n        finish();\n    if (real)\n        real(display, drawable);', '    if (real)\n        real(display, drawable);\n    if (finish)\n        finish();', ('Shim',)),
+    ('glfinish.c', '        told = 1;\n', '', ('Shim',)),
+    ('glfinish.c', '    if (real)\n        real(display, drawable);', '', ('Shim',)),
+    ('report.c', '            (void)section_env(chainlate, c->dmabuf_env,', '            (void)section_env(chainlate, NULL,', ('Gpu',)),
+    ('report.c', '            g->xlate_window = field(text, "M19 PRESENT xlate pixmap=", "window");', '            g->xlate_window = g->xlate_pixmap;', ('Gpu',)),
+    ('report.c', '            g->chainlate_window = field(text, "M19 PRESENT chainlate pixmap=", "window");', '            g->chainlate_window = g->chainlate_pixmap;', ('Gpu',)),
+    ('report.c', '            g->xlate_cpu = field(text, "M19 PRESENT xlate cpu=", "cpu");', '            g->xlate_cpu = -1;', ('Gpu',)),
+    ('pid4.c', ', {"finish", finish_env}', '', ('Static',)),
+    ('pid4.c', 'static const char *const finish_env[] = {M19_DRI3, M19_FINISH, NULL};', 'static const char *const finish_env[] = {M19_DRI3, NULL};', ('Static',)),
+    ('t9-gpu', '$BB cp "$R/m19/m19-glfinish.so" "$new/run/m19/m19-glfinish.so" || fail glfinish\n', '', ('GpuScript',)),
+    ('t9-gpu', '[ -f "$R/m19/m19-glfinish.so" ] && [ ! -L "$R/m19/m19-glfinish.so" ] || fail glfinish', '[ -f "$R/m19/m19-glfinish.so" ] || fail glfinish', ('GpuScript',)),
 )
 
 
@@ -318,10 +335,12 @@ def run(number, name, old, new, classes):
             # The preload library on the fake libdrm, as test.sh builds them.
             for command in (['gcc', '-std=c11', '-O2', '-w', '-shared', '-fPIC', 'fake-drm.c', '-o', 'libfakedrm.so'],
                             ['gcc', '-std=c11', '-O2', '-w', '-shared', '-fPIC', 'xorg-shim.c', '-ldl', '-o', 'xorg-shim-test.so'],
+                            ['gcc', '-std=c11', '-O2', '-w', '-shared', '-fPIC', 'glfinish.c', '-ldl', '-o', 'glfinish-test.so'],
                             ['gcc', '-std=c11', '-O0', '-w', '-rdynamic', 'test-shim.c', '-L.', '-lfakedrm', f'-Wl,-rpath,{target}', '-o', 'test-shim']):
                 if subprocess.run(command, cwd=target, capture_output=True, timeout=120).returncode:
                     raise Broken(f'mutant {number} does not compile: {command[-1]}')
-            environment.update(M19_SHIM_LIB=str(target / 'xorg-shim-test.so'), M19_SHIM_DRIVER=str(target / 'test-shim'))
+            environment.update(M19_SHIM_LIB=str(target / 'xorg-shim-test.so'), M19_SHIM_DRIVER=str(target / 'test-shim'),
+                               M19_GLFINISH_LIB=str(target / 'glfinish-test.so'))
         try:
             # The first failure kills the mutant, so the rest of its classes need not run.
             result = subprocess.run([sys.executable, 'test.py', '--failfast', '--driver', 'driver', *classes], cwd=target, capture_output=True,
