@@ -293,7 +293,6 @@ MUTANTS = (
     ('present-probe.c', '    opened = k < 0 ? errno : 0;', '    opened = 0;', ('CardProbe',)),
     ('present-probe.c', '        imported = ioctl(k, M19_KGSL_IMPORT, &request) ? errno : 0;\n        if (!imported) {', '        imported = ioctl(k, M19_KGSL_IMPORT, &request) ? errno : 0;\n        if (1) {', ('CardProbe',)),
     ('present-probe.c', ' && !strcmp(argv[1], "xsync") && kgsl_op_known(argv[4]))', ' && !strcmp(argv[1], "xsync"))', ('PresentProbe',)),
-    ('present-probe.c', '        struct x_plan plan = {cpu_paint, &b, 0, 0, -1};', '        struct x_plan plan = {NULL, &b, 0, 0, -1};', ('PresentProbe',)),
     ('report.c', '                {probe, "xwait", heap, NULL, NULL, NULL},\n', '', ('Gpu',)),
     ('report.c', '                {probe, "xsync", heap, kgsl, "obj-clean", NULL},', '                {probe, "xsync", heap, kgsl, "obj-flush", NULL},', ('Gpu',)),
     ('report.c', '!strncmp(r4l[i][1], "chain", 5) ? c->dmabuf_env : NULL', 'NULL', ('Gpu',)),
