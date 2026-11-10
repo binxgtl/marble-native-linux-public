@@ -1979,6 +1979,8 @@ class Gpu(DesktopFixture):
         for name, text, flag in (('root-dri3-out', ROOT.format(nonblack=4, mean=1), 'shows_ok'),
                                  ('xlate-out', 'M19 PRESENT xlate cpu=1000\nM19 PRESENT xlate pixmap=1000 window=989\n', 'late_ok'),
                                  ('chainlate-out', 'M19 PRESENT chainlate renderer=FD725 cpu=1000\nM19 PRESENT chainlate pixmap=989 window=1000\n', 'late_ok'),
+                                 ('xlate-out', 'M19 PRESENT xlate cpu=1000\nM19 PRESENT xlate pixmap=989 window=1000\n', 'late_ok'),
+                                 ('chainlate-out', 'M19 PRESENT chainlate renderer=FD725 cpu=1000\nM19 PRESENT chainlate pixmap=1000 window=989\n', 'late_ok'),
                                  ('xlate-out', 'M19 PRESENT xlate FAIL no dri3\n', 'late_ok')):
             with self.subTest(name=name, text=text):
                 self.setUp()
