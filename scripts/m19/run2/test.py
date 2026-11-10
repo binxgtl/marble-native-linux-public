@@ -2084,6 +2084,8 @@ class GpuScript(unittest.TestCase):
                      'usr/lib/aarch64-linux-gnu/libGLESv2.so.2'):
             (self.new / tool).parent.mkdir(parents=True, exist_ok=True)
             (self.new / tool).write_text('x\n')
+        # R4n: the tree's Mesa, whose hash the step reports.
+        (self.new / 'usr/lib/aarch64-linux-gnu/libgallium-26.3.0-devel.so').write_bytes(b'\x7fELF gallium')
 
     def run_script(self, **env):
         environment = dict(os.environ, M19_ROOT=str(self.root), M19_BB=str(self.test / 'bb'), M19_TEST=str(self.test),
@@ -2119,6 +2121,8 @@ class GpuScript(unittest.TestCase):
         self.assertEqual(oct((self.new / 'run/m19/m19-glfinish.so').stat().st_mode & 0o777), '0o644')
         self.assertEqual((self.new / 'run/m19/xorg-glamor.conf').read_bytes(), r4plan.render()['m19/r4/xorg-glamor.conf'])
         self.assertIn('M19 T9 gpu: modules=110 firmware=7 kgsl=504:0 heap=248:1 path=/run/m19/firmware\n', result.stderr)
+        gallium = hashlib.sha256(b'\x7fELF gallium').hexdigest()
+        self.assertIn(f'M19 T9 gpu: libgallium sha256={gallium}\n', result.stderr)
 
     def test_missing_firmware_stops_before_any_module(self):
         (self.root / 'm19/gpu-firmware/a730_zap.b02').unlink()
@@ -2158,6 +2162,9 @@ class GpuScript(unittest.TestCase):
         self.setUp()
         (self.root / 'm19/m19-glfinish.so').unlink()
         self.assertFails('glfinish')
+        self.setUp()
+        (self.new / 'usr/lib/aarch64-linux-gnu/libgallium-26.3.0-devel.so').unlink()
+        self.assertFails('mesa-hash')
         self.setUp()
         (self.root / 'm19/m19-glfinish.so').unlink()
         (self.root / 'm19/m19-glfinish.so').symlink_to(self.root / 'm19/m19-present-probe')

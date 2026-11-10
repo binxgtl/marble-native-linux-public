@@ -312,6 +312,9 @@ MUTANTS = (
     ('report.c', '                {gpu, "dmabuf", heap, NULL, NULL},\n', '', ('Gpu',)),
     ('report.c', 'const char *const *const r4m_env[] = {c->dmabuf_env, c->dmabuf_env, c->vk_env, NULL};',
      'const char *const *const r4m_env[] = {c->dmabuf_env, NULL, c->vk_env, NULL};', ('Gpu',)),
+    # R4n: the hash of the Mesa the session loads.
+    ('t9-gpu', "printf 'M19 T9 gpu: libgallium sha256=%s\\n' \"${mesa%% *}\" >&2\n", '', ('GpuScript',)),
+    ('t9-gpu', ') || fail mesa-hash', ') || :', ('GpuScript',)),
 )
 
 

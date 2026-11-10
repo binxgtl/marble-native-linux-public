@@ -91,5 +91,8 @@ for tool in usr/lib/aarch64-linux-gnu/libvulkan.so.1 usr/share/vulkan/icd.d/free
  usr/lib/aarch64-linux-gnu/libxcb-dri3.so.0 usr/lib/aarch64-linux-gnu/libEGL.so.1 usr/lib/aarch64-linux-gnu/libGLESv2.so.2; do
  [ -e "$new/$tool" ] || fail "missing $tool"
 done
+# R4n: which Mesa every process in the session loads, by the hash of the tree's library.
+mesa=$($BB sha256sum "$new/usr/lib/aarch64-linux-gnu/libgallium-26.3.0-devel.so") || fail mesa-hash
+printf 'M19 T9 gpu: libgallium sha256=%s\n' "${mesa%% *}" >&2
 printf 'M19 T9 gpu: modules=%s firmware=%s kgsl=%s heap=%s path=/run/m19/firmware\n' "$after" "$count" "$kgsl" "$heap" >&2
 exit 0
