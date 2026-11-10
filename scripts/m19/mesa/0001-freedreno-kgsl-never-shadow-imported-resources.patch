@@ -1,0 +1,64 @@
+Subject: [PATCH] freedreno/kgsl: never shadow a resource imported from a dma-buf
+
+Base: lfdevs/mesa-for-android-container 98f3d6229d61452cef80f8563af7c56ae599dc14
+
+With FD_KGSL_ENABLE_DMABUF, fd_resource_get_handle() shadowed every resource
+not created with PIPE_BIND_SHARED: it copied the contents into new storage
+once and swapped the resource onto that copy. A resource imported from a
+dma-buf is not created with that bind, and GBM queries the KMS handle of
+every buffer it imports (gbm_dri_bo_import, dri2_query_image ->
+resource_get_handle). So each buffer imported through GBM, as glamor imports
+every DRI3 pixmap, kept the contents it had at import, and no later write by
+the client reached the X server. Import through EGL_LINUX_DMA_BUF_EXT, which
+queries no handle, was unaffected.
+
+Evidence: M19 R4m, docs/m19-r4m-result.md. The same buffer, written after
+import, read 0 of 1000 through GBM and 1000 through EGL in one process.
+The fork made the same change in 84fc50fab2 (2026-10-08), among others.
+
+---
+diff --git a/src/gallium/drivers/freedreno/freedreno_resource.c b/src/gallium/drivers/freedreno/freedreno_resource.c
+index bcb6c2c..7781f26 100644
+--- a/src/gallium/drivers/freedreno/freedreno_resource.c
++++ b/src/gallium/drivers/freedreno/freedreno_resource.c
+@@ -1098,6 +1098,10 @@ fd_resource_get_handle(struct pipe_screen *pscreen, struct pipe_context *pctx,
+    assert_dt
+ {
+    struct fd_resource *rsc = fd_resource(prsc);
++   /* resource_from_handle() marks an imported resource shared.  Sample it
++    * before this function does: a handle query on an imported resource must
++    * never replace its storage. */
++   const bool imported = rsc->b.is_shared;
+ 
+    rsc->b.is_shared = true;
+ 
+@@ -1110,16 +1114,23 @@ fd_resource_get_handle(struct pipe_screen *pscreen, struct pipe_context *pctx,
+       handle->modifier = DRM_FORMAT_MOD_LINEAR;
+ 
+       if (!(prsc->bind & PIPE_BIND_SHARED)) {
+-         struct fd_context *ctx = fd_screen_aux_context_get(pscreen);
+-
+          prsc->bind |= PIPE_BIND_SHARED;
+ 
+-         bool ret = fd_try_shadow_resource(ctx, rsc, 0, NULL, handle->modifier);
++         /* Shadowing copies the contents into new storage once.  For a
++          * resource imported from another process's dma-buf, every later
++          * write by that process would then be lost: GBM queries the handle
++          * of every buffer it imports, so glamor would keep each DRI3 buffer
++          * as it was at import. */
++         if (!imported) {
++            struct fd_context *ctx = fd_screen_aux_context_get(pscreen);
++
++            bool ret = fd_try_shadow_resource(ctx, rsc, 0, NULL, handle->modifier);
+ 
+-         fd_screen_aux_context_put(pscreen);
++            fd_screen_aux_context_put(pscreen);
+ 
+-         if (!ret)
+-            return false;
++            if (!ret)
++               return false;
++         }
+       }
+    }
+ 

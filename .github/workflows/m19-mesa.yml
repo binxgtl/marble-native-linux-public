@@ -1,0 +1,95 @@
+name: m19-mesa
+
+# The tree's Mesa (lfdevs/mesa-for-android-container 98f3d622), with M19's patches, for the X server only.
+# Runs when the patches or this file change, or on demand; never on the M19 offline rounds.
+on:
+  push:
+    branches: [m19/native-ubuntu-fbe]
+    paths:
+      - 'scripts/m19/mesa/**'
+      - '.github/workflows/m19-mesa.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  MESA_REPO: https://github.com/lfdevs/mesa-for-android-container.git
+  MESA_COMMIT: 98f3d6229d61452cef80f8563af7c56ae599dc14
+
+jobs:
+  build:
+    # tree: the fork's own ubuntu-noble configuration, as the tree's library was built.
+    # xorg: freedreno on KGSL only, no LLVM: what the X server loads, at its smallest.
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [tree, xorg]
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Dependencies (the fork's own, for ubuntu-noble)
+        run: |
+          sudo sed -i 's/^Types: deb$/Types: deb deb-src/' /etc/apt/sources.list.d/ubuntu.sources
+          sudo apt-get update
+          sudo apt-get build-dep -y mesa
+          sudo apt-get install -y git libxfixes-dev libarchive-dev xz-utils binutils
+
+      - name: The tree's Mesa source, exactly
+        run: |
+          git init mesa
+          git -C mesa remote add origin "$MESA_REPO"
+          git -C mesa fetch --depth 1 origin "$MESA_COMMIT"
+          git -C mesa checkout --detach FETCH_HEAD
+          test "$(git -C mesa rev-parse HEAD)" = "$MESA_COMMIT"
+          cat mesa/VERSION
+
+      - name: M19's patches, and nothing else changed
+        run: |
+          for patch in scripts/m19/mesa/*.patch; do
+            sha256sum "$patch"
+            git -C mesa apply --verbose "$GITHUB_WORKSPACE/$patch"
+          done
+          git -C mesa diff --stat
+          test "$(git -C mesa diff --name-only)" = src/gallium/drivers/freedreno/freedreno_resource.c
+
+      - name: Build
+        run: |
+          cd mesa
+          common=(--prefix=/usr -Dbuildtype=release -Dgallium-va=disabled -Dgallium-mediafoundation=disabled
+                  -Dvulkan-layers= -Degl=enabled -Dgles2=enabled -Dglvnd=enabled -Dglx=dri -Dlibunwind=disabled
+                  -Dintel-rt=disabled -Dmicrosoft-clc=disabled -Dvalgrind=disabled -Dgles1=disabled -Dfreedreno-kmds=kgsl)
+          if [ "${{ matrix.variant }}" = tree ]; then
+            if [ -x /usr/lib/llvm-20/bin/llvm-config ]; then export LLVM_CONFIG=/usr/lib/llvm-20/bin/llvm-config; fi
+            meson setup build/ "${common[@]}" -Dplatforms=x11,wayland -Dgallium-drivers=freedreno,zink,virgl,llvmpipe \
+              -Dvulkan-drivers=freedreno
+          else
+            meson setup build/ "${common[@]}" -Dplatforms=x11 -Dgallium-drivers=freedreno -Dvulkan-drivers= -Dllvm=disabled
+          fi
+          ninja -C build/
+          DESTDIR="$PWD/install" meson install -C build/ >/dev/null
+
+      - name: What the X server loads, measured
+        run: |
+          cd mesa/install/usr/lib/aarch64-linux-gnu
+          ls -l libgallium-*.so libEGL_mesa.so.0.0.0 libgbm.so.1.0.0 gbm/dri_gbm.so dri/libdril_dri.so
+          out="$GITHUB_WORKSPACE/out/${{ matrix.variant }}"
+          mkdir -p "$out"
+          cp libgallium-*.so libEGL_mesa.so.0.0.0 libgbm.so.1.0.0 gbm/dri_gbm.so dri/libdril_dri.so "$out/"
+          cd "$out"
+          for f in *.so*; do
+            strip --strip-unneeded -o "$f.stripped" "$f"
+            xz -9e -k -c "$f.stripped" > "$f.stripped.xz"
+            printf '%s bytes=%s stripped=%s xz=%s\n' "$f" "$(stat -c %s "$f")" "$(stat -c %s "$f.stripped")" "$(stat -c %s "$f.stripped.xz")"
+          done | tee sizes.txt
+          grep -a -o -m1 'git-[0-9a-f]\{10\}' libgallium-*.so | head -n1
+          readelf -d libgallium-*.so | grep -E 'NEEDED|SONAME'
+          sha256sum * | tee sha256sums.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: m19-mesa-${{ matrix.variant }}-${{ github.sha }}
+          path: out/${{ matrix.variant }}/
+          retention-days: 30
