@@ -1981,12 +1981,14 @@ class Gpu(DesktopFixture):
                                  ('chainlate-out', 'M19 PRESENT chainlate renderer=FD725 cpu=1000\nM19 PRESENT chainlate pixmap=989 window=1000\n', 'late_ok'),
                                  ('xlate-out', 'M19 PRESENT xlate FAIL no dri3\n', 'late_ok')):
             with self.subTest(name=name, text=text):
+                self.setUp()
                 self.judged()
                 (self.test / name).write_text(text)
                 fields, log, _ = self.run_gpu(M19_TEST_JUDGE_DRI3='1')
                 g = self.gpu(log)
                 self.assertEqual((fields[3], g['gpu_ok'], g[flag]), ('0', '0', '0'))
         # Unjudged, as R4i to R4n ran: the same black path and stale read pass.
+        self.setUp()
         self.judged()
         (self.test / 'root-dri3-out').write_text(ROOT.format(nonblack=0, mean=0))
         (self.test / 'xlate-out').write_text('M19 PRESENT xlate cpu=1000\nM19 PRESENT xlate pixmap=0 window=0\n')
