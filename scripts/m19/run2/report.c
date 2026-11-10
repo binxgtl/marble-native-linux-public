@@ -605,7 +605,7 @@ struct view {
 
 struct gpu {
     int node, probe, vk, cube, gl, gears, egl, glamor_init, glamor_on, xorg_unit, glamor_ok, flip_ok, copy_ok, compositor_ok, vblank_ok, scanout_ok,
-        on_rc, off_rc, show_ran, show_visible, shows_ok;
+        on_rc, off_rc, show_ran, show_visible, shows_ok, late_ok;
     long show_nonblack[M19_SHOWS_MAX], show_mean[M19_SHOWS_MAX];
     long xread_cpu, xread_pixmap, xread_window, gpu_cpu, chain_cpu, chain_pixmap, chain_window;
     long xlate_cpu, xlate_pixmap, xlate_window, chainlate_cpu, chainlate_pixmap, chainlate_window;
@@ -1017,7 +1017,7 @@ static void gpu_phase(const struct m19_report *c, int tty, struct gpu *g)
                 g->show_nonblack[i] = g->show_mean[i] = -1;
             }
         }
-        g->shows_ok = g->show_ran == (int)c->show_count;
+        g->shows_ok = g->show_ran == (int)c->show_count && (!c->judge_dri3 || g->show_visible == (int)c->show_count);
         if (c->dmabuf_heap) {
             /* R4j. Which side loses a program's frame: the X server reading a dma-buf the CPU filled, the GPU
              * writing one the CPU reads, and the GPU's handed to the X server. Recorded, not judged. */
@@ -1054,6 +1054,7 @@ static void gpu_phase(const struct m19_report *c, int tty, struct gpu *g)
             g->chainlate_cpu = field(text, "M19 PRESENT chainlate renderer=", "cpu");
             g->chainlate_pixmap = field(text, "M19 PRESENT chainlate pixmap=", "pixmap");
             g->chainlate_window = field(text, "M19 PRESENT chainlate pixmap=", "window");
+            g->late_ok = g->xlate_pixmap >= 990 && g->xlate_window >= 990 && g->chainlate_pixmap >= 990 && g->chainlate_window >= 990;
             /* R4l. Where the X server's view goes stale, and the least KGSL cache maintenance that makes a late
              * write visible: each operation alone and timed, a second import, a delayed read. Recorded in the log
              * as the probe prints them, not judged. */
@@ -1386,7 +1387,7 @@ int m19_report_main(const struct m19_report *c)
         /* Page flips and the composited runs are recorded, not judged: R4e measures where they fail. */
         gpu_ok = g.node && g.probe && g.vk && g.cube && g.gl && g.gears && (!c->glamor || g.glamor_ok) &&
                  (!c->compositor_script || (g.compositor_ok && g.vblank_ok && g.scanout_ok)) && (!c->judge_copy || g.copy_ok) &&
-                 (!c->show_count || g.shows_ok);
+                 (!c->show_count || g.shows_ok) && (!c->judge_dri3 || (c->dmabuf_heap && g.late_ok));
         /* Three lines, each well inside addf's buffer however long the names run. */
         addf("M19 R4 gpu node=%d probe=%d vk=%d cube=%d cube_ms=%ld cube_fps=%.1f gl=%d gears=%d gears_fps=%.1f egl=%d gpu_ok=%d\n", g.node, g.probe,
              g.vk, g.cube, g.cube_ms, g.cube_fps, g.gl, g.gears, g.gears_fps, g.egl, gpu_ok);
@@ -1416,8 +1417,8 @@ int m19_report_main(const struct m19_report *c)
                  "dmabuf_renderer=%s\n", g.xread_cpu, g.xread_pixmap, g.xread_window, g.gpu_cpu, g.chain_cpu, g.chain_pixmap, g.chain_window,
                  g.dmabuf_renderer);
         if (c->dmabuf_heap)
-            addf("M19 R4 late xlate_cpu=%ld xlate_pixmap=%ld xlate_window=%ld chainlate_cpu=%ld chainlate_pixmap=%ld chainlate_window=%ld\n",
-                 g.xlate_cpu, g.xlate_pixmap, g.xlate_window, g.chainlate_cpu, g.chainlate_pixmap, g.chainlate_window);
+            addf("M19 R4 late xlate_cpu=%ld xlate_pixmap=%ld xlate_window=%ld chainlate_cpu=%ld chainlate_pixmap=%ld chainlate_window=%ld "
+                 "late_ok=%d\n", g.xlate_cpu, g.xlate_pixmap, g.xlate_window, g.chainlate_cpu, g.chainlate_pixmap, g.chainlate_window, g.late_ok);
         if (c->show_count) {
             addf("M19 R4 shows ran=%d of=%u visible=%d shows_ok=%d\n", g.show_ran, c->show_count, g.show_visible, g.shows_ok);
             for (unsigned i = 0; i < c->show_count && i < M19_SHOWS_MAX; i++)

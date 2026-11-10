@@ -78,6 +78,9 @@ struct m19_report {
      * and the X server imported; one the GPU wrote, run with dmabuf_env; and the two together. */
     const char *dmabuf_heap;
     const char *const *dmabuf_env;
+    /* R4o: DRI3 judged, now that it shows (R4n): every screen-reading path must show, and a write after the import,
+     * by the CPU and by the GPU, must reach the X server whole. */
+    unsigned judge_dri3;
 };
 
 /* R3's guard, a service of its own beside the desktop. It stops the desktop units and paints YELLOW

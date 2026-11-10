@@ -258,6 +258,8 @@ static int report_gpu_mode(char **argv)
     /* R4h's PID 1 runs without the compositor views. */
     if (getenv("M19_TEST_NO_VIEWS"))
         c.compositor_script = NULL;
+    /* R4o's PID 1 judges DRI3. */
+    c.judge_dri3 = getenv("M19_TEST_JUDGE_DRI3") != NULL;
     return m19_report_main(&c);
 }
 

@@ -717,7 +717,7 @@ class Static(unittest.TestCase):
                       '.glxinfo = "/usr/bin/glxinfo"', '.glxgears = "/usr/bin/glxgears"', '.eglinfo = "/usr/bin/eglinfo"',
                       '.vk_env = dri3_env, .gl_env = dri3_env, .egl_env = dri3_env, .glamor = 1, .xorg_unit = "marble-xorg.service"',
                       '.gpu_profile = "/run/m19/gpu-profile", .glmark2 = "/usr/bin/glmark2", .copy_env = copy_env',
-                      '.present_probe = "/run/m19/m19-present-probe", .present_frames = 120, .judge_copy = 1, .shell = "/bin/sh", .shows = shows,',
+                      '.present_probe = "/run/m19/m19-present-probe", .present_frames = 120, .judge_copy = 1, .judge_dri3 = 1, .shell = "/bin/sh", .shows = shows,',
                       '.show_count = sizeof(shows) / sizeof(shows[0]), .show_seconds = 3,',
                       '.dmabuf_heap = "/dev/dma_heap/system", .dmabuf_env = dri3_env,',
                       '.xorg_logs = {"/var/log/Xorg.0.log", "/var/log/Xorg.cpu.log"}', '.battery_limit = 420, ', '.session_ms = 900000, ',
@@ -1960,6 +1960,38 @@ class Gpu(DesktopFixture):
         # R4k: the GPU drew, the X server refused the buffer.
         self.assertEqual((g['xlate_cpu'], g['xlate_pixmap'], g['xlate_window'], g['chainlate_cpu'], g['chainlate_pixmap'], g['chainlate_window']),
                          ('-1', '-1', '-1', '7', '-1', '-1'))
+
+    def judged(self):
+        """R4n's hardware: every path shows, and late writes reach the X server whole."""
+        (self.test / 'root-dri3-out').write_text(ROOT.format(nonblack=128, mean=9))
+        (self.test / 'xlate-out').write_text('M19 PRESENT xlate cpu=1000\nM19 PRESENT xlate pixmap=1000 window=990\nM19 PRESENT xlate ok\n')
+        (self.test / 'chainlate-out').write_text('M19 PRESENT chainlate renderer=FD725 fourcc=34324241 modifier=0 stride=1024 cpu=1000\n'
+                                                 'M19 PRESENT chainlate pixmap=990 window=1000\nM19 PRESENT chainlate ok\n')
+
+    def test_r4o_judges_dri3_whole(self):
+        self.judged()
+        fields, log, steps = self.run_gpu(M19_TEST_JUDGE_DRI3='1')
+        g = self.gpu(log)
+        self.assertEqual((fields[3], g['gpu_ok'], g['late_ok'], g['visible'], g['shows_ok']), ('1', '1', '1', '3', '1'))
+        self.assertIn('M19STEP T12-gpu END 1 1 1 1 1 1 1 1 1 1 1 1 1 1', steps)
+
+    def test_r4o_fails_a_black_path_or_a_stale_late_read(self):
+        for name, text, flag in (('root-dri3-out', ROOT.format(nonblack=4, mean=1), 'shows_ok'),
+                                 ('xlate-out', 'M19 PRESENT xlate cpu=1000\nM19 PRESENT xlate pixmap=1000 window=989\n', 'late_ok'),
+                                 ('chainlate-out', 'M19 PRESENT chainlate renderer=FD725 cpu=1000\nM19 PRESENT chainlate pixmap=989 window=1000\n', 'late_ok'),
+                                 ('xlate-out', 'M19 PRESENT xlate FAIL no dri3\n', 'late_ok')):
+            with self.subTest(name=name, text=text):
+                self.judged()
+                (self.test / name).write_text(text)
+                fields, log, _ = self.run_gpu(M19_TEST_JUDGE_DRI3='1')
+                g = self.gpu(log)
+                self.assertEqual((fields[3], g['gpu_ok'], g[flag]), ('0', '0', '0'))
+        # Unjudged, as R4i to R4n ran: the same black path and stale read pass.
+        self.judged()
+        (self.test / 'root-dri3-out').write_text(ROOT.format(nonblack=0, mean=0))
+        (self.test / 'xlate-out').write_text('M19 PRESENT xlate cpu=1000\nM19 PRESENT xlate pixmap=0 window=0\n')
+        fields, log, _ = self.run_gpu()
+        self.assertEqual((fields[3], self.gpu(log)['gpu_ok'], self.gpu(log)['late_ok']), ('1', '1', '0'))
 
     def test_an_unread_screen_reads_minus_one_and_black_is_not_visible(self):
         (self.test / 'root-copy-out').write_text('M19 PRESENT root FAIL connect\n')

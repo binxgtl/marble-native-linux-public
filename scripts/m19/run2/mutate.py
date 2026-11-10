@@ -249,8 +249,8 @@ MUTANTS = (
     ('pid4.c', '.judge_copy = 1,', '.judge_copy = 0,', ('Static',)),
     # R4i: glxgears covering the screen through six paths, the screen read while it runs.
     ('report.c', '                g->show_visible += g->show_nonblack[i] >= 5;', '                g->show_visible += g->show_nonblack[i] >= 4;', ('Gpu',)),
-    ('report.c', '        g->shows_ok = g->show_ran == (int)c->show_count;', '        g->shows_ok = 1;', ('Gpu',)),
-    ('report.c', ' &&\n                 (!c->show_count || g.shows_ok);', ';', ('Gpu',)),
+    ('report.c', '        g->shows_ok = g->show_ran == (int)c->show_count &&', '        g->shows_ok = 1 &&', ('Gpu',)),
+    ('report.c', ' &&\n                 (!c->show_count || g.shows_ok) &&', ' &&', ('Gpu',)),
     ('report.c', '"%s -fullscreen & gears=$!;', '"%s & gears=$!;', ('Gpu',)),
     ('report.c', '            } else {\n                g->show_nonblack[i] = g->show_mean[i] = -1;\n            }', '            }', ('Gpu',)),
     ('pid4.c', '{"noubwc", noubwc_env}, ', '', ('Static',)),
@@ -315,6 +315,16 @@ MUTANTS = (
     # R4n: the hash of the Mesa the session loads.
     ('t9-gpu', "printf 'M19 T9 gpu: libgallium sha256=%s\\n' \"${mesa%% *}\" >&2\n", '', ('GpuScript',)),
     ('t9-gpu', ') || fail mesa-hash', ') || :', ('GpuScript',)),
+    # R4o: DRI3 judged.
+    ('report.c', ' && (!c->judge_dri3 || g->show_visible == (int)c->show_count);', ';', ('Gpu',)),
+    ('report.c', 'g->late_ok = g->xlate_pixmap >= 990 && g->xlate_window >= 990 && g->chainlate_pixmap >= 990 && g->chainlate_window >= 990;',
+     'g->late_ok = g->xlate_pixmap >= 990 && g->xlate_window >= 990 && g->chainlate_pixmap >= 990;', ('Gpu',)),
+    ('report.c', 'g->late_ok = g->xlate_pixmap >= 990 && g->xlate_window >= 990 && g->chainlate_pixmap >= 990 && g->chainlate_window >= 990;',
+     'g->late_ok = g->xlate_pixmap >= 989 && g->xlate_window >= 990 && g->chainlate_pixmap >= 990 && g->chainlate_window >= 990;', ('Gpu',)),
+    ('report.c', 'g->late_ok = g->xlate_pixmap >= 990 && g->xlate_window >= 990 && g->chainlate_pixmap >= 990 && g->chainlate_window >= 990;',
+     'g->late_ok = g->xlate_pixmap >= 990 && g->chainlate_pixmap >= 990 && g->chainlate_window >= 990;', ('Gpu',)),
+    ('report.c', ' && (!c->judge_dri3 || (c->dmabuf_heap && g.late_ok));', ';', ('Gpu',)),
+    ('pid4.c', '.judge_dri3 = 1,', '.judge_dri3 = 0,', ('Static',)),
 )
 
 
