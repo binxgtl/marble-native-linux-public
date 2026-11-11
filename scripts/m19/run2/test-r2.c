@@ -194,6 +194,19 @@ static int report_mode(char **argv)
                            .expected_init = "/usr/lib/systemd/systemd", .settle_ms = (unsigned)strtoul(argv[4], NULL, 10), .poll_ms = 5,
                            .beat_ms = 40, .pace_ms = 1, .log_ms = 20000, .command_ms = (unsigned)strtoul(argv[5], NULL, 10),
                            .final_ms = 1, .tty_wait_ms = 200};
+    /* R5a's PID 1 reads the sound card. */
+    static char audio[4][4200];
+    const char *audio_names[] = {"asound/cards", "asound/pcm", "sound-class", "snd"};
+    for (unsigned i = 0; i < 4; i++)
+        snprintf(audio[i], sizeof(audio[i]), "%s/%s", root, audio_names[i]);
+    if (getenv("M19_TEST_AUDIO")) {
+        c.audio = 1;
+        c.asound_cards = audio[0];
+        c.asound_pcm = audio[1];
+        c.sound_class = audio[2];
+        c.snd_dev = audio[3];
+        c.audio_card = "ukee-mtp-snd-card";
+    }
     return m19_report_main(&c);
 }
 

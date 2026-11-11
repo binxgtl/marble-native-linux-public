@@ -1,0 +1,5 @@
+#!/bin/busybox sh
+# R5a's bootstrap: R1's, unchanged, then the audio stage, both before R1 starts the ADSP (docs/m19-r5.md).
+# The audio stage exits nonzero only to hold; a skipped or partial stage is recorded, and R1 goes on.
+/m19/bootstrap || exit 1
+exec /m19/audio-stage

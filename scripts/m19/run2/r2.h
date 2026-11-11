@@ -81,6 +81,10 @@ struct m19_report {
     /* R4o: DRI3 judged, now that it shows (R4n): every screen-reading path must show, and a write after the import,
      * by the CPU and by the GPU, must reach the X server whole. */
     unsigned judge_dri3;
+    /* R5a only, when audio is set: the card M11 Run12 registered, read from procfs and sysfs only. Nothing opens
+     * a PCM or a control: the session's /dev must hold no sound node at all, so nothing in it can. */
+    unsigned audio;
+    const char *asound_cards, *asound_pcm, *sound_class, *snd_dev, *audio_card;
 };
 
 /* R3's guard, a service of its own beside the desktop. It stops the desktop units and paints YELLOW

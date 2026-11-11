@@ -33,10 +33,24 @@ jobs:
           M19_MUTANTS: '0'
       - name: Vulkan and Present headers, lavapipe and Xvfb for the GPU and Present probes (no device)
         run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends libvulkan-dev mesa-vulkan-drivers libxcb-present-dev libxcb-dri3-dev xvfb
-      - name: R2 to R4 hand-off, reporter, T9, desktop and GPU checks on synthetic trees, normal and ASan/UBSan, static PID 1 (no device)
+      - name: R2 to R5 hand-off, reporter, T9, desktop and GPU checks on synthetic trees, normal and ASan/UBSan, static PID 1 (no device)
         run: bash scripts/m19/run2/test.sh artifacts/m19/${{ runner.arch }}/run2
         env:
           M19_MUTANTS: '0'
+      - name: R5a audio helper on a fake kernel and synthetic super images, audio stage and T3-audio on synthetic trees, static helper (no device)
+        run: bash scripts/m19/run5/test.sh artifacts/m19/${{ runner.arch }}/run5
+        env:
+          M19_MUTANTS: '0'
+      - name: M11 Run12's PD mapper, from its pinned linux-msm sources, static and built twice (ARM64, no device)
+        if: runner.arch == 'ARM64'
+        run: |
+          sudo apt-get install -y -qq --no-install-recommends liblzma-dev
+          CC=gcc bash scripts/m11/run12/build-pdr.sh
+          mkdir -p artifacts/m19/ARM64/pdr
+          cp artifacts/m11/run12-pdr-build/m11-pd-mapper-a artifacts/m11/run12-pdr-build/m11-pd-mapper-b artifacts/m11/run12-pdr-build/SHA256SUMS \
+            artifacts/m11/run12-pdr-build/compiler.txt artifacts/m11/run12-pdr-build/pd-mapper-LICENSE artifacts/m11/run12-pdr-build/qrtr-LICENSE \
+            artifacts/m19/ARM64/pdr/
+          dpkg-query -W gcc libc6-dev liblzma-dev > artifacts/m19/ARM64/pdr/system-packages.txt
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -54,6 +68,14 @@ jobs:
             artifacts/m19/**/pid3-b
             artifacts/m19/**/pid4-a
             artifacts/m19/**/pid4-b
+            artifacts/m19/**/pid5-a
+            artifacts/m19/**/pid5-b
+            artifacts/m19/**/m19-audio-a
+            artifacts/m19/**/m19-audio-b
+            artifacts/m19/**/m11-pd-mapper-a
+            artifacts/m19/**/m11-pd-mapper-b
+            artifacts/m19/**/SHA256SUMS
+            artifacts/m19/**/*-LICENSE
             artifacts/m19/**/gpu-probe-a
             artifacts/m19/**/gpu-probe-b
             artifacts/m19/**/present-probe-a
@@ -66,7 +88,7 @@ jobs:
             artifacts/m19/**/load-heaps-b
             artifacts/m19/**/*.txt
   mutants:
-    # The slow mutation checks of R1 and R2/R3, once each and in parallel with the regression jobs.
+    # The slow mutation checks of R1, R2 to R4 and R5, once each and in parallel with the regression jobs.
     strategy:
       fail-fast: false
       matrix:
@@ -75,6 +97,8 @@ jobs:
             script: scripts/m19/run1/mutate.py
           - suite: run2
             script: scripts/m19/run2/mutate.py
+          - suite: run5
+            script: scripts/m19/run5/mutate.py
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:

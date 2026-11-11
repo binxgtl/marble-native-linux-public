@@ -1,0 +1,223 @@
+#!/bin/busybox sh
+# R5a's audio stage (docs/m19-r5.md). It runs after R1's bootstrap has loaded its 102 modules and before R1
+# starts the ADSP, and keeps M11 Run12's proven registration order (docs/m11-registration-run12.md):
+#   the audio modules, BAM before NGD, then machine_dlkm and the amplifiers, with the ADSP offline;
+#   both AW882xx bound as smartpa, stable for five samples;
+#   the SDAM, PBS and HV haptics suppliers;
+#   qrtr-smd and Run12's PD mapper, checked by a local lookup.
+# The ADSP itself is started next by R1's own adsp script, as in every M19 run.
+#
+# The 37 vendor_dlkm modules come from the stock vendor_dlkm, mapped read-only from super's LP metadata and
+# copied into RAM; the mapping is gone before the first module loads. The 8 vendor_boot modules are already
+# in /lib/modules, from the device's own vendor ramdisk. Every module's SHA256 is checked before any loads,
+# and again by the loader from the very bytes it loads.
+#
+# The stop is graded:
+#   nothing loaded yet: everything this stage mapped or made is removed; the result is "skipped REASON";
+#   loading begun: no further module loads, and no mapper left serving; the result is "partial REASON";
+#   hold, exit 1: the ADSP started, or a sound card appeared, before this stage ended. R1 then stops before
+#   the ADSP and the USB link, and nothing touches the TEE.
+# Otherwise it exits 0 and R1 goes on. The result is "ready" only when every step passed; R5a's first step
+# reads it, and stops the run before the TEE unless the card then registers as Run12's did.
+set -eu
+R=${M19_ROOT:-}
+BB=${M19_BB:-/bin/busybox}
+HELPER=${M19_AUDIO:-/sbin/m19-audio}
+MAPPER=${M19_MAPPER:-/sbin/m11-pd-mapper}
+WAIT=${M19_AUDIO_WAIT:-300}
+log() {
+ printf 'M19 audio: %s\n' "$*" >&2 || :
+ printf '<6>M19 audio: %s\n' "$*" >"$R/dev/kmsg" 2>/dev/null || :
+}
+hold() { log "HOLD $*"; exit 1; }
+case "$R" in ''|/*) ;; *) hold root;; esac
+[ -z "$R" ] || [ ! -L "$R" ] || hold root
+case "$WAIT" in ''|*[!0-9]*) hold wait;; esac
+read_value() { $BB cat "$1"; }
+# MAJOR:MINOR exactly: digits, one colon, digits.
+number_ok() { case "$1" in *[!0-9:]*|:*|*:|*:*:*|'') return 1;; *:*) return 0;; esac; return 1; }
+count() { $BB wc -l <"$R/proc/modules"; }
+list=$R/m19/audio/modules.list
+work=$R/run/m19/audio
+control=$R/dev/m19-audio-control
+super_node=$R/dev/m19-audio-super
+dlkm_node=$R/dev/m19-audio-dlkm
+mounted=0
+mapped=0
+loaded=102
+
+adsp=
+for node in "$R"/sys/class/remoteproc/remoteproc*; do
+ [ -e "$node" ] || continue
+ target=$($BB readlink -f "$node/device") || hold remoteproc-link
+ case "$target" in */3000000.remoteproc-adsp) [ -z "$adsp" ] || hold duplicate-adsp; adsp=$node;; esac
+done
+[ -n "$adsp" ] || hold missing-adsp
+sound_absent() {
+ for node in "$R"/sys/bus/platform/devices/*; do
+  case "$node" in *spf_core_platform*sound*) return 1;; esac
+ done
+ return 0
+}
+# The two invariants Run12 held on: the ADSP stays offline and no sound card exists until the ADSP starts.
+invariants() {
+ [ "$(read_value "$adsp/state")" = offline ] || hold "ADSP not offline: $1"
+ sound_absent || hold "sound exists: $1"
+}
+invariants start
+[ "$(count)" -eq 102 ] || hold "module count $(count)"
+[ ! -e "$R/run/m19/audio.result" ] || hold result-exists
+
+publish() {
+ printf '%s\n' "$*" >"$R/run/m19/audio.result" || hold result-publication
+ log "result $*"
+ exit 0
+}
+# Removes what this stage mapped or made, in reverse; says whether all of it went.
+undo() {
+ left=0
+ if [ "$mounted" = 1 ]; then
+  if $BB umount "$work/dlkm"; then mounted=0; else left=1; fi
+ fi
+ if [ "$mapped" = 1 ]; then
+  if "$HELPER" unmap "$control" m19-vendor-dlkm; then mapped=0; else left=1; fi
+ fi
+ for node in "$dlkm_node" "$super_node" "$control"; do
+  [ ! -e "$node" ] || $BB rm -f "$node" || left=1
+ done
+ return "$left"
+}
+skip() {
+ log "skipping: $*"
+ undo || publish skipped "$* cleanup"
+ $BB rm -rf "$work/modules" || :
+ publish skipped "$*"
+}
+
+# 1. The list, the amplifier sample, the mapper's maps, then the slot the bootloader booted.
+[ -f "$list" ] && [ ! -L "$list" ] || skip list
+rows=0; dlkm=0
+while read -r phase source name size digest extra; do
+ [ -z "$extra" ] || skip "list line $name"
+ case "$name" in .*|*[!A-Za-z0-9_.-]*|'') skip "list name $name";; esac
+ case "$source" in vendor_dlkm) dlkm=$((dlkm+1));; vendor_boot) ;; *) skip "list source $name";; esac
+ rows=$((rows+1))
+done <"$list"
+[ "$rows" -eq 45 ] && [ "$dlkm" -eq 37 ] || skip "list rows $rows $dlkm"
+[ -f "$R/m19/audio/amps" ] && [ ! -L "$R/m19/audio/amps" ] || skip amps-missing
+# The mapper reads only its two maps here, as Run12's did before serving.
+"$MAPPER" --check-maps || skip mapper-maps
+slot=$($BB sed -n 's/^androidboot\.slot_suffix = "\(_[ab]\)"$/\1/p' "$R/proc/bootconfig" 2>/dev/null || :)
+case "$slot" in _a) index=0;; _b) index=1;; *) skip "slot [$slot]";; esac
+
+# 2. super by PARTNAME, and the device-mapper control, as nodes of this stage's own.
+super=
+for node in "$R"/sys/class/block/*; do
+ if $BB grep -qx 'PARTNAME=super' "$node/uevent" 2>/dev/null; then
+  [ -z "$super" ] || skip duplicate-super
+  super=$node
+ fi
+done
+[ -n "$super" ] || skip super-missing
+number=$(read_value "$super/dev") || skip super-number
+number_ok "$number" || skip super-number
+misc=$(read_value "$R/sys/class/misc/device-mapper/dev") || skip control-number
+number_ok "$misc" || skip control-number
+$BB mkdir -p "$work/dlkm" "$work/modules" || skip directories
+[ ! -e "$super_node" ] && [ ! -e "$control" ] && [ ! -e "$dlkm_node" ] || skip nodes-exist
+$BB mknod -m 400 "$super_node" b "${number%%:*}" "${number#*:}" || skip super-node
+$BB mknod -m 600 "$control" c "${misc%%:*}" "${misc#*:}" || skip control-node
+
+# 3. vendor_dlkm, mapped read-only from the LP metadata, mounted read-only, its 37 modules copied into RAM.
+mapped=1
+if device=$("$HELPER" map "$control" "$super_node" "$number" "vendor_dlkm$slot" "$index" m19-vendor-dlkm); then rc=0; else rc=$?; fi
+# 2: the helper removed whatever it made. 1: it may have left the device behind, which undo removes.
+[ "$rc" -ne 2 ] || mapped=0
+[ "$rc" -eq 0 ] || skip "map rc=$rc"
+number_ok "$device" || skip "map device [$device]"
+$BB mknod -m 400 "$dlkm_node" b "${device%%:*}" "${device#*:}" || skip dlkm-node
+[ "$($BB blockdev --getro "$dlkm_node")" = 1 ] || skip dlkm-writable
+$BB mount -t erofs -o ro,nosuid,nodev,noexec "$dlkm_node" "$work/dlkm" || skip dlkm-mount
+mounted=1
+while read -r phase source name size digest; do
+ [ "$source" = vendor_dlkm ] || continue
+ [ -f "$work/dlkm/lib/modules/$name" ] && [ ! -L "$work/dlkm/lib/modules/$name" ] || skip "missing $name"
+ $BB cp "$work/dlkm/lib/modules/$name" "$work/modules/$name" || skip "copy $name"
+done <"$list"
+undo || skip cleanup
+log "vendor_dlkm$slot read-only: $dlkm modules copied, unmapped"
+
+# 4. Every module, both sources, checked before any loads.
+"$HELPER" check "$list" "$work/modules" "$R/lib/modules" || skip check
+invariants checked
+[ "$(count)" -eq 102 ] || hold "module count $(count)"
+
+# 5. Run12's order. Each phase leaves an exact count, with the ADSP offline and no sound card.
+phase() {
+ if "$HELPER" load "$list" "$1" "$work/modules" "$R/lib/modules"; then rc=0; else rc=$?; fi
+ now=$(count)
+ invariants "$1"
+ if [ "$rc" -ne 0 ]; then
+  [ "$now" -ne 102 ] || skip "load $1 rc=$rc"
+  publish partial "load $1 rc=$rc count=$now"
+ fi
+ [ "$now" -eq "$2" ] || publish partial "count $1 $now"
+ loaded=$now
+ log "phase $1 count=$now"
+}
+phase audio 134
+phase machine 143
+
+# 6. Run12's amplifier gate: both AW882xx bound to aw882xx_smartpa, the same adapter, stable for five samples.
+. "$R/m19/audio/amps"
+i=0; stable=0
+while [ "$i" -lt "$WAIT" ] && [ "$stable" -lt 5 ]; do
+ invariants amps
+ amp_snapshot
+ if [ "$amp_state" = both ]; then stable=$((stable+1)); else stable=0; fi
+ $BB sleep 0.1 || hold amp-sleep
+ i=$((i+1))
+done
+# A fresh sample before judging: never a stale success.
+amp_snapshot
+log "amps state=$amp_state clients=$amp34_count:$amp35_count bound=$amp34_bound:$amp35_bound adapters=$amp34_adapter:$amp35_adapter stable=$stable"
+[ "$amp_state" = both ] && [ "$stable" -eq 5 ] || publish partial "amps $amp_state stable=$stable"
+
+# 7. The haptics suppliers the card's swr_haptics DAI needs, then the ADSP's QRTR transport.
+phase haptics 146
+phase transport 147
+
+# 8. Run12's PD mapper, its maps checked, then serving, and answering a local lookup.
+[ -d "$R/run/m11" ] || $BB mkdir -p "$R/run/m11" || publish partial mapper-directory
+[ ! -e "$R/run/m11/pd.endpoint" ] && [ ! -e "$R/run/m11/pd.stop" ] && [ ! -e "$R/run/m11/pd.done" ] || publish partial mapper-state
+"$MAPPER" --check-maps || publish partial mapper-maps
+"$MAPPER" --serve </dev/null >>"$R/run/m11/pd.log" 2>&1 &
+pd_pid=$!
+alive() {
+ $BB kill -0 "$pd_pid" 2>/dev/null || return 1
+ state=$($BB awk '{print $3}' "/proc/$pd_pid/stat" 2>/dev/null || :)
+ [ -n "$state" ] && [ "$state" != Z ]
+}
+# A partial stage leaves no mapper serving: Run12's own stop request, then its exit, then a kill.
+mapper_fail() {
+ printf '1\n' >"$R/run/m11/pd.stop" 2>/dev/null || :
+ i=0
+ while alive && [ "$i" -lt 50 ]; do $BB sleep 0.1 || :; i=$((i+1)); done
+ ! alive || $BB kill -9 "$pd_pid" 2>/dev/null || :
+ publish partial "$@"
+}
+i=0
+while [ ! -s "$R/run/m11/pd.endpoint" ]; do
+ alive || mapper_fail mapper-exited
+ [ "$i" -lt 50 ] || mapper_fail mapper-endpoint
+ $BB sleep 0.1 || mapper_fail mapper-sleep
+ i=$((i+1))
+done
+if "$MAPPER" --probe </dev/null >>"$R/run/m11/pd.log" 2>&1; then rc=0; else rc=$?; fi
+alive || mapper_fail mapper-exited
+[ "$rc" -eq 0 ] || mapper_fail "mapper probe rc=$rc"
+printf '%s\n' "$pd_pid" >"$R/run/m11/pd.pid" || mapper_fail mapper-pid
+invariants mapper
+$BB rm -rf "$work/modules" || :
+log "mapper pid=$pd_pid serving; count=$loaded"
+publish ready

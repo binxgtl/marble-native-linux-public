@@ -41,9 +41,15 @@ param=$R/sys/module/firmware_class/parameters/path
 printf '%s' /run/m19/firmware >"$param" || fail firmware-path
 [ "$($BB cat "$param")" = /run/m19/firmware ] || fail firmware-path-readback
 
-# 2. The GPU layer, in the plan's order, on top of the 102 modules the bootstrap loaded.
+# 2. The GPU layer, in the plan's order, on top of the 102 modules the bootstrap loaded, or of 147 when
+#    R5a's audio stage added its 45 (docs/m19-r5.md); any stage result but "ready" stops here.
+base=102
+if [ -e "$R/run/m19/audio.result" ]; then
+ [ "$($BB cat "$R/run/m19/audio.result")" = ready ] || fail audio-stage
+ base=147
+fi
 before=$($BB wc -l <"$R/proc/modules") || fail module-count
-[ "$before" -eq 102 ] || fail "module count $before"
+[ "$before" -eq "$base" ] || fail "module count $before"
 set --
 while read -r module; do
  case "$module" in ''|'#'*) continue;; esac
@@ -54,7 +60,7 @@ done <"$plan/modules"
 [ "$#" -eq 8 ] || fail "module list $#"
 "$LOAD" "$@" || fail module-load
 after=$($BB wc -l <"$R/proc/modules") || fail module-count
-[ "$after" -eq 110 ] || fail "module count $after"
+[ "$after" -eq $((base+8)) ] || fail "module count $after"
 
 # 3. The nodes, by class and name, once the driver has registered them.
 make_node() {

@@ -1292,6 +1292,43 @@ static void paint(const struct m19_report *c, int all_ok)
     execv(c->display, argv);
 }
 
+struct audio {
+    int card, control, playback, capture, snd_nodes, audio_ok;
+};
+
+/* R5a: Run12's registration as the session sees it, read-only. The card by name and its index, its control
+ * device in sysfs, a playback and a capture PCM, and no /dev/snd at all. */
+static void audio_phase(const struct m19_report *c, struct audio *a)
+{
+    char text[8192], path[1100];
+    a->card = -1;
+    if (!read_small(c->asound_cards, text, sizeof(text)))
+        for (char *line = strtok(text, "\n"); line; line = strtok(NULL, "\n")) {
+            int index, used = 0;
+            if (sscanf(line, " %d [%n", &index, &used) == 1 && used && index >= 0 && strstr(line, c->audio_card) && a->card < 0)
+                a->card = index;
+        }
+    if (a->card >= 0) {
+        char number[64];
+        unsigned major = 0, minor = 0;
+        char extra;
+        snprintf(path, sizeof(path), "%s/controlC%d/dev", c->sound_class, a->card);
+        a->control = !read_small(path, number, sizeof(number)) && sscanf(number, "%u:%u%c", &major, &minor, &extra) >= 2 && major > 0;
+        if (!read_small(c->asound_pcm, text, sizeof(text))) {
+            char prefix[16];
+            snprintf(prefix, sizeof(prefix), "%02d-", a->card);
+            for (char *line = strtok(text, "\n"); line; line = strtok(NULL, "\n"))
+                if (!strncmp(line, prefix, strlen(prefix))) {
+                    a->playback |= strstr(line, "playback") != NULL;
+                    a->capture |= strstr(line, "capture") != NULL;
+                }
+        }
+    }
+    struct stat st;
+    a->snd_nodes = lstat(c->snd_dev, &st) == 0 || errno != ENOENT;
+    a->audio_ok = a->card >= 0 && a->control && a->playback && a->capture && !a->snd_nodes;
+}
+
 int m19_report_main(const struct m19_report *c)
 {
     unsigned long long start = m19_now_ms();
@@ -1425,7 +1462,20 @@ int m19_report_main(const struct m19_report *c)
                 addf("M19 R4 show %s nonblack=%ld mean=%ld\n", c->shows[i].name, g.show_nonblack[i], g.show_mean[i]);
         }
     }
-    int all_ok = init_ok && state_ok && targets_ok && writes_ok && ro_ok && mounts_ok && !write_warning && desktop_ok && gpu_ok;
+    int audio_ok = 1;
+    if (c->audio) {
+        struct audio a;
+        memset(&a, 0, sizeof(a));
+        audio_phase(c, &a);
+        audio_ok = a.audio_ok;
+        addf("M19 R5 audio card=%d control=%d playback=%d capture=%d snd_nodes=%d audio_ok=%d\n", a.card, a.control, a.playback, a.capture,
+             a.snd_nodes, a.audio_ok);
+        addf("M19 asound cards\n");
+        (void)add_file(c->asound_cards, SECTION_CAP / 16);
+        addf("M19 asound pcm\n");
+        (void)add_file(c->asound_pcm, SECTION_CAP / 16);
+    }
+    int all_ok = init_ok && state_ok && targets_ok && writes_ok && ro_ok && mounts_ok && !write_warning && desktop_ok && gpu_ok && audio_ok;
     addf("M19 R2 verdict init=%d state=%s targets=%d writes=%d read_only=%d mounts=%d write_warning=%d all_ok=%d\n", init_ok, state, targets_ok,
          writes_ok, ro_ok, mounts_ok, write_warning, all_ok);
 

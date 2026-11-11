@@ -1,0 +1,42 @@
+#!/bin/busybox sh
+# Sourced, never run. Run12's read-only amplifier sample (scripts/m11/run12/bootstrap), shared by R5a's audio
+# stage and its first step. The aw882xx_dlkm i2c driver is named aw882xx_smartpa. A driver link is an
+# observation, not proof that probe finished. Ambiguous inventories or links stay unknown.
+# Needs R and BB; sets amp_state to both, only34, only35, neither or unknown.
+amp_snapshot() {
+ amp34_count=0; amp35_count=0; amp34_bound=0; amp35_bound=0
+ amp34_adapter=; amp35_adapter=; amp_bad=0
+ for node in "$R"/sys/bus/i2c/devices/*-0034 "$R"/sys/bus/i2c/devices/*-0035; do
+  [ -d "$node" ] || continue
+  base=${node##*/}; current=${base%-*}; address=${base##*-}
+  case "$current" in ''|*[!0-9]*) amp_bad=1;; esac
+  case "$address" in
+   0034) amp34_count=$((amp34_count+1)); amp34_adapter=$current;;
+   0035) amp35_count=$((amp35_count+1)); amp35_adapter=$current;;
+   *) amp_bad=1;;
+  esac
+  linked=0
+  if [ -L "$node/driver" ]; then
+   if target=$($BB readlink -f "$node/driver" 2>/dev/null); then
+    if [ "${target##*/}" = aw882xx_smartpa ] && [ -d "$target" ]; then linked=1; else amp_bad=1; fi
+   else
+    amp_bad=1
+   fi
+  elif [ -e "$node/driver" ]; then
+   amp_bad=1
+  fi
+  case "$address" in
+   0034) amp34_bound=$linked;;
+   0035) amp35_bound=$linked;;
+  esac
+ done
+ amp_state=unknown
+ if [ "$amp_bad" -eq 0 ] && [ "$amp34_count" -eq 1 ] && [ "$amp35_count" -eq 1 ] && [ "$amp34_adapter" = "$amp35_adapter" ]; then
+  case "$amp34_bound:$amp35_bound" in
+   1:1) amp_state=both;;
+   1:0) amp_state=only34;;
+   0:1) amp_state=only35;;
+   0:0) amp_state=neither;;
+  esac
+ fi
+}

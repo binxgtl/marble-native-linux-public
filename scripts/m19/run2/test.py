@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """R2 on synthetic trees: the hand-off, the reporter, T9 and the plan. No device, no real mount."""
 import argparse
+import difflib
 import hashlib
 import os
 import re
@@ -261,6 +262,68 @@ class ReportBase(unittest.TestCase):
         values = ['0'] * 17
         values[index] = '1'
         (self.root / 'block' / name / 'stat').write_text(' '.join(values) + '\n')
+
+
+class Audio(ReportBase):
+    """R5a: the card M11 Run12 registered, as the session sees it, read-only, and no sound node in /dev."""
+    CARDS = ' 0 [ukeemtpsndcard ]: ukee-mtp-snd-c - ukee-mtp-snd-card\n                      ukee-mtp-snd-card\n'
+    PCM = '00-00: MultiMedia1 (*) :  : playback 1 : capture 1\n00-01: MultiMedia2 (*) :  : playback 1\n'
+
+    def setUp(self):
+        super().setUp()
+        (self.root / 'asound').mkdir()
+        (self.root / 'asound/cards').write_text(self.CARDS)
+        (self.root / 'asound/pcm').write_text(self.PCM)
+        (self.root / 'sound-class/controlC0').mkdir(parents=True)
+        (self.root / 'sound-class/controlC0/dev').write_text('116:0\n')
+
+    def audio(self, env=None):
+        data, colour = self.run_report(env=dict({'M19_TEST_AUDIO': '1'}, **(env or {})))
+        fields, log, _ = self.parse(data)
+        line = re.search(r'M19 R5 audio (.*)\n', log)
+        return fields, log, dict(item.split('=') for item in line.group(1).split()) if line else None, colour
+
+    def test_the_registered_card_passes_and_is_recorded(self):
+        fields, log, audio, colour = self.audio()
+        self.assertEqual(audio, {'card': '0', 'control': '1', 'playback': '1', 'capture': '1', 'snd_nodes': '0', 'audio_ok': '1'})
+        self.assertEqual((fields[3], colour), ('1', GREEN))
+        self.assertIn('M19 asound cards\n' + self.CARDS, log)
+        self.assertIn('M19 asound pcm\n' + self.PCM, log)
+
+    def test_without_audio_nothing_is_read_or_judged(self):
+        shutil.rmtree(self.root / 'asound')
+        fields, log, _ = self.parse(self.run_report()[0])
+        self.assertNotIn('M19 R5 audio', log)
+        self.assertEqual(fields[3], '1')
+
+    def test_each_missing_piece_fails(self):
+        cases = (
+            ('cards', lambda: (self.root / 'asound/cards').unlink(), {'card': '-1'}),
+            ('other card', lambda: (self.root / 'asound/cards').write_text(' 0 [other ]: other - other\n'), {'card': '-1'}),
+            ('name on the long line only', lambda: (self.root / 'asound/cards').write_text(' 0 [x ]: x - x\n  ukee-mtp-snd-card\n'), {'card': '-1'}),
+            ('control', lambda: (self.root / 'sound-class/controlC0/dev').unlink(), {'control': '0'}),
+            ('control major', lambda: (self.root / 'sound-class/controlC0/dev').write_text('0:5\n'), {'control': '0'}),
+            ('control garbage', lambda: (self.root / 'sound-class/controlC0/dev').write_text('116\n'), {'control': '0'}),
+            ('capture', lambda: (self.root / 'asound/pcm').write_text('00-00: MultiMedia1 (*) :  : playback 1\n'), {'capture': '0'}),
+            ('playback', lambda: (self.root / 'asound/pcm').write_text('00-00: MultiMedia1 (*) :  : capture 1\n'), {'playback': '0'}),
+            ("another card's pcm", lambda: (self.root / 'asound/pcm').write_text('01-00: x : : playback 1 : capture 1\n'), {'playback': '0'}),
+            ('a sound node', lambda: (self.root / 'snd').mkdir(), {'snd_nodes': '1'}),
+            ('a sound link', lambda: (self.root / 'snd').symlink_to(self.root / 'nowhere'), {'snd_nodes': '1'}))
+        for name, change, want in cases:
+            with self.subTest(name=name):
+                self.setUp()
+                change()
+                fields, _, audio, colour = self.audio()
+                self.assertEqual({key: audio[key] for key in want}, want)
+                self.assertEqual((audio['audio_ok'], fields[3], colour), ('0', '0', YELLOW))
+
+    def test_the_card_index_comes_from_its_own_line(self):
+        (self.root / 'asound/cards').write_text(' 0 [other ]: other - other\n 1 [ukeemtpsndcard ]: ukee-mtp-snd-c - ukee-mtp-snd-card\n')
+        (self.root / 'sound-class/controlC1').mkdir()
+        (self.root / 'sound-class/controlC1/dev').write_text('116:32\n')
+        (self.root / 'asound/pcm').write_text('00-00: x : : playback 1 : capture 1\n01-00: y : : playback 1 : capture 1\n')
+        fields, _, audio, _ = self.audio()
+        self.assertEqual((audio['card'], audio['audio_ok'], fields[3]), ('1', '1', '1'))
 
 
 class Report(ReportBase):
@@ -657,7 +720,7 @@ class Static(unittest.TestCase):
         self.assertNotRegex(text, r'\breboot\(|RB_AUTOBOOT|LINUX_REBOOT')
 
     def test_no_reboot_and_no_block_write_anywhere_in_r2(self):
-        for name in ('handoff.c', 'report.c', 'wire.c', 'pid2.c', 't9-root', 'pid4.c', 't9-gpu', 'gpu-probe.c', 'present-probe.c'):
+        for name in ('handoff.c', 'report.c', 'wire.c', 'pid2.c', 't9-root', 'pid4.c', 'pid5.c', 't9-gpu', 'gpu-probe.c', 'present-probe.c'):
             text = (HERE / name).read_text()
             self.assertNotRegex(text, r'\b(reboot|poweroff|mkfs|fsck|blkdiscard|fstrim|setrw|wipe|sgdisk|parted)\b|\bof=/dev|O_WRONLY[^\n]*/dev/(sd|block|dm)', name)
         text = (HERE / 't9-root').read_text()
@@ -750,6 +813,36 @@ class Static(unittest.TestCase):
             self.assertEqual(items[-1], 'NULL')
             self.assertEqual(tuple(items[:-1]), want, name)
         self.assertNotRegex(text, r'\breboot\(|RB_AUTOBOOT|LINUX_REBOOT')
+
+    def test_pid5_is_pid4_with_the_audio_stage_and_nothing_else(self):
+        def body(name):
+            text = (HERE / name).read_text()
+            return text[text.index('*/\n') + 3:].splitlines()
+        # Each change once, removals before additions, in file order.
+        changes = [line[0] + ' ' + line[1:] for line in difflib.unified_diff(body('pid4.c'), body('pid5.c'), lineterm='', n=0)
+                   if line[:1] in '+-' and line[:3] not in ('+++', '---')]
+        self.assertEqual(changes, [
+            '+     {"T3-audio", "/m19/t3-audio", 120000, M19_STEP_REQUIRED},',
+            '-     .bootstrap = "/m19/bootstrap", .adsp = "/m19/adsp", .connector = "/sbin/m15-connector", .display = "/sbin/m16-display",',
+            '+     .bootstrap = "/m19/bootstrap-audio", .adsp = "/m19/adsp", .connector = "/sbin/m15-connector", .display = "/sbin/m16-display",',
+            '-     .bootstrap_ms = 120000, .display_ms = 20000, .blue_ms = 3000, .final_ms = 600000, .poll_ms = 5, .pace_ms = 20,',
+            '+     .bootstrap_ms = 180000, .display_ms = 20000, .blue_ms = 3000, .final_ms = 600000, .poll_ms = 5, .pace_ms = 20,',
+            '+     .audio = 1, .asound_cards = "/proc/asound/cards", .asound_pcm = "/proc/asound/pcm", .sound_class = "/sys/class/sound", .snd_dev = "/dev/snd",',
+            '+     .audio_card = "ukee-mtp-snd-card",',
+            '-     if (m19_run_main(&run) == M19_END_PASS) {',
+            '+     enum m19_run_end end = m19_run_main(&run);',
+            '+     if (end == M19_END_BOOTSTRAP) {',
+            '+         /* The bootstrap or the audio stage held, before the ADSP and the USB link. Nothing touched the TEE. */',
+            '+         char *argv_red[] = {"/sbin/m16-display", "00ff0000", "600000", NULL};',
+            '+         if (fork() == 0) {',
+            '+             execv(argv_red[0], argv_red);',
+            '+             _exit(127);',
+            '+         }',
+            '+     }',
+            '+     if (end == M19_END_PASS) {'])
+        names = re.findall(r'\{"(T\d+-[a-z]+)", "/m19/(t\d-[a-z]+)"', (HERE / 'pid5.c').read_text())
+        self.assertEqual(names[0], ('T3-audio', 't3-audio'))
+        self.assertLessEqual(len(names), int(re.search(r'#define M19_STEPS_MAX (\d+)', (HERE.parent / 'run1/r1.h').read_text()).group(1)))
 
     def test_t9_gpu_writes_only_ram_copies_and_the_firmware_path(self):
         text = (HERE / 't9-gpu').read_text()
@@ -2172,6 +2265,32 @@ class GpuScript(unittest.TestCase):
         self.assertEqual(self.log('load.log'), '')
         self.setUp()
         self.assertFails('module count 109', M19_LOAD_SHORT='1')
+
+    def modules(self, count):
+        (self.root / 'proc/modules').write_text(''.join(f'm{i} 4096 0 - Live 0x0\n' for i in range(count)))
+
+    def test_on_r5a_the_count_starts_at_the_audio_stage(self):
+        (self.root / 'run/m19/audio.result').write_text('ready\n')
+        self.modules(147)
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len((self.root / 'proc/modules').read_text().splitlines()), 155)
+        self.assertIn('M19 T9 gpu: modules=155 ', result.stderr)
+        self.setUp()
+        (self.root / 'run/m19/audio.result').write_text('ready\n')
+        self.assertFails('module count 102')
+        self.assertEqual(self.log('load.log'), '')
+        self.setUp()
+        (self.root / 'run/m19/audio.result').write_text('ready\n')
+        self.modules(147)
+        self.assertFails('module count 154', M19_LOAD_SHORT='1')
+        for stage in ('partial count audio 120', 'skipped super-missing', ''):
+            with self.subTest(stage=stage):
+                self.setUp()
+                (self.root / 'run/m19/audio.result').write_text(stage + '\n')
+                self.modules(147)
+                self.assertFails('audio-stage')
+                self.assertEqual(self.log('load.log'), '')
 
     def test_a_failed_load_stops(self):
         self.assertFails('module-load', M19_LOAD_RC='1')
