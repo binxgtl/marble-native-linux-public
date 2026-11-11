@@ -66,7 +66,7 @@ class Helper(unittest.TestCase):
         self.root = Path(self.directory.name)
 
     def run_helper(self, *args, **env):
-        environment = dict(os.environ, ASAN_OPTIONS='detect_leaks=0', **env)
+        environment = {**os.environ, 'ASAN_OPTIONS': 'detect_leaks=0', **env}
         result = subprocess.run([ARGS.driver, *map(str, args)], capture_output=True, text=True, env=environment, timeout=60)
         return result.returncode, result.stdout, result.stderr
 
@@ -214,7 +214,7 @@ class Loader(unittest.TestCase):
         self.list.write_text(''.join(self.lines if lines is None else lines))
 
     def run_helper(self, *args, **env):
-        environment = dict(os.environ, ASAN_OPTIONS='detect_leaks=0', **env)
+        environment = {**os.environ, 'ASAN_OPTIONS': 'detect_leaks=0', **env}
         result = subprocess.run([ARGS.driver, *map(str, args)], capture_output=True, text=True, env=environment, timeout=60)
         return result.returncode, result.stderr
 
@@ -447,8 +447,8 @@ class Stage(unittest.TestCase):
         self.rows = tree(self.root, self.test)
 
     def run_stage(self, **env):
-        environment = dict(os.environ, M19_ROOT=str(self.root), M19_BB=str(self.test / 'bb'), M19_TEST=str(self.test),
-                           M19_AUDIO=str(self.test / 'helper'), M19_MAPPER=str(self.test / 'mapper'), M19_AUDIO_WAIT='20', **env)
+        environment = {**os.environ, 'M19_ROOT': str(self.root), 'M19_BB': str(self.test / 'bb'), 'M19_TEST': str(self.test),
+                       'M19_AUDIO': str(self.test / 'helper'), 'M19_MAPPER': str(self.test / 'mapper'), 'M19_AUDIO_WAIT': '20', **env}
         return subprocess.run(['sh', str(HERE / 'audio-stage')], capture_output=True, text=True, env=environment, timeout=120)
 
     def log(self, name):
@@ -708,7 +708,7 @@ class Observer(unittest.TestCase):
             process.wait()
 
     def run_step(self, **env):
-        environment = dict(os.environ, M19_ROOT=str(self.root), M19_BB=str(self.test / 'bb'), M19_TEST=str(self.test), M19_AUDIO_WAIT='20', **env)
+        environment = {**os.environ, 'M19_ROOT': str(self.root), 'M19_BB': str(self.test / 'bb'), 'M19_TEST': str(self.test), 'M19_AUDIO_WAIT': '20', **env}
         return subprocess.run(['sh', str(HERE / 't3-audio')], capture_output=True, text=True, env=environment, timeout=60)
 
     def assertFails(self, reason):
