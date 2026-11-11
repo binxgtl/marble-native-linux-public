@@ -1,0 +1,68 @@
+#!/bin/busybox sh
+# T9-audio: prepares the RAM /etc and /run/m19 for R5b's Run31 speaker session without touching /data/ubuntu or
+# adding any sound or audio device node to the session's /dev:
+#  - the audio stage must have ended "ready";
+#  - /dev in the new root must hold no /dev/snd, /dev/m11-snd, /dev/m11-heap, /dev/aud_pasthru_adsp,
+#    /dev/msm_audio_ion or /dev/msm_audio_ion_cma;
+#  - udev's persistent ALSA symlink rule (60-persistent-alsa.rules) is masked to /dev/null in the RAM /etc;
+#  - m19-speaker and the SHA256-verified speaker plan.bin are copied into /run/m19 (0700 directory, 0600 plan).
+set -eu
+R=${M19_ROOT:-}
+BB=${M19_BB:-/bin/busybox}
+fail() { printf 'M19 T9 audio failed: %s\n' "$*" >&2 || :; exit 1; }
+case "$R" in ''|/*) ;; *) fail root;; esac
+[ -z "$R" ] || [ ! -L "$R" ] || fail root
+plan=$R/m19/r5
+new=$R/newroot
+safe_dir() { [ ! -L "$1" ] && [ -d "$1" ]; }
+hex64() { case "$1" in *[!0-9a-f]*) return 1;; esac; [ "${#1}" -eq 64 ]; }
+
+[ -f "$R/run/m19/audio.result" ] && [ ! -L "$R/run/m19/audio.result" ] || fail no-stage-result
+[ "$($BB cat "$R/run/m19/audio.result")" = ready ] || fail audio-stage
+safe_dir "$new/run/m19" && safe_dir "$new/etc" && safe_dir "$new/dev" || fail newroot
+
+# 1. The session's /dev must hold no sound or audio node before systemd starts.
+for node in snd m11-snd m11-heap aud_pasthru_adsp msm_audio_ion msm_audio_ion_cma; do
+ [ ! -e "$new/dev/$node" ] && [ ! -L "$new/dev/$node" ] || fail "dev dirty $node"
+done
+
+# 2. Mask udev's persistent ALSA rule in the RAM /etc so coldplug never creates /dev/snd/by-path.
+[ ! -L "$new/etc/udev" ] || fail udev-link
+$BB mkdir -p "$new/etc/udev/rules.d" || fail udev-rules-dir
+safe_dir "$new/etc/udev" && safe_dir "$new/etc/udev/rules.d" || fail udev-rules-dir
+[ -f "$plan/udev-masks" ] && [ ! -L "$plan/udev-masks" ] || fail udev-masks
+rules=0
+while read -r rule; do
+ case "$rule" in ''|'#'*) continue;; esac
+ case "$rule" in .*|*[!A-Za-z0-9._-]*) fail "udev rule $rule";; esac
+ case "$rule" in ?*.rules) ;; *) fail "udev rule $rule";; esac
+ target=$new/etc/udev/rules.d/$rule
+ if [ -d "$target" ] && [ ! -L "$target" ]; then fail "udev rule directory $rule"; fi
+ $BB rm -f "$target" || fail "udev unmask $rule"
+ $BB ln -s /dev/null "$target" || fail "udev mask $rule"
+ rules=$((rules+1))
+done <"$plan/udev-masks"
+[ "$rules" -ge 1 ] || fail "udev mask count $rules"
+
+# 3. Copy the session speaker holder and the verified Run31 plan into RAM (/run/m19).
+[ -f "$R/m19/m19-speaker" ] && [ ! -L "$R/m19/m19-speaker" ] || fail speaker-binary
+[ -f "$R/m19/speaker/plan.bin" ] && [ ! -L "$R/m19/speaker/plan.bin" ] && [ -s "$R/m19/speaker/plan.bin" ] || fail speaker-plan
+[ -f "$R/m19/speaker/plan.sha256" ] && [ ! -L "$R/m19/speaker/plan.sha256" ] || fail speaker-sha
+want=$($BB awk 'NR == 1 { print $1 }' "$R/m19/speaker/plan.sha256") || fail speaker-sha
+hex64 "$want" || fail speaker-sha
+got=$($BB sha256sum "$R/m19/speaker/plan.bin") || fail speaker-hash
+got=${got%% *}
+[ "$got" = "$want" ] || fail "speaker plan hash $got != $want"
+
+[ ! -e "$new/run/m19/m19-speaker" ] && [ ! -L "$new/run/m19/m19-speaker" ] || fail speaker-exists
+[ ! -e "$new/run/m19/speaker" ] && [ ! -L "$new/run/m19/speaker" ] || fail speaker-dir-exists
+$BB cp "$R/m19/m19-speaker" "$new/run/m19/m19-speaker" || fail speaker-copy
+$BB chmod 755 "$new/run/m19/m19-speaker" || fail speaker-mode
+$BB mkdir -m 700 "$new/run/m19/speaker" || fail speaker-dir
+$BB cp "$R/m19/speaker/plan.bin" "$new/run/m19/speaker/plan.bin" || fail plan-copy
+$BB cp "$R/m19/speaker/plan.sha256" "$new/run/m19/speaker/plan.sha256" || fail sha-copy
+$BB chmod 600 "$new/run/m19/speaker/plan.bin" "$new/run/m19/speaker/plan.sha256" || fail plan-mode
+copied=$($BB sha256sum "$new/run/m19/speaker/plan.bin") || fail plan-rehash
+[ "${copied%% *}" = "$want" ] || fail plan-rehash
+printf 'M19 T9 audio: udev_masks=%s plan_sha256=%s\n' "$rules" "$want" >&2
+exit 0

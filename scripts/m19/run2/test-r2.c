@@ -194,11 +194,15 @@ static int report_mode(char **argv)
                            .expected_init = "/usr/lib/systemd/systemd", .settle_ms = (unsigned)strtoul(argv[4], NULL, 10), .poll_ms = 5,
                            .beat_ms = 40, .pace_ms = 1, .log_ms = 20000, .command_ms = (unsigned)strtoul(argv[5], NULL, 10),
                            .final_ms = 1, .tty_wait_ms = 200};
-    /* R5a's PID 1 reads the sound card. */
-    static char audio[4][4200];
+    /* R5a/R5b's PID 1 reads the sound card and, when configured, runs the one-shot speaker gate. */
+    static char audio[4][4200], speaker[7][4200];
     const char *audio_names[] = {"asound/cards", "asound/pcm", "sound-class", "snd"};
+    const char *speaker_names[] = {"proc", "speaker.report", "dev-clean/m11-snd", "dev-clean/m11-heap",
+                                   "dev-clean/aud_pasthru_adsp", "dev-clean/msm_audio_ion", "dev-clean/msm_audio_ion_cma"};
     for (unsigned i = 0; i < 4; i++)
         snprintf(audio[i], sizeof(audio[i]), "%s/%s", root, audio_names[i]);
+    for (unsigned i = 0; i < 7; i++)
+        snprintf(speaker[i], sizeof(speaker[i]), "%s/%s", root, speaker_names[i]);
     if (getenv("M19_TEST_AUDIO")) {
         c.audio = 1;
         c.asound_cards = audio[0];
@@ -206,6 +210,14 @@ static int report_mode(char **argv)
         c.sound_class = audio[2];
         c.snd_dev = audio[3];
         c.audio_card = "ukee-mtp-snd-card";
+    }
+    if (getenv("M19_TEST_SPEAKER")) {
+        c.proc = speaker[0];
+        c.speaker_ms = 250;
+        c.speaker_unit = "marble-speaker.service";
+        c.speaker_report = speaker[1];
+        for (unsigned i = 0; i < 5; i++)
+            c.speaker_clean[i] = speaker[2 + i];
     }
     return m19_report_main(&c);
 }

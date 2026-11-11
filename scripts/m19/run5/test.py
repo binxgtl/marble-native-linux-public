@@ -661,7 +661,7 @@ class Stage(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
 
     def test_scripts_parse_and_write_nothing_but_ram(self):
-        for name in ('audio-stage', 't3-audio', 'amps', 'bootstrap-audio'):
+        for name in ('audio-stage', 't3-audio', 't9-audio', 'amps', 'bootstrap-audio'):
             self.assertEqual(subprocess.run(['sh', '-n', str(HERE / name)]).returncode, 0, name)
         text = (HERE / 'audio-stage').read_text()
         code = '\n'.join(line for line in text.splitlines() if not line.lstrip().startswith('#'))
@@ -763,12 +763,189 @@ class Observer(unittest.TestCase):
         self.assertNotRegex(code, r'\$BB (mknod|mount|umount|cp|rm|mkdir|chmod|blockdev)\b|>"|>>"|\btee\b|/dev/snd')
 
 
+class AudioPrep(unittest.TestCase):
+    """T9-audio: udev ALSA persistent rule mask in RAM /etc, /dev cleanliness, and verified Run31 plan staging."""
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name) / 'root'
+        self.test = Path(self.directory.name) / 'test'
+        self.test.mkdir()
+        (self.test / 'bb').write_text(FAKE_BB)
+        (self.test / 'bb').chmod(0o755)
+        (self.root / 'run/m19').mkdir(parents=True)
+        (self.root / 'run/m19/audio.result').write_text('ready\n')
+        (self.root / 'newroot/run/m19').mkdir(parents=True)
+        (self.root / 'newroot/etc/udev/rules.d').mkdir(parents=True)
+        (self.root / 'newroot/dev').mkdir(parents=True)
+        (self.root / 'm19/r5').mkdir(parents=True)
+        (self.root / 'm19/r5/udev-masks').write_text('# persistent ALSA symlinks\n\n60-persistent-alsa.rules\n')
+        (self.root / 'm19/m19-speaker').write_bytes(b'\x7fELF-m19-speaker')
+        (self.root / 'm19/speaker').mkdir(parents=True)
+        self.plan_bytes = b'M11SPK01' + bytes(range(128))
+        self.plan_sha = hashlib.sha256(self.plan_bytes).hexdigest()
+        (self.root / 'm19/speaker/plan.bin').write_bytes(self.plan_bytes)
+        (self.root / 'm19/speaker/plan.sha256').write_text(f'{self.plan_sha}  plan.bin\n')
+
+    def run_step(self, **env):
+        environment = {**os.environ, 'M19_ROOT': str(self.root), 'M19_BB': str(self.test / 'bb'), 'M19_TEST': str(self.test), **env}
+        return subprocess.run(['sh', str(HERE / 't9-audio')], capture_output=True, text=True, env=environment, timeout=60)
+
+    def assertFails(self, reason, **env):
+        result = self.run_step(**env)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn(f'M19 T9 audio failed: {reason}\n', result.stderr)
+        return result
+
+    def test_masks_udev_rule_and_copies_verified_speaker_bundle(self):
+        existing = self.root / 'newroot/etc/udev/rules.d/60-persistent-alsa.rules'
+        existing.write_text('ACTION=="add", SUBSYSTEM=="sound"\n')
+        result = self.run_step()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f'M19 T9 audio: udev_masks=1 plan_sha256={self.plan_sha}\n', result.stderr)
+        self.assertTrue(existing.is_symlink())
+        self.assertEqual(os.readlink(existing), '/dev/null')
+        spk = self.root / 'newroot/run/m19/m19-speaker'
+        spk_dir = self.root / 'newroot/run/m19/speaker'
+        plan = spk_dir / 'plan.bin'
+        sha_file = spk_dir / 'plan.sha256'
+        self.assertEqual(spk.read_bytes(), b'\x7fELF-m19-speaker')
+        self.assertEqual(spk.stat().st_mode & 0o777, 0o755)
+        self.assertEqual(spk_dir.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(plan.read_bytes(), self.plan_bytes)
+        self.assertEqual(plan.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(sha_file.stat().st_mode & 0o777, 0o600)
+
+    def test_every_precondition_and_integrity_fault_fails(self):
+        self.assertFails('root', M19_ROOT='relative')
+        cases = (
+            ('no-stage-result', lambda: (self.root / 'run/m19/audio.result').unlink()),
+            ('audio-stage', lambda: (self.root / 'run/m19/audio.result').write_text('partial amps\n')),
+            ('newroot', lambda: shutil.rmtree(self.root / 'newroot/dev')),
+            ('dev dirty snd', lambda: (self.root / 'newroot/dev/snd').symlink_to('/missing')),
+            ('dev dirty m11-snd', lambda: (self.root / 'newroot/dev/m11-snd').mkdir()),
+            ('dev dirty m11-heap', lambda: (self.root / 'newroot/dev/m11-heap').mkdir()),
+            ('dev dirty aud_pasthru_adsp', lambda: (self.root / 'newroot/dev/aud_pasthru_adsp').write_text('')),
+            ('dev dirty msm_audio_ion', lambda: (self.root / 'newroot/dev/msm_audio_ion').write_text('')),
+            ('dev dirty msm_audio_ion_cma', lambda: (self.root / 'newroot/dev/msm_audio_ion_cma').write_text('')),
+            ('udev-link', lambda: (shutil.rmtree(self.root / 'newroot/etc/udev'),
+                                   (self.root / 'newroot/etc/udev').symlink_to('/tmp'))),
+            ('udev-masks', lambda: (self.root / 'm19/r5/udev-masks').unlink()),
+            ('udev mask count 0', lambda: (self.root / 'm19/r5/udev-masks').write_text('# none\n')),
+            ('udev rule ../60.rules', lambda: (self.root / 'm19/r5/udev-masks').write_text('../60.rules\n')),
+            ('udev rule .hidden.rules', lambda: (self.root / 'm19/r5/udev-masks').write_text('.hidden.rules\n')),
+            ('udev rule badname', lambda: (self.root / 'm19/r5/udev-masks').write_text('badname\n')),
+            ('udev rule directory 60-persistent-alsa.rules',
+             lambda: (self.root / 'newroot/etc/udev/rules.d/60-persistent-alsa.rules').mkdir()),
+            ('speaker-binary', lambda: (self.root / 'm19/m19-speaker').unlink()),
+            ('speaker-plan', lambda: (self.root / 'm19/speaker/plan.bin').write_bytes(b'')),
+            ('speaker-sha', lambda: (self.root / 'm19/speaker/plan.sha256').write_text(self.plan_sha.upper() + '\n')),
+            (f'speaker plan hash {self.plan_sha} != ' + '0' * 64,
+             lambda: (self.root / 'm19/speaker/plan.sha256').write_text('0' * 64 + '  plan.bin\n')),
+            ('speaker-exists', lambda: (self.root / 'newroot/run/m19/m19-speaker').write_text('')),
+            ('speaker-dir-exists', lambda: (self.root / 'newroot/run/m19/speaker').mkdir()),
+        )
+        for reason, change in cases:
+            with self.subTest(reason=reason):
+                self.setUp()
+                change()
+                self.assertFails(reason)
+
+    def test_the_step_touches_only_ram_etc_and_run(self):
+        text = (HERE / 't9-audio').read_text()
+        code = '\n'.join(line for line in text.splitlines() if not line.lstrip().startswith('#'))
+        self.assertNotRegex(code, r'\b(reboot|poweroff|mkfs|fsck|blkdiscard|fstrim|setrw|insmod|rmmod|modprobe|dd|losetup|mount|umount|mknod)\b|/data')
+        self.assertEqual(re.findall(r'>>?"([^"]+)"', code), [])
+
+
+class Speaker(unittest.TestCase):
+    """m19-speaker (test-speaker.c): recursive /dev/snd scanner, prechecks, and Run31 speaker session."""
+
+    def setUp(self):
+        self.assertIsNotNone(ARGS.speaker_driver, '--speaker-driver required for Speaker tests')
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name)
+
+    def run_speaker(self, *args, as_root=False):
+        env = {**os.environ, 'ASAN_OPTIONS': 'detect_leaks=0'}
+        cmd = [ARGS.speaker_driver, *map(str, args)]
+        if as_root and os.geteuid() != 0:
+            check = subprocess.run(['sudo', '-n', 'true'], capture_output=True)
+            if check.returncode != 0:
+                if os.environ.get('CI'):
+                    self.fail('sudo -n required on CI for Speaker root session tests')
+                self.skipTest('sudo -n unavailable')
+            cmd = ['sudo', '-n', *cmd]
+            self.addCleanup(lambda: subprocess.run(['sudo', '-n', 'rm', '-rf', str(self.root)], capture_output=True))
+        return subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=180)
+
+    def scan(self, path):
+        res = self.run_speaker('scan-snd', path)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        return int(res.stdout.strip())
+
+    def test_scan_snd(self):
+        self.assertEqual(self.scan(self.root / 'absent'), 0)
+        snd = self.root / 'snd'
+        snd.mkdir()
+        self.assertEqual(self.scan(snd), 0)
+        bypath = snd / 'by-path'
+        bypath.mkdir()
+        (bypath / 'platform-sound').symlink_to('../controlC0')
+        self.assertEqual(self.scan(snd), 0)
+
+        live_target = self.root / 'target'
+        live_target.write_text('x')
+        (bypath / 'live').symlink_to(live_target)
+        self.assertEqual(self.scan(snd), 1)
+        (bypath / 'live').unlink()
+        self.assertEqual(self.scan(snd), 0)
+
+        (snd / 'pcmC0D32p').write_text('')
+        self.assertEqual(self.scan(snd), 1)
+        (snd / 'controlC0').write_text('')
+        self.assertEqual(self.scan(snd), 2)
+
+        top_file = self.root / 'top-file'
+        top_file.write_text('')
+        self.assertEqual(self.scan(top_file), 1)
+
+        top_dangling = self.root / 'top-dangling'
+        top_dangling.symlink_to(self.root / 'nowhere')
+        self.assertEqual(self.scan(top_dangling), 1)
+
+        deep = self.root / 'deep'
+        cur = deep
+        for i in range(10):
+            cur = cur / f'd{i}'
+        cur.mkdir(parents=True)
+        self.assertGreaterEqual(self.scan(deep), 1)
+
+    def test_prechecks(self):
+        res = self.run_speaker('prechecks', self.root)
+        self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
+        self.assertIn('PASS m19-speaker prechecks\n', res.stdout)
+
+    def test_root_session(self):
+        if ARGS.no_root_speaker:
+            return
+        res = self.run_speaker('session', self.root, as_root=True)
+        self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
+        self.assertIn('PASS m19-speaker root session\n', res.stdout)
+
+
 def main():
     global ARGS
     parser = argparse.ArgumentParser()
     parser.add_argument('--driver', required=True)
+    parser.add_argument('--speaker-driver')
+    parser.add_argument('--no-root-speaker', action='store_true')
     ARGS, rest = parser.parse_known_args()
     ARGS.driver = str(Path(ARGS.driver).resolve())
+    if ARGS.speaker_driver:
+        ARGS.speaker_driver = str(Path(ARGS.speaker_driver).resolve())
     unittest.main(argv=[sys.argv[0], *rest], verbosity=2)
 
 

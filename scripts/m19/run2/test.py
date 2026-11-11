@@ -21,6 +21,7 @@ sys.path.insert(0, str(HERE))
 import r2plan  # noqa: E402
 import r3plan  # noqa: E402
 import r4plan  # noqa: E402
+import r5plan  # noqa: E402
 import rootfs  # noqa: E402
 
 ARGS = None
@@ -190,9 +191,14 @@ class Handoff(unittest.TestCase):
 
 
 SYSTEMCTL = '''#!/bin/sh
+dir=$(dirname "$0")
 case "$1" in
- is-system-running) cat "$(dirname "$0")/state"; exit 0;;
+ is-system-running) cat "$dir/state"; exit 0;;
  is-active) echo active; echo active; exit "${M19_ACTIVE_RC:-0}";;
+ start)
+  echo "start $2" >> "$dir/started"
+  [ ! -e "$dir/speaker.report.staged" ] || cp "$dir/speaker.report.staged" "$dir/../speaker.report"
+  exit "${M19_START_RC:-0}";;
  --failed) echo "foo.service loaded failed failed Foo";;
  list-jobs) ;;
  --version) echo "systemd 255 (255.4-1ubuntu8)";;
@@ -290,6 +296,13 @@ class Audio(ReportBase):
         self.assertIn('M19 asound cards\n' + self.CARDS, log)
         self.assertIn('M19 asound pcm\n' + self.PCM, log)
 
+        # R5b: an empty /dev/snd or a dangling udev by-path symlink holds no sound node and passes.
+        (self.root / 'snd/by-path').mkdir(parents=True)
+        (self.root / 'snd/by-path/platform-sound').symlink_to('../controlC0')
+        fields, log, audio, colour = self.audio()
+        self.assertEqual((audio['snd_nodes'], audio['audio_ok'], fields[3], colour), ('0', '1', '1', GREEN))
+        self.assertIn('M19 snd-entry ', log)
+
     def test_without_audio_nothing_is_read_or_judged(self):
         shutil.rmtree(self.root / 'asound')
         fields, log, _ = self.parse(self.run_report()[0])
@@ -307,7 +320,10 @@ class Audio(ReportBase):
             ('capture', lambda: (self.root / 'asound/pcm').write_text('00-00: MultiMedia1 (*) :  : playback 1\n'), {'capture': '0'}),
             ('playback', lambda: (self.root / 'asound/pcm').write_text('00-00: MultiMedia1 (*) :  : capture 1\n'), {'playback': '0'}),
             ("another card's pcm", lambda: (self.root / 'asound/pcm').write_text('01-00: x : : playback 1 : capture 1\n'), {'playback': '0'}),
-            ('a sound node', lambda: (self.root / 'snd').mkdir(), {'snd_nodes': '1'}),
+            ('a sound node in snd', lambda: ((self.root / 'snd').mkdir(), (self.root / 'snd/pcmC0D0p').write_text('')), {'snd_nodes': '1'}),
+            ('a live symlink in snd/by-path', lambda: ((self.root / 'snd/by-path').mkdir(parents=True),
+                                                       (self.root / 'snd/by-path/live').symlink_to(self.root / 'mountinfo')), {'snd_nodes': '1'}),
+            ('a top-level sound file', lambda: (self.root / 'snd').write_text(''), {'snd_nodes': '1'}),
             ('a sound link', lambda: (self.root / 'snd').symlink_to(self.root / 'nowhere'), {'snd_nodes': '1'}))
         for name, change, want in cases:
             with self.subTest(name=name):
@@ -324,6 +340,136 @@ class Audio(ReportBase):
         (self.root / 'asound/pcm').write_text('00-00: x : : playback 1 : capture 1\n01-00: y : : playback 1 : capture 1\n')
         fields, _, audio, _ = self.audio()
         self.assertEqual((audio['card'], audio['audio_ok'], fields[3]), ('1', '1', '1'))
+
+
+class SpeakerReport(Audio):
+    """R5b T12-audio: reporter starts marble-speaker.service once, parses speaker.report, and checks the retaining holder."""
+    SHA = 'e1a810a314ce467e4b3f8e49d9759bda21526f6402a303e315a614750b8daa95'
+
+    def valid_fields(self):
+        return {
+            'ok': '1', 'pid': '4242', 'entry_phase': '7', 'fail_step': '0', 'rc': '0', 'session_rc': '0',
+            'spk_stage': '22', 'spk_fail_step': '0', 'regions_mapped': '2',
+            're_verified': '1', 're0_q12': '26099', 're1_q12': '28684',
+            'volume_level': '8', 'duration_ms': '4000', 'pcm_bytes': '768000',
+            'buffers_sent': '100', 'buffers_done': '100', 'bytes_played': '768000',
+            'amp_on': '1', 'amp_off_verified': '1', 'teardown_rc': '0', 'pdr_seen': '0',
+            'census_rc': '0', 'census_why': '0', 'ctl_writes': '6', 'ctl_readbacks': '10',
+            'resources_busy': '1', 'ack_deferred': '0', 'terminal_action': '3',
+            'anchors_held': '2', 'anchor_fds_open': '4', 'pool_held': '1',
+            'regions_in_pool': '2', 'unmap_attempted': '0', 'plan_sha256': self.SHA,
+        }
+
+    def write_staged_report(self, overrides=None, drop=()):
+        items = self.valid_fields()
+        if overrides:
+            items.update(overrides)
+        for key in drop:
+            items.pop(key, None)
+        (self.test / 'speaker.report.staged').write_text(''.join(f'{k}={v}\n' for k, v in items.items()))
+
+    def make_holder(self, pid=4242, state='S', fds=9):
+        pdir = self.root / f'proc/{pid}'
+        (pdir / 'fd').mkdir(parents=True, exist_ok=True)
+        (pdir / 'stat').write_text(f'{pid} (m19-speaker) {state} 1 4242 4242 0 -1 0\n')
+        for i in range(fds):
+            (pdir / 'fd' / str(i)).symlink_to(self.root / 'mountinfo')
+
+    def setUp(self):
+        super().setUp()
+        (self.root / 'dev-clean').mkdir()
+        self.write_staged_report()
+        self.make_holder()
+
+    def run_speaker_report(self, env=None):
+        merged = {'M19_TEST_AUDIO': '1', 'M19_TEST_SPEAKER': '1'}
+        if env:
+            merged.update(env)
+        data, colour = self.run_report(env=merged)
+        fields, log, steps = self.parse(data)
+        audio_line = re.search(r'M19 R5 audio (.*)\n', log)
+        spk_line = re.search(r'M19 R5 speaker (.*)\n', log)
+        audio = dict(item.split('=') for item in audio_line.group(1).split()) if audio_line else None
+        spk = dict(item.split('=') for item in spk_line.group(1).split()) if spk_line else None
+        return fields, log, steps, audio, spk, colour
+
+    def test_valid_playback_and_retaining_holder_pass(self):
+        fields, log, steps, audio, spk, colour = self.run_speaker_report()
+        self.assertEqual((self.test / 'started').read_text(), 'start marble-speaker.service\n')
+        self.assertIn('M19STEP T12-audio START', steps)
+        self.assertIn('M19STEP T12-audio OK 1 22 768000 1 9', steps)
+        self.assertEqual((spk['speaker_ok'], audio['audio_ok'], fields[3], colour), ('1', '1', '1', GREEN))
+        self.assertIn('M19 speaker report\nok=1\n', log)
+
+    def test_every_speaker_gate_failure_is_rejected(self):
+        bad_overrides = (
+            ('ok=0', {'ok': '0'}),
+            ('pid=1', {'pid': '1'}),
+            ('entry_phase=6', {'entry_phase': '6'}),
+            ('fail_step=1', {'fail_step': '1'}),
+            ('rc=-1', {'rc': '-1'}),
+            ('session_rc=-5', {'session_rc': '-5'}),
+            ('spk_stage=21', {'spk_stage': '21'}),
+            ('spk_fail_step=1', {'spk_fail_step': '1'}),
+            ('regions_mapped=1', {'regions_mapped': '1'}),
+            ('re_verified=0', {'re_verified': '0'}),
+            ('re0_q12=0', {'re0_q12': '0'}),
+            ('re1_q12=0', {'re1_q12': '0'}),
+            ('volume_level=0', {'volume_level': '0'}),
+            ('volume_level=9', {'volume_level': '9'}),
+            ('duration_ms=0', {'duration_ms': '0'}),
+            ('duration_ms=5001', {'duration_ms': '5001'}),
+            ('pcm_bytes=0', {'pcm_bytes': '0', 'bytes_played': '0'}),
+            ('buffers_sent=0', {'buffers_sent': '0', 'buffers_done': '0'}),
+            ('buffers_done!=sent', {'buffers_done': '99'}),
+            ('bytes_played!=pcm', {'bytes_played': '767996'}),
+            ('amp_on=0', {'amp_on': '0'}),
+            ('amp_off_verified=0', {'amp_off_verified': '0'}),
+            ('teardown_rc=-5', {'teardown_rc': '-5'}),
+            ('pdr_seen=1', {'pdr_seen': '1'}),
+            ('census_rc=-1', {'census_rc': '-1'}),
+            ('census_why=1', {'census_why': '1'}),
+            ('resources_busy=0', {'resources_busy': '0'}),
+            ('terminal_action=1', {'terminal_action': '1'}),
+            ('anchors_held=1', {'anchors_held': '1'}),
+            ('anchor_fds_open=3', {'anchor_fds_open': '3'}),
+            ('pool_held=0', {'pool_held': '0'}),
+            ('regions_in_pool=1', {'regions_in_pool': '1'}),
+            ('unmap_attempted=1', {'unmap_attempted': '1'}),
+            ('bad_sha_upper', {'plan_sha256': self.SHA.upper()}),
+            ('bad_sha_short', {'plan_sha256': self.SHA[:-1]}),
+            ('non_int', {'bytes_played': '768000x'}),
+        )
+        for label, ov in bad_overrides:
+            with self.subTest(label=label):
+                self.setUp()
+                self.write_staged_report(overrides=ov)
+                fields, _, steps, audio, spk, colour = self.run_speaker_report()
+                self.assertEqual((spk['speaker_ok'], audio['audio_ok'], fields[3], colour), ('0', '0', '0', YELLOW))
+                self.assertTrue(any(s.startswith('M19STEP T12-audio FAIL ') for s in steps))
+
+        # Missing required key (e.g. teardown_rc omitted -> stays LONG_MIN, never defaults to 0!)
+        self.setUp()
+        self.write_staged_report(drop=('teardown_rc',))
+        fields, _, _, audio, spk, colour = self.run_speaker_report()
+        self.assertEqual((spk['speaker_ok'], audio['audio_ok'], fields[3], colour), ('0', '0', '0', YELLOW))
+
+        # Unit start failure, missing report, zombie holder, too few holder fds, dirty private node
+        extra = (
+            ('unit_rc', lambda: None, {'M19_START_RC': '1'}),
+            ('missing_report', lambda: (self.test / 'speaker.report.staged').unlink(), {}),
+            ('zombie_holder', lambda: (shutil.rmtree(self.root / 'proc/4242'), self.make_holder(state='Z')), {}),
+            ('few_fds', lambda: (shutil.rmtree(self.root / 'proc/4242'), self.make_holder(fds=7)), {}),
+            ('dirty_priv_node', lambda: (self.root / 'dev-clean/m11-snd').symlink_to('/missing'), {}),
+        )
+        for label, change, env in extra:
+            with self.subTest(label=label):
+                self.setUp()
+                change()
+                fields, _, steps, audio, spk, colour = self.run_speaker_report(env=env)
+                self.assertEqual((spk['speaker_ok'], audio['audio_ok'], fields[3], colour), ('0', '0', '0', YELLOW))
+                if label == 'missing_report':
+                    self.assertTrue(any(s.startswith('M19BEAT T12-audio ') for s in steps))
 
 
 class Report(ReportBase):
@@ -823,12 +969,15 @@ class Static(unittest.TestCase):
                    if line[:1] in '+-' and line[:3] not in ('+++', '---')]
         self.assertEqual(changes, [
             '+     {"T3-audio", "/m19/t3-audio", 120000, M19_STEP_REQUIRED},',
+            '+     {"T9-audio", "/m19/t9-audio", 30000, M19_STEP_REQUIRED},',
             '-     .bootstrap = "/m19/bootstrap", .adsp = "/m19/adsp", .connector = "/sbin/m15-connector", .display = "/sbin/m16-display",',
             '+     .bootstrap = "/m19/bootstrap-audio", .adsp = "/m19/adsp", .connector = "/sbin/m15-connector", .display = "/sbin/m16-display",',
             '-     .bootstrap_ms = 120000, .display_ms = 20000, .blue_ms = 3000, .final_ms = 600000, .poll_ms = 5, .pace_ms = 20,',
             '+     .bootstrap_ms = 180000, .display_ms = 20000, .blue_ms = 3000, .final_ms = 600000, .poll_ms = 5, .pace_ms = 20,',
-            '+     .audio = 1, .asound_cards = "/proc/asound/cards", .asound_pcm = "/proc/asound/pcm", .sound_class = "/sys/class/sound", .snd_dev = "/dev/snd",',
-            '+     .audio_card = "ukee-mtp-snd-card",',
+            '+     .audio = 1, .speaker_ms = 30000, .asound_cards = "/proc/asound/cards", .asound_pcm = "/proc/asound/pcm",',
+            '+     .sound_class = "/sys/class/sound", .snd_dev = "/dev/snd", .audio_card = "ukee-mtp-snd-card",',
+            '+     .speaker_unit = "marble-speaker.service", .speaker_report = "/run/m19/speaker.report",',
+            '+     .speaker_clean = {"/dev/m11-snd", "/dev/m11-heap", "/dev/aud_pasthru_adsp", "/dev/msm_audio_ion", "/dev/msm_audio_ion_cma"},',
             '-     if (m19_run_main(&run) == M19_END_PASS) {',
             '+     enum m19_run_end end = m19_run_main(&run);',
             '+     if (end == M19_END_BOOTSTRAP) {',
@@ -842,6 +991,7 @@ class Static(unittest.TestCase):
             '+     if (end == M19_END_PASS) {'])
         names = re.findall(r'\{"(T\d+-[a-z]+)", "/m19/(t\d-[a-z]+)"', (HERE / 'pid5.c').read_text())
         self.assertEqual(names[0], ('T3-audio', 't3-audio'))
+        self.assertIn(('T9-audio', 't9-audio'), names)
         self.assertLessEqual(len(names), int(re.search(r'#define M19_STEPS_MAX (\d+)', (HERE.parent / 'run1/r1.h').read_text()).group(1)))
 
     def test_t9_gpu_writes_only_ram_copies_and_the_firmware_path(self):
@@ -978,6 +1128,30 @@ class Plan4(unittest.TestCase):
         # R4e: nothing in the session touches xfwm4's settings; only the reporter runs the compositor script.
         self.assertNotIn('autostart', r4plan.SESSION)
         self.assertNotIn('gpu-compositor', r4plan.SESSION)
+
+
+class Plan5(unittest.TestCase):
+    def test_render_is_r4_with_r5b_speaker_and_alsa_masks(self):
+        files, r4 = r5plan.render(), r4plan.render()
+        self.assertEqual(files['m19/r2/default'], b'm19-r5.target\n')
+        self.assertEqual(files['m19/r2/files'].decode().split(), list(r5plan.FILES))
+        for name in ('m19/r3/xorg.conf', 'm19/r3/xorg-60.conf', 'm19/r4/xorg-glamor.conf', 'm19/r4/modules', 'm19/r4/firmware'):
+            self.assertEqual(files[name], r4[name], name)
+        self.assertFalse([name for name in files if re.search(r'm19-r[34](-report\.service|\.target)$', name)])
+        for unit in ('alsa-restore.service', 'alsa-state.service'):
+            self.assertIn(unit, r5plan.MASKED)
+            self.assertIn(f'{unit}\n'.encode(), files['m19/r2/masks'])
+        self.assertEqual(files['m19/r5/udev-masks'], b'60-persistent-alsa.rules\n')
+
+    def test_speaker_and_target_units(self):
+        self.assertNotIn('marble-speaker.service', r5plan.TARGET)
+        self.assertIn('Wants=multi-user.target m19-r5-report.service m19-r3-guard.service marble-xorg.service marble-xfce.service\n', r5plan.TARGET)
+        self.assertIn('ExecStart=/run/m19/m19-report report\n', r5plan.REPORT)
+        self.assertEqual(r5plan.FILES['systemd/system/marble-speaker.service'], r5plan.SPEAKER)
+        for line in ('DefaultDependencies=no', 'IgnoreOnIsolate=yes', 'Type=simple', 'ExecStart=/run/m19/m19-speaker',
+                     'Restart=no', 'KillMode=none', 'SendSIGKILL=no', 'TimeoutStopSec=infinity', 'LimitCORE=0'):
+            self.assertIn(line + '\n', r5plan.SPEAKER)
+        self.assertNotIn('WantedBy=', r5plan.SPEAKER)
 
 
 SESSION_FAKES = (('xdpyinfo', '#!/bin/sh\n[ -e "$(dirname "$0")/x-up" ]\n'),

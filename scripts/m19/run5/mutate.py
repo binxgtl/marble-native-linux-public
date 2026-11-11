@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Mutation check for R5a: every mutant of the audio helper, the audio stage, T3-audio or the amplifier sample must
-fail test.py."""
+"""Mutation check for R5a + R5b: every mutant of the audio helper, the audio stage, T3-audio, T9-audio, the amplifier
+sample, or the Run31 session speaker holder must fail test.py."""
 import concurrent.futures
 import os
 import shutil
@@ -10,10 +10,35 @@ import tempfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+ROOT = HERE.parents[2]
+REPAIR = ROOT / 'scripts/m11/qualification/runtime-repair'
+OWN = ROOT / 'scripts/m11/qualification/ownership'
+NATIVE = ROOT / 'scripts/m11/anchor-native'
+
 HELPER = ('Helper',)
 LOADER = ('Loader',)
 STAGE = ('Stage',)
 OBSERVER = ('Observer',)
+AUDIOPREP = ('AudioPrep',)
+SPEAKER = ('Speaker',)
+
+SPK_FIXED_SRCS = (
+    HERE.parent / 'unlock/hash.c',
+    *(REPAIR / f'{u}.c' for u in ('m11_gpr_engine', 'm11_shmem', 'm11_apm_protocol', 'm11_aw_protection', 'm11_strict_mock')),
+    *(OWN / f'{u}.c' for u in ('m11_custodian', 'm11_pid1_anchor', 'm11_anchor_linux', 'm11_anchor_owner')),
+    *(NATIVE / f'{u}.c' for u in (
+        'gpr_transport_native', 'shmem_backend_native', 'dmabuf_pool_native', 'heap_node_native',
+        'intent_journal_native', 'pdr_loop_native', 'terminal_native', 'custodian_runner_native',
+        'custodian_boot_native', 'pd_session_native', 'custodian_entry_native', 'snd_backend_native',
+        'speaker_plan_native', 'speaker_session_native')),
+    HERE / 'test-speaker.c',
+)
+SPK_CFLAGS = (
+    '-std=c11', '-O1', '-w',
+    '-DM11_ANCHOR_NATIVE', '-DM11_CUSTODIAN_NATIVE', '-DM11_ANCHOR_NATIVE_ION',
+    f'-I{OWN}', f'-I{REPAIR}', f'-I{NATIVE}',
+)
+
 MUTANTS = (
     # The LP metadata: every check refuses before any device exists.
     ('audio.c', 'if (le32(geometry) != LP_GEOMETRY_MAGIC || le32(geometry + 4) != LP_GEOMETRY_BYTES)', 'if (0)', HELPER),
@@ -78,6 +103,32 @@ MUTANTS = (
     # The amplifier sample both share.
     ('amps', 'then linked=1; else amp_bad=1; fi', 'then linked=1; else linked=1; fi', STAGE),
     ('amps', ' && [ "$amp34_adapter" = "$amp35_adapter" ]', '', STAGE),
+    # T9-audio: RAM udev persistent ALSA rule mask, /dev cleanliness, and SHA256-verified speaker bundle.
+    ('t9-audio', '[ "$($BB cat "$R/run/m19/audio.result")" = ready ] || fail audio-stage', ':', AUDIOPREP),
+    ('t9-audio', '[ ! -e "$new/dev/$node" ] && [ ! -L "$new/dev/$node" ] || fail "dev dirty $node"', ':', AUDIOPREP),
+    ('t9-audio', '$BB ln -s /dev/null "$target" || fail "udev mask $rule"', ':', AUDIOPREP),
+    ('t9-audio', '[ "$rules" -ge 1 ] || fail "udev mask count $rules"', ':', AUDIOPREP),
+    ('t9-audio', '[ "$got" = "$want" ] || fail "speaker plan hash $got != $want"', ':', AUDIOPREP),
+    ('t9-audio', '[ "${copied%% *}" = "$want" ] || fail plan-rehash', ':', AUDIOPREP),
+    # m19-speaker: /dev/snd recursive scanner, pre-open holder scan, plan verification, single-run lock, and Run31 gates.
+    ('speaker.c', 'if (depth == 0 && !S_ISDIR(st.st_mode)) return 1;', 'if (0) return 1;', SPEAKER),
+    ('speaker.c', 'if (stat(path, &target) == 0) return 1;\n        return errno == ENOENT ? 0 : 1;', 'return 1;', SPEAKER),
+    ('speaker.c', 'if (stat(path, &target) == 0) return 1;', 'if (stat(path, &target) == 0) return 0;', SPEAKER),
+    ('speaker.c', 'if (snd_devs < 3u) return -ENODEV;', 'if (0) return -ENODEV;', SPEAKER),
+    ('speaker.c', 'if (st.st_rdev == rdevs[i]) {\n                    rc = -EBUSY;',
+     'if (0) {\n                    rc = -EBUSY;', SPEAKER),
+    ('speaker.c', 'if (memcmp(ctx->plan_sha, sha_raw, 64u) != 0) return -EBADMSG;', 'if (0) return -EBADMSG;', SPEAKER),
+    ('speaker.c', 'if (ctx->plan.duration_ms == 0u || ctx->plan.duration_ms > M19_SPK_MAX_DURATION_MS) return -EINVAL;',
+     'if (ctx->plan.duration_ms == 0u) return -EINVAL;', SPEAKER),
+    ('speaker.c', 'if (ctx->plan.peak_mdbfs > M19_SPK_MAX_PEAK_MDBFS) return -EINVAL;', 'if (0) return -EINVAL;', SPEAKER),
+    ('speaker.c', 'if (ctx->plan.volume_level == 0u || ctx->plan.volume_level > M19_SPK_MAX_VOLUME_LEVEL) return -EINVAL;',
+     'if (ctx->plan.volume_level == 0u) return -EINVAL;', SPEAKER),
+    ('speaker.c', 'O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC', 'O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC', SPEAKER),
+    ('speaker.c', 'return -EPERM; /* A session daemon never calls reboot(2); falls through to speaker_terminal_hold. */',
+     'return 0;', SPEAKER),
+    ('speaker.c', 'm11_snd_release(&ctx->snd);', '(void)0;', SPEAKER),
+    ('speaker.c', 're_verified == 1 && re0_q12 > 0u && re1_q12 > 0u &&', 're0_q12 > 0u && re1_q12 > 0u &&', SPEAKER),
+    ('speaker.c', 'r->bytes_played == ctx->plan.pcm.len &&', '1 &&', SPEAKER),
 )
 
 
@@ -85,7 +136,19 @@ class Broken(Exception):
     """A mutant that does not apply or does not build: the check itself is wrong."""
 
 
-def run(number, name, old, new, classes):
+def precompile_speaker_objects(obj_dir: Path):
+    objs = []
+    for idx, src in enumerate(SPK_FIXED_SRCS):
+        obj = obj_dir / f'o{idx}_{src.stem}.o'
+        built = subprocess.run(['gcc', *SPK_CFLAGS, f'-I{HERE}', '-c', str(src), '-o', str(obj)],
+                               capture_output=True, timeout=120)
+        if built.returncode:
+            raise Broken(f'precompile failed for {src}:\n{built.stderr.decode("utf-8", "replace")}')
+        objs.append(str(obj))
+    return objs
+
+
+def run(number, name, old, new, classes, spk_objs):
     """True when test.py fails on the mutant. Each mutant gets its own tree, so they run side by side."""
     source = (HERE / name).read_text(encoding='utf-8')
     if old not in source:
@@ -102,25 +165,38 @@ def run(number, name, old, new, classes):
                                cwd=target, capture_output=True, timeout=120)
         if built.returncode:
             raise Broken(f'mutant {number} does not compile:\n{built.stderr.decode("utf-8", "replace")}')
+        cmd = [sys.executable, 'test.py', '--failfast', '--driver', 'driver']
+        if 'Speaker' in classes:
+            built_spk = subprocess.run(['gcc', *SPK_CFLAGS, '-I.', 'speaker.c', *spk_objs, '-o', 'speaker-driver'],
+                                       cwd=target, capture_output=True, timeout=120)
+            if built_spk.returncode:
+                raise Broken(f'mutant {number} speaker does not compile:\n{built_spk.stderr.decode("utf-8", "replace")}')
+            cmd.extend(['--speaker-driver', 'speaker-driver'])
+        cmd.extend(classes)
         try:
             # The first failure kills the mutant, so the rest of its classes need not run.
-            result = subprocess.run([sys.executable, 'test.py', '--failfast', '--driver', 'driver', *classes], cwd=target, capture_output=True,
-                                    timeout=600)
+            result = subprocess.run(cmd, cwd=target, capture_output=True, timeout=600)
             return result.returncode != 0
         except subprocess.TimeoutExpired:
             return True
 
 
 def main():
-    workers = max(1, min(8, os.cpu_count() or 1))
-    with concurrent.futures.ThreadPoolExecutor(workers) as pool:
-        futures = [pool.submit(run, number, *mutant) for number, mutant in enumerate(MUTANTS)]
-        try:
-            killed = [future.result() for future in futures]
-        except Broken as error:
-            for future in futures:
-                future.cancel()
-            sys.exit(str(error))
+    for number, (name, old, _, _) in enumerate(MUTANTS):
+        source = (HERE / name).read_text(encoding='utf-8')
+        if old not in source:
+            sys.exit(f'mutant {number} does not apply to {name}: {old}')
+    with tempfile.TemporaryDirectory() as obj_tmp:
+        spk_objs = precompile_speaker_objects(Path(obj_tmp))
+        workers = max(1, min(8, os.cpu_count() or 1))
+        with concurrent.futures.ThreadPoolExecutor(workers) as pool:
+            futures = [pool.submit(run, number, *mutant, spk_objs) for number, mutant in enumerate(MUTANTS)]
+            try:
+                killed = [future.result() for future in futures]
+            except Broken as error:
+                for future in futures:
+                    future.cancel()
+                sys.exit(str(error))
     survivors = [(number, name, old) for number, ((name, old, _, _), dead) in enumerate(zip(MUTANTS, killed)) if not dead]
     print(f'{len(MUTANTS) - len(survivors)} of {len(MUTANTS)} R5 mutants killed, {workers} at a time')
     for survivor in survivors:

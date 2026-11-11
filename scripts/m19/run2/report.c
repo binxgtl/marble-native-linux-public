@@ -1296,9 +1296,327 @@ struct audio {
     int card, control, playback, capture, snd_nodes, audio_ok;
 };
 
-/* R5a: Run12's registration as the session sees it, read-only. The card by name and its index, its control
- * device in sysfs, a playback and a capture PCM, and no /dev/snd at all. */
-static void audio_phase(const struct m19_report *c, struct audio *a)
+struct speaker {
+    int unit_rc, report_seen, report_valid, holder_alive, holder_fds, private_clean, speaker_ok;
+    long ok, pid, entry_phase, fail_step, rc, session_rc, spk_stage, spk_fail_step;
+    long regions_mapped, re_verified, re0_q12, re1_q12, volume_level, duration_ms, pcm_bytes;
+    long buffers_sent, buffers_done, bytes_played, amp_on, amp_off_verified, teardown_rc, pdr_seen;
+    long census_rc, census_why, ctl_writes, ctl_readbacks, resources_busy, ack_deferred;
+    long terminal_action, anchors_held, anchor_fds_open, pool_held, regions_in_pool, unmap_attempted;
+    char plan_sha[80];
+};
+
+static int is_digits_only(const char *s)
+{
+    if (!s || !*s)
+        return 0;
+    for (; *s; s++)
+        if (*s < '0' || *s > '9')
+            return 0;
+    return 1;
+}
+
+static int is_hex64(const char *s)
+{
+    if (!s)
+        return 0;
+    size_t n = 0;
+    for (; s[n]; n++)
+        if (!((s[n] >= '0' && s[n] <= '9') || (s[n] >= 'a' && s[n] <= 'f')))
+            return 0;
+    return n == 64;
+}
+
+/* R5b: walk /dev/snd recursively when present, logging every entry for diagnostics. Dangling symlinks
+ * (such as udev's by-path rule when no /dev/snd/controlC* exists) hold no device node; any character,
+ * block, regular, FIFO, socket, top-level non-directory, live symlink target or unreadable directory counts. */
+static int scan_snd(const char *path, int depth)
+{
+    if (!path || !*path || depth > 8)
+        return 1;
+    struct stat st;
+    if (lstat(path, &st) != 0) {
+        if (errno == ENOENT)
+            return 0;
+        addf("M19 snd-entry %s lstat_errno=%d\n", path, errno);
+        return 1;
+    }
+    addf("M19 snd-entry %s mode=%o\n", path, (unsigned)st.st_mode);
+    if (depth == 0 && !S_ISDIR(st.st_mode))
+        return 1;
+    if (S_ISLNK(st.st_mode)) {
+        struct stat target;
+        if (stat(path, &target) == 0)
+            return 1;
+        return errno == ENOENT ? 0 : 1;
+    }
+    if (!S_ISDIR(st.st_mode))
+        return 1;
+    int fd = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0)
+        return 1;
+    DIR *dir = fdopendir(fd);
+    if (!dir) {
+        close(fd);
+        return 1;
+    }
+    int count = 0;
+    for (;;) {
+        errno = 0;
+        struct dirent *entry = readdir(dir);
+        if (!entry) {
+            if (errno != 0)
+                count++;
+            break;
+        }
+        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, ".."))
+            continue;
+        char child[1400];
+        int n = snprintf(child, sizeof(child), "%s/%s", path, entry->d_name);
+        if (n <= 0 || (size_t)n >= sizeof(child))
+            count++;
+        else
+            count += scan_snd(child, depth + 1);
+    }
+    closedir(dir);
+    return count;
+}
+
+static void speaker_init(struct speaker *sp)
+{
+    memset(sp, 0, sizeof(*sp));
+    sp->unit_rc = -1;
+    long *fields[] = {
+        &sp->ok, &sp->pid, &sp->entry_phase, &sp->fail_step, &sp->rc, &sp->session_rc,
+        &sp->spk_stage, &sp->spk_fail_step, &sp->regions_mapped, &sp->re_verified,
+        &sp->re0_q12, &sp->re1_q12, &sp->volume_level, &sp->duration_ms, &sp->pcm_bytes,
+        &sp->buffers_sent, &sp->buffers_done, &sp->bytes_played, &sp->amp_on,
+        &sp->amp_off_verified, &sp->teardown_rc, &sp->pdr_seen, &sp->census_rc,
+        &sp->census_why, &sp->ctl_writes, &sp->ctl_readbacks, &sp->resources_busy,
+        &sp->ack_deferred, &sp->terminal_action, &sp->anchors_held, &sp->anchor_fds_open,
+        &sp->pool_held, &sp->regions_in_pool, &sp->unmap_attempted,
+    };
+    for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); i++)
+        *fields[i] = LONG_MIN;
+}
+
+static int parse_speaker_report(char *text, struct speaker *sp)
+{
+    struct spk_key { const char *name; long *slot; };
+    const struct spk_key keys[] = {
+        {"ok", &sp->ok},
+        {"pid", &sp->pid},
+        {"entry_phase", &sp->entry_phase},
+        {"fail_step", &sp->fail_step},
+        {"rc", &sp->rc},
+        {"session_rc", &sp->session_rc},
+        {"spk_stage", &sp->spk_stage},
+        {"spk_fail_step", &sp->spk_fail_step},
+        {"regions_mapped", &sp->regions_mapped},
+        {"re_verified", &sp->re_verified},
+        {"re0_q12", &sp->re0_q12},
+        {"re1_q12", &sp->re1_q12},
+        {"volume_level", &sp->volume_level},
+        {"duration_ms", &sp->duration_ms},
+        {"pcm_bytes", &sp->pcm_bytes},
+        {"buffers_sent", &sp->buffers_sent},
+        {"buffers_done", &sp->buffers_done},
+        {"bytes_played", &sp->bytes_played},
+        {"amp_on", &sp->amp_on},
+        {"amp_off_verified", &sp->amp_off_verified},
+        {"teardown_rc", &sp->teardown_rc},
+        {"pdr_seen", &sp->pdr_seen},
+        {"census_rc", &sp->census_rc},
+        {"census_why", &sp->census_why},
+        {"ctl_writes", &sp->ctl_writes},
+        {"ctl_readbacks", &sp->ctl_readbacks},
+        {"resources_busy", &sp->resources_busy},
+        {"ack_deferred", &sp->ack_deferred},
+        {"terminal_action", &sp->terminal_action},
+        {"anchors_held", &sp->anchors_held},
+        {"anchor_fds_open", &sp->anchor_fds_open},
+        {"pool_held", &sp->pool_held},
+        {"regions_in_pool", &sp->regions_in_pool},
+        {"unmap_attempted", &sp->unmap_attempted},
+    };
+    int seen_sha = 0;
+    for (char *line = strtok(text, "\n"); line; line = strtok(NULL, "\n")) {
+        char *eq = strchr(line, '=');
+        if (!eq || eq == line)
+            return 0;
+        *eq = 0;
+        const char *val = eq + 1;
+        if (!strcmp(line, "plan_sha256")) {
+            if (seen_sha || strlen(val) >= sizeof(sp->plan_sha))
+                return 0;
+            snprintf(sp->plan_sha, sizeof(sp->plan_sha), "%s", val);
+            seen_sha = 1;
+            continue;
+        }
+        int matched = 0;
+        for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
+            if (strcmp(line, keys[i].name))
+                continue;
+            if (*keys[i].slot != LONG_MIN || !*val)
+                return 0;
+            char *end = NULL;
+            errno = 0;
+            long parsed = strtol(val, &end, 10);
+            if (end == val || *end != 0 || errno || parsed == LONG_MIN)
+                return 0;
+            *keys[i].slot = parsed;
+            matched = 1;
+            break;
+        }
+        if (!matched)
+            return 0;
+    }
+    return seen_sha;
+}
+
+static void check_speaker_holder(const struct m19_report *c, struct speaker *sp)
+{
+    if (!c->proc || sp->pid <= 1)
+        return;
+    char path[1024], stat_line[1024];
+    snprintf(path, sizeof(path), "%s/%ld/stat", c->proc, sp->pid);
+    if (!read_small(path, stat_line, sizeof(stat_line))) {
+        const char *after = strrchr(stat_line, ')');
+        char pstate = 0;
+        if (after && sscanf(after + 1, " %c", &pstate) == 1)
+            sp->holder_alive = pstate != 'Z' && pstate != 'X' && pstate != 'x';
+    }
+    snprintf(path, sizeof(path), "%s/%ld/fd", c->proc, sp->pid);
+    int fd = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) {
+        sp->holder_alive = 0;
+        return;
+    }
+    DIR *dir = fdopendir(fd);
+    if (!dir) {
+        close(fd);
+        sp->holder_alive = 0;
+        return;
+    }
+    int fds = 0;
+    for (;;) {
+        errno = 0;
+        struct dirent *entry = readdir(dir);
+        if (!entry) {
+            if (errno != 0)
+                fds = -1;
+            break;
+        }
+        if (!is_digits_only(entry->d_name))
+            continue;
+        char item[1400];
+        struct stat st;
+        int n = snprintf(item, sizeof(item), "%s/%s", path, entry->d_name);
+        if (n <= 0 || (size_t)n >= sizeof(item) || lstat(item, &st) != 0) {
+            fds = -1;
+            break;
+        }
+        fds++;
+    }
+    closedir(dir);
+    sp->holder_fds = fds;
+}
+
+/* R5b: start marble-speaker.service once in T12-audio, wait for its atomic speaker.report, and verify
+ * every Run31 gate, the live retaining holder in /proc, and absence of private audio nodes in /dev. */
+static void speaker_phase(const struct m19_report *c, int tty, struct speaker *sp)
+{
+    speaker_init(sp);
+    (void)m19_wire_line(tty, c->pace_ms, M19_DEVICE_STEP " T12-audio START");
+    char *start_argv[] = {(char *)c->systemctl, "start", (char *)c->speaker_unit, NULL};
+    sp->unit_rc = section(start_argv, SECTION_CAP / 16, c->command_ms);
+
+    unsigned long long began = m19_now_ms(), deadline = began + c->speaker_ms, beat = began + c->beat_ms;
+    unsigned wait_step = c->poll_ms && c->poll_ms < 50 ? c->poll_ms : 50;
+    for (;;) {
+        struct stat st;
+        if (c->speaker_report && lstat(c->speaker_report, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0) {
+            sp->report_seen = 1;
+            break;
+        }
+        unsigned long long now = m19_now_ms();
+        if (sp->unit_rc != 0 || now >= deadline)
+            break;
+        if (c->beat_ms && now >= beat) {
+            (void)m19_wire_line(tty, c->pace_ms, M19_DEVICE_BEAT " T12-audio %llu wait", (now - began) / 1000);
+            beat = now + c->beat_ms;
+        }
+        (void)poll(NULL, 0, (int)wait_step);
+    }
+
+    if (sp->report_seen) {
+        char raw[4096];
+        if (file_text(c->speaker_report, raw, sizeof(raw)) > 0)
+            sp->report_valid = parse_speaker_report(raw, sp);
+    }
+    check_speaker_holder(c, sp);
+
+    sp->private_clean = 1;
+    for (unsigned i = 0; i < sizeof(c->speaker_clean) / sizeof(c->speaker_clean[0]); i++) {
+        if (!c->speaker_clean[i])
+            continue;
+        struct stat st;
+        if (lstat(c->speaker_clean[i], &st) == 0 || errno != ENOENT) {
+            addf("M19 R5 speaker dirty %s\n", c->speaker_clean[i]);
+            sp->private_clean = 0;
+        }
+    }
+
+    sp->speaker_ok =
+        sp->unit_rc == 0 &&
+        sp->report_seen &&
+        sp->report_valid &&
+        sp->ok == 1 &&
+        sp->pid > 1 &&
+        sp->entry_phase == 7 &&
+        sp->fail_step == 0 &&
+        sp->rc == 0 &&
+        sp->session_rc == 0 &&
+        sp->spk_stage == 22 &&
+        sp->spk_fail_step == 0 &&
+        sp->regions_mapped == 2 &&
+        sp->re_verified == 1 &&
+        sp->re0_q12 > 0 &&
+        sp->re1_q12 > 0 &&
+        sp->volume_level > 0 && sp->volume_level <= 8 &&
+        sp->duration_ms > 0 && sp->duration_ms <= 5000 &&
+        sp->pcm_bytes > 0 &&
+        sp->buffers_sent >= 1 &&
+        sp->buffers_done == sp->buffers_sent &&
+        sp->bytes_played == sp->pcm_bytes &&
+        sp->amp_on == 1 &&
+        sp->amp_off_verified == 1 &&
+        sp->teardown_rc == 0 &&
+        sp->pdr_seen == 0 &&
+        sp->census_rc == 0 &&
+        sp->census_why == 0 &&
+        sp->resources_busy == 1 &&
+        sp->terminal_action == 3 &&
+        sp->anchors_held == 2 &&
+        sp->anchor_fds_open == 4 &&
+        sp->pool_held == 1 &&
+        sp->regions_in_pool == 2 &&
+        sp->unmap_attempted == 0 &&
+        is_hex64(sp->plan_sha) &&
+        sp->holder_alive &&
+        sp->holder_fds >= 8 &&
+        sp->private_clean;
+
+    (void)m19_wire_line(tty, c->pace_ms, M19_DEVICE_STEP " T12-audio %s %d %ld %ld %d %d",
+                        sp->speaker_ok ? "OK" : "FAIL", sp->speaker_ok,
+                        sp->spk_stage == LONG_MIN ? -1L : sp->spk_stage,
+                        sp->bytes_played == LONG_MIN ? -1L : sp->bytes_played,
+                        sp->holder_alive, sp->holder_fds);
+}
+
+/* R5a/R5b: Run12's registration as the session sees it, read-only. The card by name and its index, its control
+ * device in sysfs, a playback and a capture PCM, and zero sound device nodes in /dev/snd. */
+static void audio_phase(const struct m19_report *c, struct audio *a, const struct speaker *sp)
 {
     char text[8192], path[1100];
     a->card = -1;
@@ -1324,9 +1642,8 @@ static void audio_phase(const struct m19_report *c, struct audio *a)
                 }
         }
     }
-    struct stat st;
-    a->snd_nodes = lstat(c->snd_dev, &st) == 0 || errno != ENOENT;
-    a->audio_ok = a->card >= 0 && a->control && a->playback && a->capture && !a->snd_nodes;
+    a->snd_nodes = scan_snd(c->snd_dev, 0);
+    a->audio_ok = a->card >= 0 && a->control && a->playback && a->capture && !a->snd_nodes && (!c->speaker_unit || sp->speaker_ok);
 }
 
 int m19_report_main(const struct m19_report *c)
@@ -1357,8 +1674,10 @@ int m19_report_main(const struct m19_report *c)
     addf("M19 R2 report\nM19 R2 state %s after %llu ms\n", state, m19_now_ms() - start);
     struct desktop d;
     struct gpu g;
+    struct speaker sp;
     memset(&d, 0, sizeof(d));
     memset(&g, 0, sizeof(g));
+    speaker_init(&sp);
     if (c->desktop) {
         /* X clients find the server here; Xorg runs without an authority file. */
         setenv("DISPLAY", ":0", 1);
@@ -1366,6 +1685,8 @@ int m19_report_main(const struct m19_report *c)
         if (c->gpu && d.x_ok)
             gpu_phase(c, tty, &g);
     }
+    if (c->audio && c->speaker_unit && (!c->desktop || d.x_ok))
+        speaker_phase(c, tty, &sp);
 
     char exe[256];
     ssize_t n = readlink(c->proc1_exe, exe, sizeof(exe) - 1);
@@ -1466,10 +1787,29 @@ int m19_report_main(const struct m19_report *c)
     if (c->audio) {
         struct audio a;
         memset(&a, 0, sizeof(a));
-        audio_phase(c, &a);
+        audio_phase(c, &a, &sp);
         audio_ok = a.audio_ok;
         addf("M19 R5 audio card=%d control=%d playback=%d capture=%d snd_nodes=%d audio_ok=%d\n", a.card, a.control, a.playback, a.capture,
              a.snd_nodes, a.audio_ok);
+        if (c->speaker_unit) {
+            addf("M19 R5 speaker unit_rc=%d report_seen=%d valid=%d ok=%ld pid=%ld stage=%ld played=%ld pcm=%ld re=%ld/%ld/%ld "
+                 "amp=%ld/%ld holder_alive=%d holder_fds=%d private_clean=%d speaker_ok=%d\n",
+                 sp.unit_rc, sp.report_seen, sp.report_valid,
+                 sp.ok == LONG_MIN ? -1L : sp.ok, sp.pid == LONG_MIN ? -1L : sp.pid,
+                 sp.spk_stage == LONG_MIN ? -1L : sp.spk_stage,
+                 sp.bytes_played == LONG_MIN ? -1L : sp.bytes_played,
+                 sp.pcm_bytes == LONG_MIN ? -1L : sp.pcm_bytes,
+                 sp.re_verified == LONG_MIN ? -1L : sp.re_verified,
+                 sp.re0_q12 == LONG_MIN ? -1L : sp.re0_q12,
+                 sp.re1_q12 == LONG_MIN ? -1L : sp.re1_q12,
+                 sp.amp_on == LONG_MIN ? -1L : sp.amp_on,
+                 sp.amp_off_verified == LONG_MIN ? -1L : sp.amp_off_verified,
+                 sp.holder_alive, sp.holder_fds, sp.private_clean, sp.speaker_ok);
+            if (c->speaker_report) {
+                addf("M19 speaker report\n");
+                (void)add_file(c->speaker_report, SECTION_CAP / 4);
+            }
+        }
         addf("M19 asound cards\n");
         (void)add_file(c->asound_cards, SECTION_CAP);
         addf("M19 asound pcm\n");

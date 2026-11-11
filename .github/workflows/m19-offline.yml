@@ -37,7 +37,7 @@ jobs:
         run: bash scripts/m19/run2/test.sh artifacts/m19/${{ runner.arch }}/run2
         env:
           M19_MUTANTS: '0'
-      - name: R5a audio helper on a fake kernel and synthetic super images, audio stage and T3-audio on synthetic trees, static helper (no device)
+      - name: R5a/R5b audio helper, T9-audio and Run31 speaker gate on synthetic trees, normal and ASan/UBSan, static binaries (no device)
         run: bash scripts/m19/run5/test.sh artifacts/m19/${{ runner.arch }}/run5
         env:
           M19_MUTANTS: '0'
@@ -72,6 +72,8 @@ jobs:
             artifacts/m19/**/pid5-b
             artifacts/m19/**/m19-audio-a
             artifacts/m19/**/m19-audio-b
+            artifacts/m19/**/m19-speaker-a
+            artifacts/m19/**/m19-speaker-b
             artifacts/m19/**/m11-pd-mapper-a
             artifacts/m19/**/m11-pd-mapper-b
             artifacts/m19/**/SHA256SUMS

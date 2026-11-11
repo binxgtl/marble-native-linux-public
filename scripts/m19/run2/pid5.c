@@ -1,7 +1,9 @@
-/* M19 R5a PID 1 (docs/m19-r5.md). R4o's, unchanged, with the audio registration M11 Run12 proved:
+/* M19 R5b PID 1 (docs/m19-r5.md). R4o's, unchanged, with M11 Run12's registration and M11 Run31's bounded
+ * speaker playback gate inside the Ubuntu session:
  *  - the bootstrap is R1's, then the audio stage, both before R1 starts the ADSP;
  *  - T3-audio, the first step, judges Run12's registration read-only before anything touches the TEE;
- *  - the reporter also reads the card from the session, where no sound node exists.
+ *  - T9-audio masks udev's persistent ALSA rule and stages m19-speaker and the SHA256-verified plan in RAM;
+ *  - the reporter starts marble-speaker.service once in T12-audio and verifies the retaining holder and /dev.
  * A hold before the USB link paints RED. Only a full PASS hands over; nothing restarts the phone. */
 #define _GNU_SOURCE
 #include <poll.h>
@@ -23,6 +25,7 @@ static const struct m19_step steps[] = {
     {"T9-root", "/m19/t9-root", 120000, M19_STEP_REQUIRED},
     {"T9-desktop", "/m19/t9-desktop", 60000, M19_STEP_REQUIRED},
     {"T9-gpu", "/m19/t9-gpu", 90000, M19_STEP_REQUIRED},
+    {"T9-audio", "/m19/t9-audio", 30000, M19_STEP_REQUIRED},
     {"T8-writes", "/m19/t8-writes", 30000, M19_STEP_REQUIRED | M19_STEP_ALWAYS},
 };
 
@@ -77,8 +80,10 @@ static const struct m19_report report = {
     .gpu_profile = "/run/m19/gpu-profile", .glmark2 = "/usr/bin/glmark2", .copy_env = copy_env,
     .present_probe = "/run/m19/m19-present-probe", .present_frames = 120, .judge_copy = 1, .judge_dri3 = 1, .shell = "/bin/sh", .shows = shows,
     .show_count = sizeof(shows) / sizeof(shows[0]), .show_seconds = 3, .dmabuf_heap = "/dev/dma_heap/system", .dmabuf_env = dri3_env,
-    .audio = 1, .asound_cards = "/proc/asound/cards", .asound_pcm = "/proc/asound/pcm", .sound_class = "/sys/class/sound", .snd_dev = "/dev/snd",
-    .audio_card = "ukee-mtp-snd-card",
+    .audio = 1, .speaker_ms = 30000, .asound_cards = "/proc/asound/cards", .asound_pcm = "/proc/asound/pcm",
+    .sound_class = "/sys/class/sound", .snd_dev = "/dev/snd", .audio_card = "ukee-mtp-snd-card",
+    .speaker_unit = "marble-speaker.service", .speaker_report = "/run/m19/speaker.report",
+    .speaker_clean = {"/dev/m11-snd", "/dev/m11-heap", "/dev/aud_pasthru_adsp", "/dev/msm_audio_ion", "/dev/msm_audio_ion_cma"},
 };
 /* R4h: no compositor views. R4e to R4g measured them; R4d's compositor would only black out the panel again. */
 
