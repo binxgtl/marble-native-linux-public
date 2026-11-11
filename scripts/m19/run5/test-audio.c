@@ -1,13 +1,14 @@
 /* The audio helper on a fake kernel: every call is logged to stderr, and M19_FAKE_FAIL fails some of them.
  *   M19_FAKE_FAIL: comma-separated block, create, table, resume, remove, or load:TEXT (the image whose first
  *   line is TEXT).
- *   M19_FAKE_SECTORS: the size of "super" in sectors; the file's own size otherwise. */
+ *   M19_FAKE_SECTORS: the size of "super" in sectors; 2^40 otherwise, as a test image holds only the metadata. */
 #define _GNU_SOURCE
 #include <errno.h>
 #include <linux/dm-ioctl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/stat.h>
 
 #include "audio.h"
@@ -33,7 +34,7 @@ static int fake_block(int fd, unsigned major, unsigned minor, uint64_t *sectors)
     fprintf(stderr, "FAKE block %u:%u\n", major, minor);
     if (failing("block") || fstat(fd, &st))
         return -1;
-    *sectors = size ? strtoull(size, NULL, 10) : (uint64_t)st.st_size / 512;
+    *sectors = size ? strtoull(size, NULL, 10) : (uint64_t)1 << 40;
     return 0;
 }
 

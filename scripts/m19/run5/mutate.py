@@ -101,7 +101,7 @@ def run(number, name, old, new, classes):
         built = subprocess.run(['gcc', '-std=c11', '-O1', '-w', '-DM19_AUDIO_TEST', '../unlock/hash.c', 'audio.c', 'test-audio.c', '-o', 'driver'],
                                cwd=target, capture_output=True, timeout=120)
         if built.returncode:
-            raise Broken(f'mutant {number} does not compile')
+            raise Broken(f'mutant {number} does not compile:\n{built.stderr.decode("utf-8", "replace")}')
         try:
             # The first failure kills the mutant, so the rest of its classes need not run.
             result = subprocess.run([sys.executable, 'test.py', '--failfast', '--driver', 'driver', *classes], cwd=target, capture_output=True,

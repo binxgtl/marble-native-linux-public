@@ -25,6 +25,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -459,7 +460,6 @@ int m19_audio_main(int argc, char **argv, const struct m19_audio_kernel *kernel)
 
 #ifndef M19_AUDIO_TEST
 #include <linux/fs.h>
-#include <sys/ioctl.h>
 #include <sys/syscall.h>
 #include <sys/sysmacros.h>
 

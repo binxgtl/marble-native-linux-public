@@ -1471,9 +1471,9 @@ int m19_report_main(const struct m19_report *c)
         addf("M19 R5 audio card=%d control=%d playback=%d capture=%d snd_nodes=%d audio_ok=%d\n", a.card, a.control, a.playback, a.capture,
              a.snd_nodes, a.audio_ok);
         addf("M19 asound cards\n");
-        (void)add_file(c->asound_cards, SECTION_CAP / 16);
+        (void)add_file(c->asound_cards, SECTION_CAP);
         addf("M19 asound pcm\n");
-        (void)add_file(c->asound_pcm, SECTION_CAP / 16);
+        (void)add_file(c->asound_pcm, SECTION_CAP);
     }
     int all_ok = init_ok && state_ok && targets_ok && writes_ok && ro_ok && mounts_ok && !write_warning && desktop_ok && gpu_ok && audio_ok;
     addf("M19 R2 verdict init=%d state=%s targets=%d writes=%d read_only=%d mounts=%d write_warning=%d all_ok=%d\n", init_ok, state, targets_ok,
