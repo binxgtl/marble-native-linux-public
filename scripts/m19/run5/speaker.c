@@ -362,6 +362,37 @@ static unsigned count_anchors_held(const m11_entry *e) {
            (unsigned)(e->boot.ion.state == M11_ANCHOR_HELD);
 }
 
+int m19_speaker_qualify_session(int phase, int fail_step, int rc, int session_ran, int session_rc,
+                                const m11_speaker_plan *plan, const m11_speaker_report *r,
+                                int census_rc, unsigned census_why, int resources_busy,
+                                int terminal_action, unsigned anchors_held, unsigned anchor_fds_open,
+                                int pool_held, unsigned regions_in_pool, int unmap_attempted) {
+    if (!plan || !r) return 0;
+    const int re_verified = r->re.pair_re_readback_verified ? 1 : 0;
+    const uint32_t re0_q12 = r->re.ch[0].readback_q12;
+    const uint32_t re1_q12 = r->re.ch[1].readback_q12;
+
+    return phase == M11_ENTRY_END &&
+           fail_step == 0 && rc == 0 &&
+           session_ran == 1 && session_rc == 0 &&
+           r->stage == M11_SPK_PLAYED && r->fail_step == 0 && r->rc == 0 &&
+           r->regions_mapped == 2u &&
+           re_verified == 1 && re0_q12 > 0u && re1_q12 > 0u &&
+           plan->volume_level > 0u && plan->volume_level <= M19_SPK_MAX_VOLUME_LEVEL &&
+           plan->duration_ms > 0u && plan->duration_ms <= M19_SPK_MAX_DURATION_MS &&
+           plan->pcm.len > 0u &&
+           r->buffers_sent >= 1u && r->buffers_done == r->buffers_sent &&
+           r->bytes_played == plan->pcm.len &&
+           r->amp_on == 1 && r->amp_off_verified == 1 &&
+           r->teardown_rc == 0 && r->pdr_seen == 0 &&
+           census_rc == 0 && census_why == 0u &&
+           resources_busy == 1 &&
+           terminal_action == (int)M11_TERMINAL_RESET_RETAINING_ANCHORS &&
+           anchors_held == 2u && anchor_fds_open == 4u &&
+           pool_held == 1 && regions_in_pool == 2u &&
+           unmap_attempted == 0;
+}
+
 static int write_report_file(struct speaker_ctx *ctx, int pre_step, int pre_rc) {
     const m11_entry *e = &ctx->entry;
     const m11_speaker_report *r = &ctx->spk;
@@ -379,26 +410,11 @@ static int write_report_file(struct speaker_ctx *ctx, int pre_step, int pre_rc) 
     const uint32_t re1_q12 = r->re.ch[1].readback_q12;
     const int census_rc = ctx->session_ran ? ctx->census_rc : -1;
 
-    const int ok =
-        phase == M11_ENTRY_END &&
-        fail_step == 0 && rc == 0 &&
-        ctx->session_ran && e->session_rc == 0 &&
-        r->stage == M11_SPK_PLAYED && r->fail_step == 0 && r->rc == 0 &&
-        r->regions_mapped == 2u &&
-        re_verified == 1 && re0_q12 > 0u && re1_q12 > 0u &&
-        ctx->plan.volume_level > 0u && ctx->plan.volume_level <= M19_SPK_MAX_VOLUME_LEVEL &&
-        ctx->plan.duration_ms > 0u && ctx->plan.duration_ms <= M19_SPK_MAX_DURATION_MS &&
-        ctx->plan.pcm.len > 0u &&
-        r->buffers_sent >= 1u && r->buffers_done == r->buffers_sent &&
-        r->bytes_played == ctx->plan.pcm.len &&
-        r->amp_on == 1 && r->amp_off_verified == 1 &&
-        r->teardown_rc == 0 && r->pdr_seen == 0 &&
-        census_rc == 0 && e->runner.census_why == 0u &&
-        e->pdmon.pds.resources_busy == 1 &&
-        terminal_action == (int)M11_TERMINAL_RESET_RETAINING_ANCHORS &&
-        anchors_held == 2u && anchor_fds_open == 4u &&
-        pool_held == 1 && regions_in_pool == 2u &&
-        unmap_attempted == 0;
+    const int ok = m19_speaker_qualify_session(phase, fail_step, rc, ctx->session_ran ? 1 : 0, e->session_rc,
+                                               &ctx->plan, r, census_rc, e->runner.census_why,
+                                               e->pdmon.pds.resources_busy, terminal_action,
+                                               anchors_held, anchor_fds_open, pool_held, regions_in_pool,
+                                               unmap_attempted);
     ctx->report_ok = ok;
 
     if (e->journal_fd >= 0 && e->sink.append_fn) {

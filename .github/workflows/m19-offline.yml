@@ -31,8 +31,114 @@ jobs:
         run: bash scripts/m19/run1/test.sh artifacts/m19/${{ runner.arch }}/run1
         env:
           M19_MUTANTS: '0'
+      - name: Runner APT cache key (no device)
+        id: apt-key
+        run: |
+          fp=$(dpkg-query -W libc6 libdrm2 libx11-6 2>/dev/null | sha256sum | cut -c1-12)
+          echo "key=m19-apt-debs-v1-${RUNNER_OS}-${RUNNER_ARCH}-${ImageVersion:-unknown}-${fp}" >> "$GITHUB_OUTPUT"
+      - name: GitHub cache of Ubuntu APT binary packages (no device)
+        uses: actions/cache@v4
+        with:
+          path: /tmp/m19-apt-cache
+          key: ${{ steps.apt-key.outputs.key }}
+          restore-keys: |
+            m19-apt-debs-v1-${{ runner.os }}-${{ runner.arch }}-
       - name: Vulkan and Present headers, lavapipe and Xvfb for the GPU and Present probes (no device)
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends libvulkan-dev mesa-vulkan-drivers libxcb-present-dev libxcb-dri3-dev xvfb
+        run: |
+          set -euo pipefail
+          pkgs=(libvulkan-dev mesa-vulkan-drivers libxcb-present-dev libxcb-dri3-dev xvfb)
+          if [ "${RUNNER_ARCH}" = "ARM64" ]; then
+            pkgs+=(liblzma-dev)
+          fi
+          mkdir -p /tmp/m19-apt-cache
+          sudo rm -rf /tmp/m19-apt-archives
+          sudo install -d -m 0755 /tmp/m19-apt-archives
+          sudo install -d -m 0700 -o _apt -g root /tmp/m19-apt-archives/partial
+          shopt -s nullglob
+          cached_debs=(/tmp/m19-apt-cache/*.deb)
+          if [ "${#cached_debs[@]}" -gt 0 ]; then
+            sudo cp -f "${cached_debs[@]}" /tmp/m19-apt-archives/
+          fi
+          apt_common=(
+            -qq
+            -o Acquire::Retries=2
+            -o Acquire::ForceIPv4=true
+            -o Acquire::http::Timeout=15
+            -o Acquire::https::Timeout=15
+            -o APT::Keep-Downloaded-Packages=true
+            -o Dir::Cache::archives=/tmp/m19-apt-archives
+          )
+          installed=0
+          echo "Tier 1: trying runner default APT mirror..."
+          if sudo apt-get --error-on=any update "${apt_common[@]}" &&
+             sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "${apt_common[@]}" --no-install-recommends "${pkgs[@]}"; then
+            installed=1
+          fi
+          if [ "$installed" -eq 0 ]; then
+            arch=$(dpkg --print-architecture)
+            if [ "$arch" = "arm64" ]; then
+              mirrors=(
+                https://mirrors.mit.edu/ubuntu-ports
+                https://mirrors.ocf.berkeley.edu/ubuntu-ports
+                https://ftp.fau.de/ubuntu-ports
+                https://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports
+              )
+            else
+              mirrors=(
+                https://mirrors.edge.kernel.org/ubuntu
+                https://mirrors.mit.edu/ubuntu
+                https://mirrors.ocf.berkeley.edu/ubuntu
+                https://ftp.osuosl.org/pub/ubuntu
+              )
+            fi
+            for m in "${mirrors[@]}"; do
+              echo "Tier 2: falling back to GPG-verified HTTPS mirror $m..."
+              sudo DEBIAN_FRONTEND=noninteractive dpkg --configure -a || true
+              sudo rm -rf /tmp/m19-apt-src /tmp/m19-apt-lists
+              sudo install -d -m 0755 /tmp/m19-apt-src /tmp/m19-apt-lists
+              sudo install -d -m 0700 -o _apt -g root /tmp/m19-apt-lists/partial
+              printf '%s\n' \
+                "Types: deb" \
+                "URIs: $m" \
+                "Suites: noble noble-updates noble-security noble-backports" \
+                "Components: main universe restricted multiverse" \
+                "Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg" |
+                sudo tee /tmp/m19-apt-src/ubuntu-fallback.sources >/dev/null
+              iso_opts=(
+                -o Dir::Etc::sourcelist=/dev/null
+                -o Dir::Etc::sourceparts=/tmp/m19-apt-src
+                -o Dir::State::lists=/tmp/m19-apt-lists
+              )
+              if sudo apt-get --error-on=any update "${apt_common[@]}" "${iso_opts[@]}" &&
+                 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "${apt_common[@]}" "${iso_opts[@]}" --no-install-recommends "${pkgs[@]}"; then
+                installed=1
+                break
+              fi
+            done
+          fi
+          if [ "$installed" -eq 1 ]; then
+            fresh_debs=(/tmp/m19-apt-archives/*.deb)
+            if [ "${#fresh_debs[@]}" -gt 0 ]; then
+              rm -f /tmp/m19-apt-cache/*.deb
+              sudo cp -f "${fresh_debs[@]}" /tmp/m19-apt-cache/
+              sudo chown "$(id -u):$(id -g)" /tmp/m19-apt-cache/*.deb
+              chmod 0644 /tmp/m19-apt-cache/*.deb
+            fi
+          else
+            cached_debs=(/tmp/m19-apt-cache/*.deb)
+            if [ "${#cached_debs[@]}" -gt 0 ]; then
+              echo "Tier 3: falling back to GitHub-cached .deb binaries (${#cached_debs[@]} packages)..."
+              sudo DEBIAN_FRONTEND=noninteractive dpkg -i --skip-same-version --refuse-downgrade --force-depends "${cached_debs[@]}" || true
+              sudo DEBIAN_FRONTEND=noninteractive dpkg --configure -a
+            fi
+          fi
+          for pkg in "${pkgs[@]}"; do
+            status=$(dpkg-query -W -f='${db:Status-Status}\n' "$pkg" 2>/dev/null || true)
+            if [ "$status" != "installed" ]; then
+              echo "ERROR: required package $pkg is not installed (status=${status:-missing})" >&2
+              exit 1
+            fi
+          done
       - name: R2 to R5 hand-off, reporter, T9, desktop and GPU checks on synthetic trees, normal and ASan/UBSan, static PID 1 (no device)
         run: bash scripts/m19/run2/test.sh artifacts/m19/${{ runner.arch }}/run2
         env:
@@ -44,13 +150,31 @@ jobs:
       - name: M11 Run12's PD mapper, from its pinned linux-msm sources, static and built twice (ARM64, no device)
         if: runner.arch == 'ARM64'
         run: |
-          sudo apt-get install -y -qq --no-install-recommends liblzma-dev
+          set -euo pipefail
+          if [ ! -f /usr/include/lzma.h ] && [ ! -f /usr/local/include/lzma.h ]; then
+            echo "Falling back to pinned xz v5.4.6 release archive from GitHub..."
+            rm -rf /tmp/m19-xz-fallback
+            mkdir -p /tmp/m19-xz-fallback
+            curl -fsSL --retry 3 --connect-timeout 15 \
+              https://github.com/tukaani-project/xz/releases/download/v5.4.6/xz-5.4.6.tar.gz \
+              -o /tmp/m19-xz-fallback/xz-5.4.6.tar.gz
+            echo "aeba3e03bf8140ddedf62a0a367158340520f6b384f75ca6045ccc6c0d43fd5c  /tmp/m19-xz-fallback/xz-5.4.6.tar.gz" | sha256sum -c -
+            tar -xzf /tmp/m19-xz-fallback/xz-5.4.6.tar.gz -C /tmp/m19-xz-fallback
+            (
+              cd /tmp/m19-xz-fallback/xz-5.4.6
+              ./configure --prefix=/usr/local --libdir=/usr/local/lib \
+                --disable-shared --enable-static \
+                --disable-xz --disable-xzdec --disable-lzmadec --disable-lzmainfo --disable-scripts --disable-doc
+              make -j"$(nproc)"
+              sudo make install
+            )
+          fi
           CC=gcc bash scripts/m11/run12/build-pdr.sh
           mkdir -p artifacts/m19/ARM64/pdr
           cp artifacts/m11/run12-pdr-build/m11-pd-mapper-a artifacts/m11/run12-pdr-build/m11-pd-mapper-b artifacts/m11/run12-pdr-build/SHA256SUMS \
             artifacts/m11/run12-pdr-build/compiler.txt artifacts/m11/run12-pdr-build/pd-mapper-LICENSE artifacts/m11/run12-pdr-build/qrtr-LICENSE \
             artifacts/m19/ARM64/pdr/
-          dpkg-query -W gcc libc6-dev liblzma-dev > artifacts/m19/ARM64/pdr/system-packages.txt
+          (dpkg-query -W gcc libc6-dev liblzma-dev || dpkg-query -W gcc libc6-dev) > artifacts/m19/ARM64/pdr/system-packages.txt
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -105,8 +229,104 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+      - name: Runner APT cache key for probe mutants (no device)
+        if: matrix.suite == 'run2'
+        id: apt-key
+        run: |
+          fp=$(dpkg-query -W libc6 libdrm2 libx11-6 2>/dev/null | sha256sum | cut -c1-12)
+          echo "key=m19-apt-debs-v1-${RUNNER_OS}-${RUNNER_ARCH}-${ImageVersion:-unknown}-${fp}" >> "$GITHUB_OUTPUT"
+      - name: GitHub cache of Ubuntu APT binary packages for probe mutants (no device)
+        if: matrix.suite == 'run2'
+        uses: actions/cache@v4
+        with:
+          path: /tmp/m19-apt-cache
+          key: ${{ steps.apt-key.outputs.key }}-run2
+          restore-keys: |
+            ${{ steps.apt-key.outputs.key }}
+            m19-apt-debs-v1-${{ runner.os }}-${{ runner.arch }}-
       - name: Vulkan and Present headers, lavapipe and Xvfb for the probe mutants (no device)
         if: matrix.suite == 'run2'
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends libvulkan-dev mesa-vulkan-drivers libxcb-present-dev libxcb-dri3-dev xvfb
+        run: |
+          set -euo pipefail
+          pkgs=(libvulkan-dev mesa-vulkan-drivers libxcb-present-dev libxcb-dri3-dev xvfb)
+          mkdir -p /tmp/m19-apt-cache
+          sudo rm -rf /tmp/m19-apt-archives
+          sudo install -d -m 0755 /tmp/m19-apt-archives
+          sudo install -d -m 0700 -o _apt -g root /tmp/m19-apt-archives/partial
+          shopt -s nullglob
+          cached_debs=(/tmp/m19-apt-cache/*.deb)
+          if [ "${#cached_debs[@]}" -gt 0 ]; then
+            sudo cp -f "${cached_debs[@]}" /tmp/m19-apt-archives/
+          fi
+          apt_common=(
+            -qq
+            -o Acquire::Retries=2
+            -o Acquire::ForceIPv4=true
+            -o Acquire::http::Timeout=15
+            -o Acquire::https::Timeout=15
+            -o APT::Keep-Downloaded-Packages=true
+            -o Dir::Cache::archives=/tmp/m19-apt-archives
+          )
+          installed=0
+          echo "Tier 1: trying runner default APT mirror..."
+          if sudo apt-get --error-on=any update "${apt_common[@]}" &&
+             sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "${apt_common[@]}" --no-install-recommends "${pkgs[@]}"; then
+            installed=1
+          fi
+          if [ "$installed" -eq 0 ]; then
+            mirrors=(
+              https://mirrors.edge.kernel.org/ubuntu
+              https://mirrors.mit.edu/ubuntu
+              https://mirrors.ocf.berkeley.edu/ubuntu
+              https://ftp.osuosl.org/pub/ubuntu
+            )
+            for m in "${mirrors[@]}"; do
+              echo "Tier 2: falling back to GPG-verified HTTPS mirror $m..."
+              sudo DEBIAN_FRONTEND=noninteractive dpkg --configure -a || true
+              sudo rm -rf /tmp/m19-apt-src /tmp/m19-apt-lists
+              sudo install -d -m 0755 /tmp/m19-apt-src /tmp/m19-apt-lists
+              sudo install -d -m 0700 -o _apt -g root /tmp/m19-apt-lists/partial
+              printf '%s\n' \
+                "Types: deb" \
+                "URIs: $m" \
+                "Suites: noble noble-updates noble-security noble-backports" \
+                "Components: main universe restricted multiverse" \
+                "Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg" |
+                sudo tee /tmp/m19-apt-src/ubuntu-fallback.sources >/dev/null
+              iso_opts=(
+                -o Dir::Etc::sourcelist=/dev/null
+                -o Dir::Etc::sourceparts=/tmp/m19-apt-src
+                -o Dir::State::lists=/tmp/m19-apt-lists
+              )
+              if sudo apt-get --error-on=any update "${apt_common[@]}" "${iso_opts[@]}" &&
+                 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "${apt_common[@]}" "${iso_opts[@]}" --no-install-recommends "${pkgs[@]}"; then
+                installed=1
+                break
+              fi
+            done
+          fi
+          if [ "$installed" -eq 1 ]; then
+            fresh_debs=(/tmp/m19-apt-archives/*.deb)
+            if [ "${#fresh_debs[@]}" -gt 0 ]; then
+              rm -f /tmp/m19-apt-cache/*.deb
+              sudo cp -f "${fresh_debs[@]}" /tmp/m19-apt-cache/
+              sudo chown "$(id -u):$(id -g)" /tmp/m19-apt-cache/*.deb
+              chmod 0644 /tmp/m19-apt-cache/*.deb
+            fi
+          else
+            cached_debs=(/tmp/m19-apt-cache/*.deb)
+            if [ "${#cached_debs[@]}" -gt 0 ]; then
+              echo "Tier 3: falling back to GitHub-cached .deb binaries (${#cached_debs[@]} packages)..."
+              sudo DEBIAN_FRONTEND=noninteractive dpkg -i --skip-same-version --refuse-downgrade --force-depends "${cached_debs[@]}" || true
+              sudo DEBIAN_FRONTEND=noninteractive dpkg --configure -a
+            fi
+          fi
+          for pkg in "${pkgs[@]}"; do
+            status=$(dpkg-query -W -f='${db:Status-Status}\n' "$pkg" 2>/dev/null || true)
+            if [ "$status" != "installed" ]; then
+              echo "ERROR: required package $pkg is not installed (status=${status:-missing})" >&2
+              exit 1
+            fi
+          done
       - name: Mutants of ${{ matrix.suite }} (no device)
         run: python3 ${{ matrix.script }}

@@ -877,7 +877,7 @@ class Speaker(unittest.TestCase):
                 if os.environ.get('CI'):
                     self.fail('sudo -n required on CI for Speaker root session tests')
                 self.skipTest('sudo -n unavailable')
-            cmd = ['sudo', '-n', *cmd]
+            cmd = ['sudo', '-n', 'timeout', '--kill-after=5', '90', *cmd]
             self.addCleanup(lambda: subprocess.run(['sudo', '-n', 'rm', '-rf', str(self.root)], capture_output=True))
         return subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=180)
 

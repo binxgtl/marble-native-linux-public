@@ -17,6 +17,7 @@
 #include "../unlock/core.h"
 #include "gpr_transport_native.h"
 #include "intent_journal_native.h"
+#include "m11_anchor_linux.h"
 #include "shmem_backend_native.h"
 #include <assert.h>
 #include <errno.h>
@@ -34,6 +35,7 @@
 #include <sys/mman.h>
 #include <sys/mount.h>
 #include <sys/prctl.h>
+#include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
@@ -430,6 +432,37 @@ static const m11_shmem_native_sys fx_sys = {fx_ioctl, mmap, fx_munmap, close};
 #define PEER_NODE 5u
 #define PEER_PORT 0x40u
 static int qs[2] = {-1, -1};
+
+struct peer_sync {
+    unsigned reads_seen;
+};
+static struct peer_sync *g_peer_sync;
+static m11_entry *g_active_entry;
+static int g_peer_notify_w = -1;
+
+static void sync_peer_reads(void) {
+    if (!g_peer_sync || !g_active_entry) return;
+    unsigned rd = g_active_entry->runner.link.reads;
+    if (__atomic_load_n(&g_peer_sync->reads_seen, __ATOMIC_RELAXED) != rd) {
+        __atomic_store_n(&g_peer_sync->reads_seen, rd, __ATOMIC_RELEASE);
+        if (g_peer_notify_w >= 0) {
+            ssize_t nw = write(g_peer_notify_w, "R", 1);
+            (void)nw;
+        }
+    }
+}
+
+static void isolate_stdio_pipes(void) {
+    for (int fd = 0; fd < 3; fd++) {
+        int p[2];
+        assert(pipe(p) == 0);
+        int want = fd == 0 ? p[0] : p[1];
+        if (want != fd) assert(dup2(want, fd) == fd);
+        if (p[0] != fd) (void)close(p[0]);
+        if (p[1] != fd) (void)close(p[1]);
+    }
+}
+
 static void p16(unsigned char *p, uint16_t n) { p[0] = (unsigned char)n; p[1] = (unsigned char)(n >> 8); }
 static void p32(unsigned char *p, uint32_t n) { p16(p, (uint16_t)n); p16(p + 2, (uint16_t)(n >> 16)); }
 static uint16_t g16(const unsigned char *p) { return (uint16_t)(p[0] | (unsigned)p[1] << 8); }
@@ -441,6 +474,7 @@ static int f_getsockname(void *u, int fd, uint32_t *n, uint32_t *p) {
 }
 static int f_sendto(void *u, int fd, uint32_t node, uint32_t port, const void *b, size_t n) {
     (void)u;
+    sync_peer_reads();
     unsigned char m[8 + 160];
     if (fd != qs[0] || n > 160) return -EINVAL;
     p32(m, node); p32(m + 4, port); memcpy(m + 8, b, n);
@@ -448,6 +482,7 @@ static int f_sendto(void *u, int fd, uint32_t node, uint32_t port, const void *b
 }
 static ssize_t f_recvfrom(void *u, int fd, void *b, size_t cap, uint32_t *node, uint32_t *port) {
     (void)u;
+    sync_peer_reads();
     unsigned char m[8 + 256];
     ssize_t r = recv(fd, m, sizeof m, MSG_DONTWAIT);
     if (r < 0) return errno == EAGAIN ? -EAGAIN : -errno;
@@ -545,35 +580,75 @@ static void pty_send(int pty_fd, const void *buf, size_t len) {
     }
 }
 
-static void pty_reply(int pty_fd, const m11_gpr_hdr_t *h, uint32_t opcode, const void *pl, size_t n) {
+#define PKT_Q_CAP 64u
+struct pkt_queue {
+    struct {
+        uint8_t bytes[160];
+        size_t len;
+    } items[PKT_Q_CAP];
+    unsigned head;
+    unsigned count;
+    unsigned sent;
+};
+
+static void pq_push(struct pkt_queue *pq, const void *buf, size_t len) {
+    if (!len || len > sizeof pq->items[0].bytes || pq->count >= PKT_Q_CAP) _exit(129);
+    unsigned idx = (pq->head + pq->count) % PKT_Q_CAP;
+    memcpy(pq->items[idx].bytes, buf, len);
+    pq->items[idx].len = len;
+    pq->count++;
+}
+
+static void pq_reply(struct pkt_queue *pq, const m11_gpr_hdr_t *h, uint32_t opcode, const void *pl, size_t n) {
     uint8_t tx[160];
     size_t txl = 0;
     if (m11_gpr_pack_packet_ex(tx, sizeof tx, &txl, M11_GPR_DOMAIN_APPS, M11_GPR_DOMAIN_ADSP, 0,
                                h->src_port, h->dst_port, h->token, opcode, pl, n) < 0)
         _exit(104);
-    pty_send(pty_fd, tx, txl);
+    pq_push(pq, tx, txl);
 }
 
-static void peer_loop(int q, int ctl, int ack, struct adsp_cfg ac) {
-    alarm(30);
-    prctl(PR_SET_PDEATHSIG, SIGKILL);
+static void pq_try_flush_one(struct pkt_queue *pq, int peer_pty, const struct peer_sync *sync) {
+    if (peer_pty < 0 || pq->count == 0) return;
+    if (__atomic_load_n(&sync->reads_seen, __ATOMIC_ACQUIRE) != pq->sent) return;
+    pty_send(peer_pty, pq->items[pq->head].bytes, pq->items[pq->head].len);
+    pq->head = (pq->head + 1u) % PKT_Q_CAP;
+    pq->count--;
+    pq->sent++;
+}
+
+static void peer_loop(int q, int ctl, int ack, int ntf, const struct peer_sync *sync, struct adsp_cfg ac) {
     int peer_pty = -1;
     uint8_t buf[8192];
     size_t len = 0;
     unsigned maps = 0, wr_seen = 0;
     uint32_t q12[2] = {0, 0};
     int read_ch = -1;
+    struct pkt_queue pq;
+    memset(&pq, 0, sizeof pq);
 
     for (;;) {
-        struct pollfd p[3] = {{.fd = q, .events = POLLIN}, {.fd = ctl, .events = POLLIN}, {.fd = peer_pty, .events = POLLIN}};
-        int n = poll(p, peer_pty >= 0 ? 3 : 2, -1);
+        pq_try_flush_one(&pq, peer_pty, sync);
+        struct pollfd p[4] = {
+            {.fd = q, .events = POLLIN},
+            {.fd = ctl, .events = POLLIN},
+            {.fd = ntf, .events = POLLIN},
+            {.fd = peer_pty, .events = POLLIN},
+        };
+        int timeout_ms = (peer_pty >= 0 && pq.count > 0) ? 2 : -1;
+        int n = poll(p, peer_pty >= 0 ? 4 : 3, timeout_ms);
         if (n < 0) { if (errno == EINTR) continue; _exit(120); }
         if (q >= 0 && (p[0].revents & POLLIN)) qrtr_in(q, ac.pm);
         if (q >= 0 && (p[0].revents & (POLLHUP | POLLERR | POLLNVAL))) q = -1;
-        if (p[1].revents & (POLLIN | POLLHUP)) {
+        if (ntf >= 0 && (p[2].revents & POLLIN)) {
+            char drain[64];
+            while (read(ntf, drain, sizeof drain) > 0) {}
+        }
+        if (ntf >= 0 && (p[2].revents & (POLLHUP | POLLERR | POLLNVAL))) ntf = -1;
+        if (p[1].revents & (POLLIN | POLLHUP | POLLERR)) {
             char c[256];
             ssize_t r = read(ctl, c, sizeof c - 1);
-            if (r <= 0) for (;;) pause();
+            if (r <= 0) _exit(0);
             c[r] = '\0';
             if (c[0] == 'S') {
                 struct termios t;
@@ -584,7 +659,7 @@ static void peer_loop(int q, int ctl, int ack, struct adsp_cfg ac) {
             }
             if (write(ack, "k", 1) != 1) _exit(122);
         }
-        if (peer_pty >= 0 && (p[2].revents & (POLLIN | POLLHUP | POLLERR))) {
+        if (peer_pty >= 0 && (p[3].revents & (POLLIN | POLLHUP | POLLERR))) {
             ssize_t r = read(peer_pty, buf + len, sizeof buf - len);
             if (r <= 0) { (void)close(peer_pty); peer_pty = -1; continue; }
             len += (size_t)r;
@@ -611,7 +686,7 @@ static void peer_loop(int q, int ctl, int ack, struct adsp_cfg ac) {
                         q_down(q);
                     } else {
                         m11_apm_rsp_shared_mem_map_t rsp = {.mem_map_handle = 0xA0000001u + maps++};
-                        pty_reply(peer_pty, &h, M11_APM_CMDRSP_SHARED_MEM_MAP_REGIONS, &rsp, sizeof rsp);
+                        pq_reply(&pq, &h, M11_APM_CMDRSP_SHARED_MEM_MAP_REGIONS, &rsp, sizeof rsp);
                     }
                 } else if (h.opcode == M11_APM_CMD_GET_CFG) {
                     m11_aw_msg_kind_t kind = 0;
@@ -623,7 +698,7 @@ static void peer_loop(int q, int ctl, int ack, struct adsp_cfg ac) {
                     read_ch = -1;
                     if (m11_aw_pack_read_rsp_pkt(out, sizeof out, &ol, h.src_port, h.token, 0u, 0u, 4u, v) < 0)
                         _exit(106);
-                    pty_send(peer_pty, out, ol);
+                    pq_push(&pq, out, ol);
                 } else if (h.opcode == M11_APM_CMD_SET_CFG && h.dst_port == 0x42D3u) {
                     m11_aw_msg_kind_t kind = 0;
                     uint32_t ch = 0, v = 0;
@@ -632,22 +707,23 @@ static void peer_loop(int q, int ctl, int ack, struct adsp_cfg ac) {
                     if (kind == M11_AW_MSG_WRITE) q12[ch] = v;
                     else read_ch = (int)ch;
                     m11_gpr_ibasic_rsp_t rsp = {.cmd_opcode = h.opcode, .status = 0};
-                    pty_reply(peer_pty, &h, M11_GPR_IBASIC_RSP_RESULT, &rsp, sizeof rsp);
+                    pq_reply(&pq, &h, M11_GPR_IBASIC_RSP_RESULT, &rsp, sizeof rsp);
                 } else if (h.opcode == M11_DATA_CMD_WR_SH_MEM_EP_DATA_BUFFER_V2) {
                     uint32_t dw[8] = {0};
                     memcpy(dw, pl, 12);
                     if (ac.wr_status_nth && ++wr_seen == ac.wr_status_nth) dw[3] = 5;
-                    pty_reply(peer_pty, &h, M11_DATA_CMD_RSP_WR_SH_MEM_EP_DATA_BUFFER_DONE_V2, dw, sizeof dw);
+                    pq_reply(&pq, &h, M11_DATA_CMD_RSP_WR_SH_MEM_EP_DATA_BUFFER_DONE_V2, dw, sizeof dw);
                 } else if (h.opcode == M11_DATA_CMD_RD_SH_MEM_EP_DATA_BUFFER_V2) {
                     uint32_t dw[14] = {0};
-                    pty_reply(peer_pty, &h, M11_DATA_CMD_RSP_RD_SH_MEM_EP_DATA_BUFFER_DONE_V2, dw, sizeof dw);
+                    pq_reply(&pq, &h, M11_DATA_CMD_RSP_RD_SH_MEM_EP_DATA_BUFFER_DONE_V2, dw, sizeof dw);
                 } else {
                     m11_gpr_ibasic_rsp_t rsp = {.cmd_opcode = h.opcode, .status = 0};
-                    pty_reply(peer_pty, &h, M11_GPR_IBASIC_RSP_RESULT, &rsp, sizeof rsp);
+                    pq_reply(&pq, &h, M11_GPR_IBASIC_RSP_RESULT, &rsp, sizeof rsp);
                 }
                 memmove(buf, buf + size, len - size);
                 len -= size;
             }
+            pq_try_flush_one(&pq, peer_pty, sync);
         }
     }
 }
@@ -655,25 +731,71 @@ static void peer_loop(int q, int ctl, int ack, struct adsp_cfg ac) {
 struct peer_handle {
     int ctl_w;
     int ack_r;
+    int notify_w;
     pid_t pid;
+    struct peer_sync *sync;
 };
 
 static struct peer_handle start_peer(struct adsp_cfg ac) {
-    int c[2], a[2];
+    int c[2], a[2], ntf[2];
+    struct peer_sync *sync = mmap(NULL, sizeof *sync, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    assert(sync != MAP_FAILED);
+    sync->reads_seen = 0;
     assert(socketpair(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0, qs) == 0);
     assert(pipe2(c, O_CLOEXEC) == 0 && pipe2(a, O_CLOEXEC) == 0);
+    assert(pipe2(ntf, O_CLOEXEC | O_NONBLOCK) == 0);
+    pid_t ppid = getpid();
     pid_t p = fork();
     assert(p >= 0);
     if (p == 0) {
-        (void)close(qs[0]); (void)close(c[1]); (void)close(a[0]);
-        peer_loop(qs[1], c[0], a[1], ac);
+        alarm(30);
+        (void)prctl(PR_SET_PDEATHSIG, SIGKILL);
+        if (getppid() != ppid) _exit(0);
+        (void)close(qs[0]);
+        (void)close(c[1]);
+        (void)close(a[0]);
+        (void)close(ntf[1]);
+        isolate_stdio_pipes();
+        const int keep[3] = {c[0], a[1], ntf[0]};
+        (void)m11_anchor_linux_close_unlisted(qs[1], keep, 3u);
+        if (write(a[1], "r", 1) != 1) _exit(127);
+        peer_loop(qs[1], c[0], a[1], ntf[0], sync, ac);
     }
-    (void)close(qs[1]); (void)close(c[0]); (void)close(a[1]);
-    return (struct peer_handle){.ctl_w = c[1], .ack_r = a[0], .pid = p};
+    (void)close(qs[1]);
+    (void)close(c[0]);
+    (void)close(a[1]);
+    (void)close(ntf[0]);
+    char rdy = 0;
+    assert(read(a[0], &rdy, 1) == 1 && rdy == 'r');
+    g_peer_sync = sync;
+    g_peer_notify_w = ntf[1];
+    g_active_entry = NULL;
+    return (struct peer_handle){.ctl_w = c[1], .ack_r = a[0], .notify_w = ntf[1], .pid = p, .sync = sync};
+}
+
+static void stop_peer(struct peer_handle *ph) {
+    g_active_entry = NULL;
+    g_peer_sync = NULL;
+    g_peer_notify_w = -1;
+    if (ph->ctl_w >= 0) { (void)close(ph->ctl_w); ph->ctl_w = -1; }
+    if (ph->ack_r >= 0) { (void)close(ph->ack_r); ph->ack_r = -1; }
+    if (ph->notify_w >= 0) { (void)close(ph->notify_w); ph->notify_w = -1; }
+    if (ph->pid > 0) {
+        (void)kill(ph->pid, SIGKILL);
+        int st = 0;
+        while (waitpid(ph->pid, &st, 0) < 0 && errno == EINTR) {}
+        ph->pid = -1;
+    }
+    if (ph->sync && ph->sync != MAP_FAILED) {
+        (void)munmap(ph->sync, sizeof *ph->sync);
+        ph->sync = NULL;
+    }
 }
 
 static void session_ready_handshake(void *user, m11_entry *e) {
     struct peer_handle *ph = user;
+    g_active_entry = e;
+    __atomic_store_n(&ph->sync->reads_seen, e->runner.link.reads, __ATOMIC_RELEASE);
     int fd = e->runner.cfg.endpoint->anchor_fd;
     char slave[128], msg[160];
     assert(unlockpt(fd) == 0 && ptsname_r(fd, slave, sizeof slave) == 0);
@@ -814,19 +936,93 @@ static struct m19_speaker_config cfg_for_world(const struct world *w) {
     return c;
 }
 
-static void stdio_off_char_devs(void) {
-    for (int fd = 0; fd < 3; fd++) {
-        struct stat st;
-        if (fstat(fd, &st) != 0 || !S_ISCHR(st.st_mode)) continue;
-        int p[2];
-        assert(pipe(p) == 0);
-        assert(dup2(fd == 0 ? p[0] : p[1], fd) == fd);
-        (void)close(p[0]);
-        (void)close(p[1]);
-    }
-}
-
 /* ---------------- unprivileged prechecks ---------------- */
+static void test_session_qualification_gates(void) {
+    m11_speaker_plan plan;
+    m11_speaker_report rep;
+    memset(&plan, 0, sizeof plan);
+    memset(&rep, 0, sizeof rep);
+
+    plan.volume_level = 8u;
+    plan.duration_ms = 4000u;
+    plan.pcm.len = 768000u;
+
+    rep.stage = M11_SPK_PLAYED;
+    rep.fail_step = 0;
+    rep.rc = 0;
+    rep.regions_mapped = 2u;
+    rep.re.pair_re_readback_verified = 1;
+    rep.re.ch[0].readback_q12 = 26099u;
+    rep.re.ch[1].readback_q12 = 28684u;
+    rep.buffers_sent = 100u;
+    rep.buffers_done = 100u;
+    rep.bytes_played = 768000u;
+    rep.amp_on = 1;
+    rep.amp_off_verified = 1;
+    rep.teardown_rc = 0;
+    rep.pdr_seen = 0;
+
+    const int act = (int)M11_TERMINAL_RESET_RETAINING_ANCHORS;
+    assert(m19_speaker_qualify_session(M11_ENTRY_END, 0, 0, 1, 0, &plan, &rep, 0, 0u, 1, act, 2u, 4u, 1, 2u, 0) == 1);
+    assert(m19_speaker_qualify_session(M11_ENTRY_END, 0, 0, 1, 0, NULL, &rep, 0, 0u, 1, act, 2u, 4u, 1, 2u, 0) == 0);
+    assert(m19_speaker_qualify_session(M11_ENTRY_END, 0, 0, 1, 0, &plan, NULL, 0, 0u, 1, act, 2u, 4u, 1, 2u, 0) == 0);
+    assert(m19_speaker_qualify_session(M11_ENTRY_SESSION, 0, 0, 1, 0, &plan, &rep, 0, 0u, 1, act, 2u, 4u, 1, 2u, 0) == 0);
+    assert(m19_speaker_qualify_session(M11_ENTRY_END, 1, 0, 1, 0, &plan, &rep, 0, 0u, 1, act, 2u, 4u, 1, 2u, 0) == 0);
+    assert(m19_speaker_qualify_session(M11_ENTRY_END, 0, -EIO, 1, 0, &plan, &rep, 0, 0u, 1, act, 2u, 4u, 1, 2u, 0) == 0);
+    assert(m19_speaker_qualify_session(M11_ENTRY_END, 0, 0, 0, 0, &plan, &rep, 0, 0u, 1, act, 2u, 4u, 1, 2u, 0) == 0);
+    assert(m19_speaker_qualify_session(M11_ENTRY_END, 0, 0, 1, -EIO, &plan, &rep, 0, 0u, 1, act, 2u, 4u, 1, 2u, 0) == 0);
+    assert(m19_speaker_qualify_session(M11_ENTRY_END, 0, 0, 1, 0, &plan, &rep, -1, 0u, 1, act, 2u, 4u, 1, 2u, 0) == 0);
+    assert(m19_speaker_qualify_session(M11_ENTRY_END, 0, 0, 1, 0, &plan, &rep, 0, 1u, 1, act, 2u, 4u, 1, 2u, 0) == 0);
+    assert(m19_speaker_qualify_session(M11_ENTRY_END, 0, 0, 1, 0, &plan, &rep, 0, 0u, 0, act, 2u, 4u, 1, 2u, 0) == 0);
+    assert(m19_speaker_qualify_session(M11_ENTRY_END, 0, 0, 1, 0, &plan, &rep, 0, 0u, 1, 0, 2u, 4u, 1, 2u, 0) == 0);
+    assert(m19_speaker_qualify_session(M11_ENTRY_END, 0, 0, 1, 0, &plan, &rep, 0, 0u, 1, act, 1u, 4u, 1, 2u, 0) == 0);
+    assert(m19_speaker_qualify_session(M11_ENTRY_END, 0, 0, 1, 0, &plan, &rep, 0, 0u, 1, act, 2u, 3u, 1, 2u, 0) == 0);
+    assert(m19_speaker_qualify_session(M11_ENTRY_END, 0, 0, 1, 0, &plan, &rep, 0, 0u, 1, act, 2u, 4u, 0, 2u, 0) == 0);
+    assert(m19_speaker_qualify_session(M11_ENTRY_END, 0, 0, 1, 0, &plan, &rep, 0, 0u, 1, act, 2u, 4u, 1, 1u, 0) == 0);
+    assert(m19_speaker_qualify_session(M11_ENTRY_END, 0, 0, 1, 0, &plan, &rep, 0, 0u, 1, act, 2u, 4u, 1, 2u, 1) == 0);
+
+    m11_speaker_report r2;
+    r2 = rep; r2.stage = 0;
+    assert(m19_speaker_qualify_session(M11_ENTRY_END, 0, 0, 1, 0, &plan, &r2, 0, 0u, 1, act, 2u, 4u, 1, 2u, 0) == 0);
+    r2 = rep; r2.fail_step = 1;
+    assert(m19_speaker_qualify_session(M11_ENTRY_END, 0, 0, 1, 0, &plan, &r2, 0, 0u, 1, act, 2u, 4u, 1, 2u, 0) == 0);
+    r2 = rep; r2.rc = -EIO;
+    assert(m19_speaker_qualify_session(M11_ENTRY_END, 0, 0, 1, 0, &plan, &r2, 0, 0u, 1, act, 2u, 4u, 1, 2u, 0) == 0);
+    r2 = rep; r2.regions_mapped = 1u;
+    assert(m19_speaker_qualify_session(M11_ENTRY_END, 0, 0, 1, 0, &plan, &r2, 0, 0u, 1, act, 2u, 4u, 1, 2u, 0) == 0);
+    r2 = rep; r2.re.pair_re_readback_verified = 0;
+    assert(m19_speaker_qualify_session(M11_ENTRY_END, 0, 0, 1, 0, &plan, &r2, 0, 0u, 1, act, 2u, 4u, 1, 2u, 0) == 0);
+    r2 = rep; r2.re.ch[0].readback_q12 = 0u;
+    assert(m19_speaker_qualify_session(M11_ENTRY_END, 0, 0, 1, 0, &plan, &r2, 0, 0u, 1, act, 2u, 4u, 1, 2u, 0) == 0);
+    r2 = rep; r2.re.ch[1].readback_q12 = 0u;
+    assert(m19_speaker_qualify_session(M11_ENTRY_END, 0, 0, 1, 0, &plan, &r2, 0, 0u, 1, act, 2u, 4u, 1, 2u, 0) == 0);
+    r2 = rep; r2.buffers_sent = 0u; r2.buffers_done = 0u;
+    assert(m19_speaker_qualify_session(M11_ENTRY_END, 0, 0, 1, 0, &plan, &r2, 0, 0u, 1, act, 2u, 4u, 1, 2u, 0) == 0);
+    r2 = rep; r2.buffers_done = 99u;
+    assert(m19_speaker_qualify_session(M11_ENTRY_END, 0, 0, 1, 0, &plan, &r2, 0, 0u, 1, act, 2u, 4u, 1, 2u, 0) == 0);
+    r2 = rep; r2.bytes_played = plan.pcm.len - 4u;
+    assert(m19_speaker_qualify_session(M11_ENTRY_END, 0, 0, 1, 0, &plan, &r2, 0, 0u, 1, act, 2u, 4u, 1, 2u, 0) == 0);
+    r2 = rep; r2.amp_on = 0;
+    assert(m19_speaker_qualify_session(M11_ENTRY_END, 0, 0, 1, 0, &plan, &r2, 0, 0u, 1, act, 2u, 4u, 1, 2u, 0) == 0);
+    r2 = rep; r2.amp_off_verified = 0;
+    assert(m19_speaker_qualify_session(M11_ENTRY_END, 0, 0, 1, 0, &plan, &r2, 0, 0u, 1, act, 2u, 4u, 1, 2u, 0) == 0);
+    r2 = rep; r2.teardown_rc = -EIO;
+    assert(m19_speaker_qualify_session(M11_ENTRY_END, 0, 0, 1, 0, &plan, &r2, 0, 0u, 1, act, 2u, 4u, 1, 2u, 0) == 0);
+    r2 = rep; r2.pdr_seen = 1;
+    assert(m19_speaker_qualify_session(M11_ENTRY_END, 0, 0, 1, 0, &plan, &r2, 0, 0u, 1, act, 2u, 4u, 1, 2u, 0) == 0);
+
+    m11_speaker_plan p2;
+    p2 = plan; p2.volume_level = 0u;
+    assert(m19_speaker_qualify_session(M11_ENTRY_END, 0, 0, 1, 0, &p2, &rep, 0, 0u, 1, act, 2u, 4u, 1, 2u, 0) == 0);
+    p2 = plan; p2.volume_level = 9u;
+    assert(m19_speaker_qualify_session(M11_ENTRY_END, 0, 0, 1, 0, &p2, &rep, 0, 0u, 1, act, 2u, 4u, 1, 2u, 0) == 0);
+    p2 = plan; p2.duration_ms = 0u;
+    assert(m19_speaker_qualify_session(M11_ENTRY_END, 0, 0, 1, 0, &p2, &rep, 0, 0u, 1, act, 2u, 4u, 1, 2u, 0) == 0);
+    p2 = plan; p2.duration_ms = 5001u;
+    assert(m19_speaker_qualify_session(M11_ENTRY_END, 0, 0, 1, 0, &p2, &rep, 0, 0u, 1, act, 2u, 4u, 1, 2u, 0) == 0);
+    p2 = plan; p2.pcm.len = 0u; r2 = rep; r2.bytes_played = 0u;
+    assert(m19_speaker_qualify_session(M11_ENTRY_END, 0, 0, 1, 0, &p2, &r2, 0, 0u, 1, act, 2u, 4u, 1, 2u, 0) == 0);
+}
 static void test_defaults_and_cfg_bounds(const char *base) {
     struct m19_speaker_config d = m19_speaker_config_default();
     assert(!strcmp(d.started_path, "/run/m19/speaker.started"));
@@ -1065,14 +1261,16 @@ static void run_early_entry_child(struct world *w, int require_kmsg, enum pmode 
     pid_t pid = fork();
     assert(pid >= 0);
     if (pid == 0) {
-        stdio_off_char_devs();
+        alarm(20);
+        isolate_stdio_pipes();
         struct adsp_cfg ac = {.pm = pm};
         snprintf(ac.journal_path, sizeof ac.journal_path, "%s", w->journal);
-        (void)start_peer(ac);
+        struct peer_handle ph = start_peer(ac);
         struct m19_speaker_config c = cfg_for_world(w);
         c.journal_require_kmsg = require_kmsg;
         c.pd_ready_budget_ms = 120u;
         int rc = m19_speaker_run(&c);
+        stop_peer(&ph);
         _exit(rc == -ECANCELED ? 0 : 91);
     }
     int st = 0;
@@ -1150,8 +1348,9 @@ static void run_root_session_case(const char *base, const char *tag, struct adsp
     pid_t pid = fork();
     assert(pid >= 0);
     if (pid == 0) {
+        alarm(30);
         (void)close(ev_pipe[0]);
-        stdio_off_char_devs();
+        isolate_stdio_pipes();
         assert(unshare(CLONE_NEWNS) == 0);
         assert(mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL) == 0);
         char pts[PATH_MAX];
@@ -1180,6 +1379,9 @@ static void run_root_session_case(const char *base, const char *tag, struct adsp
         assert(path_is_absent(w.ep) && path_is_absent(w.ion) && path_is_absent(w.cma) && path_is_absent(w.hdir));
         for (int pfd = 200; pfd < 204; pfd++) assert(fcntl(pfd, F_GETFD) != -1);
         assert(count_open_fds_self() >= 8);
+
+        stop_peer(&ph);
+        (void)umount2(pts, MNT_DETACH);
 
         /* Ship ALSA event log to parent before exiting */
         for (unsigned i = 0; i < nev; i++) {
@@ -1278,6 +1480,12 @@ static void run_root_session_case(const char *base, const char *tag, struct adsp
 }
 
 int main(int argc, char **argv) {
+    struct rlimit rl = {0, 0};
+    (void)setrlimit(RLIMIT_CORE, &rl);
+    sigset_t empty;
+    sigemptyset(&empty);
+    (void)sigprocmask(SIG_SETMASK, &empty, NULL);
+    alarm(60);
     setvbuf(stdout, NULL, _IONBF, 0);
     signal(SIGPIPE, SIG_IGN);
     if (argc != 3) {
@@ -1289,6 +1497,7 @@ int main(int argc, char **argv) {
         return 0;
     }
     if (!strcmp(argv[1], "prechecks")) {
+        test_session_qualification_gates();
         test_defaults_and_cfg_bounds(argv[2]);
         test_single_run_lock(argv[2]);
         test_dev_clean_checks(argv[2]);

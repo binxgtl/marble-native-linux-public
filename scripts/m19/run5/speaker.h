@@ -82,6 +82,11 @@ struct m19_speaker_config {
 
 struct m19_speaker_config m19_speaker_config_default(void);
 int m19_speaker_scan_snd(const char *path);
+int m19_speaker_qualify_session(int phase, int fail_step, int rc, int session_ran, int session_rc,
+                                const m11_speaker_plan *plan, const m11_speaker_report *r,
+                                int census_rc, unsigned census_why, int resources_busy,
+                                int terminal_action, unsigned anchors_held, unsigned anchor_fds_open,
+                                int pool_held, unsigned regions_in_pool, int unmap_attempted);
 int m19_speaker_run(const struct m19_speaker_config *cfg);
 
 #endif

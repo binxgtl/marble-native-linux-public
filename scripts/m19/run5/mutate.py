@@ -128,7 +128,7 @@ MUTANTS = (
      'return 0;', SPEAKER),
     ('speaker.c', 'm11_snd_release(&ctx->snd);', '(void)0;', SPEAKER),
     ('speaker.c', 're_verified == 1 && re0_q12 > 0u && re1_q12 > 0u &&', 're0_q12 > 0u && re1_q12 > 0u &&', SPEAKER),
-    ('speaker.c', 'r->bytes_played == ctx->plan.pcm.len &&', '1 &&', SPEAKER),
+    ('speaker.c', 'r->bytes_played == plan->pcm.len &&', '1 &&', SPEAKER),
 )
 
 

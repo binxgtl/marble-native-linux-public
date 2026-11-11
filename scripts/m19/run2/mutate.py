@@ -30,7 +30,7 @@ MUTANTS = (
     ('report.c', '        if (stat(path, &target) == 0)\n            return 1;\n        return errno == ENOENT ? 0 : 1;',
      '        if (0)\n            return 1;\n        return errno == ENOENT ? 0 : 1;', ('Audio',)),
     ('report.c', '        return errno == ENOENT ? 0 : 1;', '        return 1;', ('Audio',)),
-    ('report.c', '    if (!S_ISDIR(st.st_mode))\n        return 1;', '    if (0)\n        return 1;', ('Audio',)),
+    ('report.c', '    if (!S_ISDIR(st.st_mode))\n        return 1;', '    if (!S_ISDIR(st.st_mode))\n        return 0;', ('Audio',)),
     ('report.c', '        sp->re_verified == 1 &&\n', '', ('SpeakerReport',)),
     ('report.c', '        sp->amp_off_verified == 1 &&\n', '', ('SpeakerReport',)),
     ('report.c', '        sp->bytes_played == sp->pcm_bytes &&\n', '', ('SpeakerReport',)),
