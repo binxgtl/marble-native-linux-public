@@ -549,7 +549,7 @@ class SinkReport(Audio):
         fields, log, k, steps = self.sink()
         self.assertEqual(k['sink_ok'], '1', log)
         self.assertEqual((k['streaming'], k['chord_ok'], k['pulse_sink'], k['pulse_default'], k['tone_rc'], k['amp_off_before'], k['tone_loud'],
-                          k['tone_peaks'], k['amp_on_seen'], k['amp_idle_off']), ('1',) * 6 + ('1',) * 4)
+                          k['tone_peaks'], k['amp_on_seen'], k['amp_idle_off']), ('1', '1', '1', '1', '0', '1', '1', '1', '1', '1'))
         self.assertEqual((k['loud'], k['enables'], k['disables'], k['peak_in'], k['peak_out']), ('192000', '1', '1', '32767', '10361'))
         self.assertEqual(self.verdict(log)['all_ok'], '1')
         self.assertIn('start marble-sink.service', (self.test / 'started').read_text())

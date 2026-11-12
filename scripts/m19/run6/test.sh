@@ -56,7 +56,11 @@ wait "$pid_normal" || rc_normal=$?
 rc_sanitize=0
 wait "$pid_sanitize" || rc_sanitize=$?
 cat "$out/run-normal.txt" "$out/run-sanitize.txt"
-test "$rc_normal" -eq 0 && test "$rc_sanitize" -eq 0
+# Not "test A && test B": under set -e a false A in an AND list does not stop the script.
+if [ "$rc_normal" -ne 0 ] || [ "$rc_sanitize" -ne 0 ]; then
+  echo "tests failed: normal=$rc_normal sanitize=$rc_sanitize" >&2
+  exit 1
+fi
 
 # Mutants depend on the tests, not on the CPU: CI runs them once, in a job of their own.
 if [[ ${M19_MUTANTS:-1} == 1 ]]; then

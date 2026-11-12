@@ -575,11 +575,19 @@ static void qrtr_in(int q, enum pmode pm) {
     }
 }
 
+/* The intent is journaled before its packet is sent, so it sits at the journal's end. R6's stream journals every
+ * buffer: the journal outgrows any fixed head, so the check reads the last 128 KiB. */
 static int journal_has(const char *jpath, const char *want) {
     static char seen[131072];
     int fd = open(jpath, O_RDONLY | O_CLOEXEC);
     if (fd < 0) return 0;
-    ssize_t n = read(fd, seen, sizeof seen - 1);
+    struct stat st;
+    if (fstat(fd, &st)) {
+        (void)close(fd);
+        return 0;
+    }
+    off_t from = st.st_size > (off_t)(sizeof seen - 1) ? st.st_size - (off_t)(sizeof seen - 1) : 0;
+    ssize_t n = pread(fd, seen, sizeof seen - 1, from);
     (void)close(fd);
     if (n <= 0) return 0;
     seen[n] = '\0';
