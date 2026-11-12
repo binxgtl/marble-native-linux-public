@@ -1824,10 +1824,10 @@ static void wifi_phase(const struct m19_report *c, int tty, struct wifi *w)
         char text[128];
         if (!read_small(c->wifi_result, text, sizeof(text))) {
             text[strcspn(text, "\n")] = 0;
-            snprintf(w->result, sizeof(w->result), "%s", text);
+            snprintf(w->result, sizeof(w->result), "%.95s", text);
             w->ready = !strncmp(text, "ready ", 6) && text[6];
             if (w->ready)
-                snprintf(w->iface, sizeof(w->iface), "%s", text + 6);
+                snprintf(w->iface, sizeof(w->iface), "%.31s", text + 6);
         }
         if (w->ready && !w->connected) {
             static char out[8192];
@@ -1851,7 +1851,7 @@ static void wifi_phase(const struct m19_report *c, int tty, struct wifi *w)
         (void)poll(NULL, 0, 1000);
     }
     w->waited_ms = (long)(m19_now_ms() - start);
-    struct in_addr gateway;
+    struct in_addr gateway = {0};
     if (w->connected) {
         /* DHCP may still be settling when NetworkManager says connected: give the route ten seconds. */
         for (unsigned i = 0; i < 20 && !(w->route = gateway_of(c, w->iface, &gateway)); i++)
@@ -1982,7 +1982,7 @@ static void sink_phase(const struct m19_report *c, int tty, struct sink *k)
             k->pulse_default = !strcmp(out, c->sink_name);
         }
     }
-    char status[1024];
+    char status[1024] = "";
     if (k->pulse_sink && k->pulse_default && write_tone(c->tone_path)) {
         /* The chord's silence first switches the amplifier off; the tone must switch it on again. */
         unsigned long long off_end = m19_now_ms() + c->idle_wait_ms;

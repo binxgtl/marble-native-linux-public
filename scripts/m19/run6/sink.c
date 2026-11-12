@@ -695,7 +695,7 @@ static void speaker_terminal_hold(void *user) {
 }
 
 static m11_boot_config make_boot_cfg(struct speaker_ctx *ctx) {
-    const struct m19_speaker_config *c = &ctx->cfg;
+    const struct m19_sink_config *c = &ctx->cfg;
     ctx->spawner_argv[0] = c->spawner_bin;
     ctx->spawner_argv[1] = NULL;
     ctx->spawner_jobs[0] = ctx->spawner_argv;

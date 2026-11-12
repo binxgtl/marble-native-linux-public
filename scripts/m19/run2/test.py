@@ -662,6 +662,13 @@ class WifiReport(ReportBase):
                 fields, log, w, _ = self.wifi(wait_ms='300')
                 self.assertEqual(w['wifi_ok'], '0', log)
                 self.assertEqual(self.verdict(log)['all_ok'], '0')
+                # Each fails where it should, not only at the echo.
+                if change in ('disconnected', 'other-device'):
+                    self.assertEqual((w['ready'], w['connected'], w['route']), ('1', '0', '0'))
+                elif change in ('no-route', 'no-gateway-flag'):
+                    self.assertEqual((w['ready'], w['connected'], w['route'], w['ping']), ('1', '1', '0', '0'))
+                else:
+                    self.assertEqual((w['ready'], w['connected']), ('0', '0'))
 
     def test_dns_is_recorded_not_judged(self):
         fields, log, w, _ = self.wifi(env={'M19_DNS_RC': '2'})
