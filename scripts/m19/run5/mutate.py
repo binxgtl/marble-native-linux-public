@@ -56,6 +56,13 @@ MUTANTS = (
     ('audio.c', 'if (!number || number > EXTENTS_MAX ||', 'if (!number ||', HELPER),
     # The table: read-only, end to end.
     ('audio.c', 'prepare(io, at, name, DM_READONLY_FLAG);', 'prepare(io, at, name, 0);', HELPER),
+    # R6: hwid.ko alone gets the bootloader's four hwid.* values, checked before anything loads.
+    ('audio.c', 'const char *params = strcmp(rows[i].name, "hwid.ko") ? "" : hwid;', 'const char *params = "";', LOADER),
+    ('audio.c', 'const char *params = strcmp(rows[i].name, "hwid.ko") ? "" : hwid;', 'const char *params = hwid;', LOADER),
+    ('audio.c', '            wanted = 0;\n            goto out;\n', '', LOADER),
+    ('audio.c', 'if (m12_hwid_parse(text, (unsigned long)n, 1, &values) || m12_hwid_format(&values, out, room))',
+     'if (m12_hwid_format(&values, out, room))', LOADER),
+    ('audio.c', '#define MODULE_MAX (20u << 20)', '#define MODULE_MAX (40u << 20)', LOADER),
     ('audio.c', '        spec->sector_start = start;\n', '        spec->sector_start = 0;\n', HELPER),
     ('audio.c', '        if (dm_simple(kernel, control, DM_DEV_REMOVE, name)) {', '        if (0) {', HELPER),
     ('audio.c', 'if (dm_table(kernel, control, name, device, extents, count) || dm_simple(kernel, control, DM_DEV_SUSPEND, name)) {',
@@ -174,6 +181,9 @@ def run(number, name, old, new, classes, spk_objs, audio_objs, base_drv):
         shutil.copytree(HERE, target, ignore=shutil.ignore_patterns('__pycache__'))
         for item in ('core.h', 'hash.c'):
             shutil.copy(HERE.parent / 'unlock' / item, root / 'unlock')
+        # R6: audio.c includes M12's HWID parser from ../../m12/run7.
+        (root.parent / 'm12/run7').mkdir(parents=True)
+        shutil.copy(ROOT / 'scripts/m12/run7/hwid.h', root.parent / 'm12/run7')
         (target / name).write_text(source.replace(old, new), encoding='utf-8', newline='\n')
         drv_path = str(base_drv)
         if name == 'audio.c':

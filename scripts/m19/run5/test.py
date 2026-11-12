@@ -212,6 +212,9 @@ class Loader(unittest.TestCase):
             (self.dlkm if source == 'vendor_dlkm' else self.boot).joinpath(name).write_bytes(data)
             self.lines.append(f'{phase} {source} {name} {len(data)} {hashlib.sha256(data).hexdigest()}\n')
         self.write_list()
+        # R6: hwid.ko takes the bootloader's four hwid.* values from the command line, in any order among others.
+        self.cmdline = self.root / 'cmdline'
+        self.cmdline.write_text('console=null hwid.project_adc=57421 androidboot.x=1 hwid.hwid_value=589833 hwid.project=15 hwid.build_adc=10093 quiet\n')
 
     def write_list(self, lines=None):
         self.list = self.root / 'modules.list'
@@ -223,7 +226,7 @@ class Loader(unittest.TestCase):
         return result.returncode, result.stderr
 
     def load(self, phase, **env):
-        return self.run_helper('load', self.list, phase, self.dlkm, self.boot, **env)
+        return self.run_helper('load', self.list, phase, self.dlkm, self.boot, **{'M19_FAKE_CMDLINE': str(self.cmdline), **env})
 
     def loaded(self, err):
         return re.findall(r'FAKE init_module (\S+) size=', err)
@@ -239,10 +242,15 @@ class Loader(unittest.TestCase):
         self.assertEqual(rc, 0, err)
         self.assertEqual(self.loaded(err), ['btpower.ko', 'bam_dma.ko'])
         self.assertIn('M19 audio load: first btpower.ko rc=0 errno=0\n', err)
+        self.assertIn('FAKE init_module btpower.ko size=', err)
+        self.assertEqual(re.findall(r'params=\[([^]]*)\]', err), ['', ''])
         self.assertIn('M19 audio load: phase first loaded=2 of 2\n', err)
         rc, err = self.load('second')
         self.assertEqual(rc, 0, err)
         self.assertEqual(self.loaded(err), ['machine_dlkm.ko', 'hwid.ko', 'aw882xx_dlkm.ko'])
+        # Only hwid.ko gets parameters, in M12's fixed order, whatever the command line's order.
+        self.assertEqual(re.findall(r'params=\[([^]]*)\]', err), ['', 'hwid_value=589833 project=15 build_adc=10093 project_adc=57421', ''])
+        self.assertIn('M19 audio load: second hwid.ko rc=0 errno=0 params=hwid_value=589833 project=15 build_adc=10093 project_adc=57421\n', err)
         rc, err = self.load('third')
         self.assertEqual(rc, 2)
         self.assertIn('M19 audio load: phase third is empty\n', err)
@@ -275,6 +283,28 @@ class Loader(unittest.TestCase):
                 rc, err = self.load('first')
                 self.assertEqual(rc, 0, err)
 
+    def test_hwid_parameters_must_all_be_there_before_anything_loads(self):
+        bad = ('hwid.project=15 hwid.build_adc=10093 hwid.project_adc=57421\n',
+               'hwid.hwid_value=589833 hwid.project=15 hwid.project=15 hwid.build_adc=10093 hwid.project_adc=57421\n',
+               'hwid.hwid_value=589833 hwid.project=015 hwid.build_adc=10093 hwid.project_adc=57421\n',
+               'hwid.hwid_value=589833 hwid.project=x hwid.build_adc=10093 hwid.project_adc=57421\n',
+               'hwid.hwid_value=4294967296 hwid.project=15 hwid.build_adc=10093 hwid.project_adc=57421\n',
+               'hwid.hwid_value=589833 hwid.project=15 hwid.build_adc=10093 hwid.project_adc=57421 hwid.extra=1\n', '')
+        for text in bad:
+            with self.subTest(text=text):
+                self.cmdline.write_text(text)
+                rc, err = self.load('second')
+                self.assertEqual(rc, 2, err)
+                self.assertEqual(self.loaded(err), [])
+                self.assertIn('M19 audio load: hwid parameters missing or malformed\n', err)
+        self.cmdline.unlink()
+        rc, err = self.load('second')
+        self.assertEqual((rc, self.loaded(err)), (2, []))
+        # A phase without hwid.ko never reads the command line.
+        rc, err = self.load('first')
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.loaded(err), ['btpower.ko', 'bam_dma.ko'])
+
     def test_the_source_decides_the_directory(self):
         (self.dlkm / 'hwid.ko').write_bytes((self.boot / 'hwid.ko').read_bytes())
         (self.boot / 'hwid.ko').unlink()
@@ -297,7 +327,7 @@ class Loader(unittest.TestCase):
         phase, source, name, size, digest = line.split()
         bad = (f'{phase} vendor_xxx {name} {size} {digest}\n', f'{phase} {source} ../{name} {size} {digest}\n',
                f'{phase} {source} {name[:-3]} {size} {digest}\n', f'{phase} {source} .{name} {size} {digest}\n',
-               f'{phase} {source} {name} 0 {digest}\n', f'{phase} {source} {name} {2 ** 23} {digest}\n', f'{phase} {source} {name} -1 {digest}\n',
+               f'{phase} {source} {name} 0 {digest}\n', f'{phase} {source} {name} {20 * 2 ** 20 + 1} {digest}\n', f'{phase} {source} {name} -1 {digest}\n',
                f'{phase} {source} {name} {size} {digest.upper()}\n', f'{phase} {source} {name} {size} {digest[:-1]}\n',
                f'{phase} {source} {name} {size} {digest}0\n', f'{phase} {source} {name} {size} {digest} extra\n',
                f'{phase} {source} {name} {size}\n', f'{phase} {source} {name} {size} {digest[:-1]}g\n', line.rstrip('\n'))

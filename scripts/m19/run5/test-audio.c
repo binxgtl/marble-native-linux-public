@@ -1,7 +1,8 @@
 /* The audio helper on a fake kernel: every call is logged to stderr, and M19_FAKE_FAIL fails some of them.
  *   M19_FAKE_FAIL: comma-separated block, create, table, resume, remove, or load:TEXT (the image whose first
  *   line is TEXT).
- *   M19_FAKE_SECTORS: the size of "super" in sectors; 2^40 otherwise, as a test image holds only the metadata. */
+ *   M19_FAKE_SECTORS: the size of "super" in sectors; 2^40 otherwise, as a test image holds only the metadata.
+ *   M19_FAKE_CMDLINE: the file standing in for /proc/cmdline (R6: hwid.ko's parameters). */
 #define _GNU_SOURCE
 #include <errno.h>
 #include <linux/dm-ioctl.h>
@@ -66,7 +67,7 @@ static int fake_dm(const char *control, unsigned long request, void *data)
     return 0;
 }
 
-static long fake_load(const void *image, size_t size)
+static long fake_load(const void *image, size_t size, const char *params)
 {
     char first[80], what[96];
     size_t n = 0;
@@ -75,7 +76,7 @@ static long fake_load(const void *image, size_t size)
         n++;
     }
     first[n] = 0;
-    fprintf(stderr, "FAKE init_module %s size=%zu\n", first, size);
+    fprintf(stderr, "FAKE init_module %s size=%zu params=[%s]\n", first, size, params);
     snprintf(what, sizeof(what), "load:%s", first);
     if (failing(what)) {
         errno = EEXIST;
@@ -86,6 +87,6 @@ static long fake_load(const void *image, size_t size)
 
 int main(int argc, char **argv)
 {
-    static const struct m19_audio_kernel kernel = {fake_block, fake_dm, fake_load};
+    struct m19_audio_kernel kernel = {fake_block, fake_dm, fake_load, getenv("M19_FAKE_CMDLINE")};
     return m19_audio_main(argc, argv, &kernel);
 }

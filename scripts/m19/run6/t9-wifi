@@ -1,0 +1,173 @@
+#!/bin/busybox sh
+# T9-wifi (R6, docs/m19-r6.md): stages M12's proven Wi-Fi inputs into the new root's RAM for marble-wifi.service.
+# Nothing here loads a module, starts a daemon or touches the radio; m19-wifi does that inside the session.
+#   1. the QCA6490 firmware: modem$slot mounted read-only (vfat, as M12 Run1 to Run11 did), its 222 canonical
+#      qca6490/ files copied to /run/m19/firmware/qca6490 and every one checked against M12's inventory; unmounted;
+#   2. the stock WLAN INI, staged in the image, at /run/m19/firmware/wlan/qca_cld/qca6490/WCNSS_qcom_cfg.ini;
+#   3. the 13 modules: qca_cld3_qca6490.ko from vendor_dlkm$slot (mapped read-only from super's LP metadata,
+#      mounted read-only, copied, unmounted, unmapped) and 12 from this ramdisk's vendor modules; the list checked
+#      whole by the loader;
+#   4. the loader, M12 Run9 to Run11's m12-cnssd (byte for byte) and m19-wifi in /run/m19;
+#   5. the network: the operator's single WPA2 profile (local only, never in Git or CI) as a 0600 NetworkManager
+#      keyfile in the RAM /etc.
+# The firmware loader already reads /run/m19/firmware (T9-gpu). The stop is graded, as the audio stage's: any
+# fault removes what this step mounted, mapped or made and stages "skipped REASON", and the session runs without
+# Wi-Fi; only a cleanup that cannot finish stops the run (exit 1).
+set -eu
+R=${M19_ROOT:-}
+BB=${M19_BB:-/bin/busybox}
+HELPER=${M19_AUDIO:-/sbin/m19-audio}
+log() { printf 'M19 T9 wifi: %s\n' "$*" >&2 || :; }
+die() { log "FAILED $*"; exit 1; }
+case "$R" in ''|/*) ;; *) die root;; esac
+[ -z "$R" ] || [ ! -L "$R" ] || die root
+read_value() { $BB cat "$1"; }
+number_ok() { case "$1" in *[!0-9:]*|:*|*:|*:*:*|'') return 1;; *:*) return 0;; esac; return 1; }
+safe_dir() { [ ! -L "$1" ] && [ -d "$1" ]; }
+hex64() { case "$1" in *[!0-9a-f]*) return 1;; esac; [ "${#1}" -eq 64 ]; }
+plan=$R/m19/wifi
+new=$R/newroot
+work=$R/run/m19/wifi-stage
+modem_node=$R/dev/m19-wifi-modem
+control=$R/dev/m19-wifi-control
+super_node=$R/dev/m19-wifi-super
+dlkm_node=$R/dev/m19-wifi-dlkm
+dest=$new/run/m19/wifi
+firmware=$new/run/m19/firmware
+modem_mounted=0
+dlkm_mounted=0
+mapped=0
+
+safe_dir "$new/run/m19" && safe_dir "$new/etc" || die newroot
+[ ! -e "$new/run/m19/wifi.stage" ] && [ ! -e "$dest" ] || die stage-exists
+stage() { printf '%s\n' "$*" >"$new/run/m19/wifi.stage" || die stage-publication; log "stage $*"; exit 0; }
+undo() {
+ left=0
+ if [ "$modem_mounted" = 1 ]; then if $BB umount "$work/modem"; then modem_mounted=0; else left=1; fi; fi
+ if [ "$dlkm_mounted" = 1 ]; then if $BB umount "$work/dlkm"; then dlkm_mounted=0; else left=1; fi; fi
+ if [ "$mapped" = 1 ]; then if "$HELPER" unmap "$control" m19-wifi-dlkm; then mapped=0; else left=1; fi; fi
+ for node in "$modem_node" "$dlkm_node" "$super_node" "$control"; do
+  [ ! -e "$node" ] || $BB rm -f "$node" || left=1
+ done
+ return "$left"
+}
+skip() {
+ log "skipping: $*"
+ undo || die "cleanup after $*"
+ $BB rm -rf "$dest" "$firmware/qca6490" "$firmware/wlan" "$new/etc/NetworkManager/system-connections/m19-wifi.nmconnection" || die "cleanup after $*"
+ $BB rm -rf "$work" || :
+ stage skipped "$*"
+}
+
+# 0. What the session needs from earlier steps: the audio stage (hwid.ko with the bootloader's values) and T9-gpu's
+#    firmware path. The slot the bootloader booted.
+[ -f "$R/run/m19/audio.result" ] && [ "$(read_value "$R/run/m19/audio.result")" = ready ] || skip audio-stage
+[ "$(read_value "$R/sys/module/firmware_class/parameters/path")" = /run/m19/firmware ] || skip firmware-path
+safe_dir "$firmware" || skip firmware-directory
+for name in modules.list firmware.sha256 WCNSS_qcom_cfg.ini WCNSS_qcom_cfg.ini.sha256 m12-cnssd m12-cnssd.sha256 m19-wifi private.nmconnection; do
+ [ -f "$plan/$name" ] && [ ! -L "$plan/$name" ] && [ -s "$plan/$name" ] || skip "input $name"
+done
+slot=$($BB sed -n 's/^androidboot\.slot_suffix = "\(_[ab]\)"$/\1/p' "$R/proc/bootconfig" 2>/dev/null || :)
+case "$slot" in _a) index=0;; _b) index=1;; *) skip "slot [$slot]";; esac
+$BB mkdir -p "$work/modem" "$work/dlkm" "$dest/modules" "$firmware/qca6490" "$firmware/wlan/qca_cld/qca6490" || skip directories
+
+# 1. The firmware, from modem$slot, read-only.
+modem=
+for node in "$R"/sys/class/block/*; do
+ if $BB grep -qx "PARTNAME=modem$slot" "$node/uevent" 2>/dev/null; then [ -z "$modem" ] || skip duplicate-modem; modem=$node; fi
+done
+[ -n "$modem" ] || skip modem-missing
+number=$(read_value "$modem/dev") || skip modem-number
+number_ok "$number" || skip modem-number
+[ ! -e "$modem_node" ] || skip modem-node-exists
+$BB mknod -m 400 "$modem_node" b "${number%%:*}" "${number#*:}" || skip modem-node
+$BB blockdev --setro "$modem_node" || skip modem-setro
+[ "$($BB blockdev --getro "$modem_node")" = 1 ] || skip modem-writable
+modem_mounted=1
+$BB mount -t vfat -o ro,nosuid,nodev,noexec "$modem_node" "$work/modem" || { modem_mounted=0; skip modem-mount; }
+safe_dir "$work/modem/image/qca6490" || skip modem-qca6490
+files=0
+while read -r digest path extra; do
+ [ -z "$extra" ] && hex64 "$digest" || skip "inventory line $path"
+ case "$path" in qca6490/?*) ;; *) skip "inventory path $path";; esac
+ name=${path#qca6490/}
+ case "$name" in .*|*[!A-Za-z0-9._-]*) skip "inventory name $name";; esac
+ [ -f "$work/modem/image/$path" ] && [ ! -L "$work/modem/image/$path" ] || skip "firmware missing $name"
+ $BB cp "$work/modem/image/$path" "$firmware/$path" || skip "firmware copy $name"
+ files=$((files+1))
+done <"$plan/firmware.sha256"
+[ "$files" -eq 222 ] || skip "firmware count $files"
+$BB umount "$work/modem" || skip modem-umount
+modem_mounted=0
+$BB rm -f "$modem_node" || skip modem-node-remove
+# Every copy, from RAM, against M12's canonical inventory.
+(cd "$firmware" && $BB sha256sum -c -s "$plan/firmware.sha256") || skip firmware-hash
+$BB chmod 644 "$firmware"/qca6490/* || skip firmware-mode
+
+# 2. The INI, where the driver asks for it.
+want=$($BB awk 'NR == 1 { print $1 }' "$plan/WCNSS_qcom_cfg.ini.sha256") || skip ini-sha
+hex64 "$want" || skip ini-sha
+$BB cp "$plan/WCNSS_qcom_cfg.ini" "$firmware/wlan/qca_cld/qca6490/WCNSS_qcom_cfg.ini" || skip ini-copy
+got=$($BB sha256sum "$firmware/wlan/qca_cld/qca6490/WCNSS_qcom_cfg.ini") || skip ini-hash
+[ "${got%% *}" = "$want" ] || skip ini-hash
+$BB chmod 644 "$firmware/wlan/qca_cld/qca6490/WCNSS_qcom_cfg.ini" || skip ini-mode
+
+# 3. The modules: one from vendor_dlkm$slot, read-only, the rest from this ramdisk's vendor modules.
+super=
+for node in "$R"/sys/class/block/*; do
+ if $BB grep -qx 'PARTNAME=super' "$node/uevent" 2>/dev/null; then [ -z "$super" ] || skip duplicate-super; super=$node; fi
+done
+[ -n "$super" ] || skip super-missing
+number=$(read_value "$super/dev") || skip super-number
+number_ok "$number" || skip super-number
+misc=$(read_value "$R/sys/class/misc/device-mapper/dev") || skip control-number
+number_ok "$misc" || skip control-number
+[ ! -e "$super_node" ] && [ ! -e "$control" ] && [ ! -e "$dlkm_node" ] || skip nodes-exist
+$BB mknod -m 400 "$super_node" b "${number%%:*}" "${number#*:}" || skip super-node
+$BB mknod -m 600 "$control" c "${misc%%:*}" "${misc#*:}" || skip control-node
+mapped=1
+if device=$("$HELPER" map "$control" "$super_node" "$number" "vendor_dlkm$slot" "$index" m19-wifi-dlkm); then rc=0; else rc=$?; fi
+[ "$rc" -ne 2 ] || mapped=0
+[ "$rc" -eq 0 ] || skip "map rc=$rc"
+number_ok "$device" || skip "map device [$device]"
+$BB mknod -m 400 "$dlkm_node" b "${device%%:*}" "${device#*:}" || skip dlkm-node
+[ "$($BB blockdev --getro "$dlkm_node")" = 1 ] || skip dlkm-writable
+dlkm_mounted=1
+$BB mount -t erofs -o ro,nosuid,nodev,noexec "$dlkm_node" "$work/dlkm" || { dlkm_mounted=0; skip dlkm-mount; }
+rows=0; dlkm=0
+while read -r phase source name size digest extra; do
+ [ -z "$extra" ] || skip "list line $name"
+ case "$phase" in wifi|wlan) ;; *) skip "list phase $name";; esac
+ case "$name" in .*|*[!A-Za-z0-9_.-]*|'') skip "list name $name";; esac
+ case "$source" in
+  vendor_dlkm) from=$work/dlkm/lib/modules/$name; dlkm=$((dlkm+1));;
+  vendor_boot) from=$R/lib/modules/$name;;
+  *) skip "list source $name";;
+ esac
+ [ -f "$from" ] && [ ! -L "$from" ] || skip "module missing $name"
+ $BB cp "$from" "$dest/modules/$name" || skip "module copy $name"
+ rows=$((rows+1))
+done <"$plan/modules.list"
+[ "$rows" -eq 13 ] && [ "$dlkm" -eq 1 ] || skip "list rows $rows $dlkm"
+undo || die "cleanup after the modules"
+$BB cp "$plan/modules.list" "$dest/modules.list" || skip list-copy
+"$HELPER" check "$dest/modules.list" "$dest/modules" "$dest/modules" || skip module-check
+
+# 4. The loader, the daemon and the runner.
+want=$($BB awk 'NR == 1 { print $1 }' "$plan/m12-cnssd.sha256") || skip cnssd-sha
+hex64 "$want" || skip cnssd-sha
+got=$($BB sha256sum "$plan/m12-cnssd") || skip cnssd-hash
+[ "${got%% *}" = "$want" ] || skip "cnssd hash ${got%% *}"
+$BB cp "$HELPER" "$dest/m19-audio" && $BB cp "$plan/m12-cnssd" "$dest/m12-cnssd" && $BB cp "$plan/m19-wifi" "$dest/m19-wifi" || skip binaries
+$BB chmod 755 "$dest/m19-audio" "$dest/m12-cnssd" "$dest/m19-wifi" || skip binary-mode
+
+# 5. The operator's network, readable by root alone, in the RAM /etc.
+connections=$new/etc/NetworkManager/system-connections
+[ ! -L "$new/etc/NetworkManager" ] && [ ! -L "$connections" ] || skip connections-link
+$BB mkdir -p "$connections" || skip connections-directory
+$BB cp "$plan/private.nmconnection" "$connections/m19-wifi.nmconnection" || skip profile-copy
+$BB chmod 600 "$connections/m19-wifi.nmconnection" || skip profile-mode
+
+$BB rm -rf "$work" || :
+log "firmware=$files modules=$rows cnssd_sha256=$want"
+stage staged

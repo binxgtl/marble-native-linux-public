@@ -63,7 +63,7 @@ fi
 artifact_pids=()
 for copy in a b; do
   flags=(-std=c11 -Os -Wall -Wextra -Werror -static -Wl,--build-id=none)
-  for pid in pid2 pid3 pid4 pid5; do
+  for pid in pid2 pid3 pid4 pid5 pid6; do
     gcc "${flags[@]}" "$hash" scripts/m19/run1/r1.c "$src/wire.c" "$src/handoff.c" "$src/report.c" "$src/$pid.c" -o "$out/$pid-$copy" &
     artifact_pids+=("$!")
   done
@@ -80,7 +80,7 @@ done
 for pid in "${artifact_pids[@]}"; do
   wait "$pid"
 done
-for pid in pid2 pid3 pid4 pid5; do
+for pid in pid2 pid3 pid4 pid5 pid6; do
   cmp "$out/$pid-a" "$out/$pid-b"
   sha256sum "$out/$pid-a"
 done | tee "$out/run2-binaries.txt"

@@ -87,6 +87,20 @@ struct m19_report {
     unsigned audio, speaker_ms;
     const char *asound_cards, *asound_pcm, *sound_class, *snd_dev, *audio_card;
     const char *speaker_unit, *speaker_report, *speaker_clean[5];
+    /* R6, when sink_unit is set: T12-audio starts the desktop sound server's speaker end once, waits for its chord and
+     * the switch to the stream (sink_report), then plays tone_path through PulseAudio (pulse_env reaches the session's
+     * server) and reads the stream's counters (sink_status): the tone must reach the speaker no louder than -10 dBFS,
+     * the amplifier on for it and off again after the silence. */
+    const char *sink_unit, *sink_report, *sink_status, *pactl, *pacat, *sink_name, *tone_path;
+    const char *const *pulse_env;
+    unsigned sink_ms, tone_ms, idle_wait_ms;
+    /* R6, when wifi is set: T12-wifi waits up to wifi_ms for m19-wifi's result and NetworkManager's connection, then
+     * checks the default route and pings its gateway. DNS is recorded, not judged. The report is sent with the
+     * profile's SSID, MAC and IPv4 addresses blanked. */
+    unsigned wifi, wifi_ms;
+    const char *wifi_result, *wifi_report, *nmcli, *getent, *route, *nm_profile, *dns_name;
+    /* R6, when rotation is set: xrandr's first connected output must be turned so, the screen wider than tall. */
+    const char *rotation;
 };
 
 /* R3's guard, a service of its own beside the desktop. It stops the desktop units and paints YELLOW

@@ -22,6 +22,7 @@ import r2plan  # noqa: E402
 import r3plan  # noqa: E402
 import r4plan  # noqa: E402
 import r5plan  # noqa: E402
+import r6plan  # noqa: E402
 import rootfs  # noqa: E402
 
 ARGS = None
@@ -198,6 +199,8 @@ case "$1" in
  start)
   echo "start $2" >> "$dir/started"
   [ ! -e "$dir/speaker.report.staged" ] || cp "$dir/speaker.report.staged" "$dir/../speaker.report"
+  [ ! -e "$dir/sink.report.staged" ] || cp "$dir/sink.report.staged" "$dir/../sink.report"
+  [ ! -e "$dir/sink.status.staged" ] || cp "$dir/sink.status.staged" "$dir/../sink.status"
   exit "${M19_START_RC:-0}";;
  --failed) echo "foo.service loaded failed failed Foo";;
  list-jobs) ;;
@@ -474,6 +477,224 @@ class SpeakerReport(Audio):
                     self.assertEqual(spk['private_clean'], '0')
                     self.assertIn('M19 R5 speaker-dirty ', log)
 
+
+
+# R6: the session's PulseAudio, faked. pactl answers from files; pacat plays the tone into the fake sink's counters as
+# m19-sink would: loud bytes, the amplifier on, then, after the silence, off again.
+PACTL = """#!/bin/sh
+d=$(dirname "$0")
+[ "${M19_TEST_PULSE:-}" = 1 ] || exit 9
+case "$1 $2" in
+ 'list short') cat "$d/sinks" 2>/dev/null; exit 0;;
+ 'get-default-sink ') cat "$d/default-sink" 2>/dev/null; exit 0;;
+esac
+exit 1
+"""
+PACAT = """#!/bin/sh
+d=$(dirname "$0")
+[ "${M19_TEST_PULSE:-}" = 1 ] || exit 9
+for last; do :; done
+echo "$*" > "$d/pacat-args"
+[ "$(wc -c < "$last")" -eq 192000 ] || exit 8
+loud=${M19_TONE_LOUD:-192000}
+peak_in=${M19_TONE_PEAK_IN:-32767}
+peak_out=${M19_TONE_PEAK_OUT:-10361}
+enables=${M19_TONE_ENABLES:-1}
+printf 'streaming=1\\namp_on=1\\nstopped=0\\nbuffers=60\\nbytes_in=%s\\nbytes_loud=%s\\nunderruns=0\\namp_enables=%s\\namp_disables=1\\npeak_in=%s\\npeak_out=%s\\n' "$loud" "$loud" "$enables" "$peak_in" "$peak_out" > "$d/../sink.status"
+if [ -z "${M19_TONE_STAYS_ON:-}" ]; then
+ (sleep 0.3; printf 'streaming=1\\namp_on=0\\nstopped=0\\nbuffers=90\\nbytes_in=%s\\nbytes_loud=%s\\nunderruns=0\\namp_enables=%s\\namp_disables=2\\npeak_in=%s\\npeak_out=%s\\n' "$loud" "$loud" "$enables" "$peak_in" "$peak_out" > "$d/../sink.status.new" && mv "$d/../sink.status.new" "$d/../sink.status") &
+fi
+exit "${M19_PACAT_RC:-0}"
+"""
+
+
+class SinkReport(Audio):
+    """R6 T12-audio: the sound server's chord, judged at the switch to the stream, then a tone through PulseAudio."""
+    SHA = 'e1a810a314ce467e4b3f8e49d9759bda21526f6402a303e315a614750b8daa95'
+
+    def setUp(self):
+        super().setUp()
+        for name, text in (('pactl', PACTL), ('pacat', PACAT)):
+            (self.test / name).write_text(text)
+            (self.test / name).chmod(0o755)
+        (self.test / 'sinks').write_text('0\tmarble_speaker\tmodule-pipe-sink.c\ts16le 2ch 48000Hz\tIDLE\n')
+        (self.test / 'default-sink').write_text('marble_speaker\n')
+        (self.root / 'proc/4242/fd').mkdir(parents=True)
+        (self.root / 'proc/4242/stat').write_text('4242 (m19-sink) S 1 4242 4242 0 -1\n')
+        for i in range(10):
+            os.symlink('/dev/null', self.root / 'proc/4242/fd' / str(i))
+        self.write_report()
+        self.write_status()
+
+    def report_fields(self):
+        return {'state': 'streaming', 'chord_ok': '1', 'ok': '0', 'pid': '4242', 'entry_phase': '6', 'regions_mapped': '2', 're_verified': '1',
+                're0_q12': '26099', 're1_q12': '28684', 'volume_level': '8', 'pcm_bytes': '768000', 'bytes_played': '768000',
+                'pdr_seen': '0', 'unmap_attempted': '0', 'plan_sha256': self.SHA, 'streaming': '1'}
+
+    def write_report(self, overrides=None, drop=()):
+        items = dict(self.report_fields(), **(overrides or {}))
+        (self.test / 'sink.report.staged').write_text(''.join(f'{k}={v}\n' for k, v in items.items() if k not in drop))
+
+    def write_status(self, amp_on='0'):
+        (self.test / 'sink.status.staged').write_text(f'streaming=1\namp_on={amp_on}\nstopped=0\nbuffers=10\nbytes_in=0\nbytes_loud=0\n'
+                                                      'underruns=0\namp_enables=0\namp_disables=1\npeak_in=0\npeak_out=0\n')
+
+    def sink(self, env=None):
+        data, colour = self.run_report(env=dict({'M19_TEST_AUDIO': '1', 'M19_TEST_SINK': '1'}, **(env or {})))
+        fields, log, steps = self.parse(data)
+        line = re.search(r'M19 R6 sink (.*)\n', log)
+        return fields, log, dict(item.split('=', 1) for item in line.group(1).split()) if line else None, steps
+
+    def test_the_chord_then_a_tone_through_pulseaudio_passes(self):
+        fields, log, k, steps = self.sink()
+        self.assertEqual(k['sink_ok'], '1', log)
+        self.assertEqual((k['streaming'], k['chord_ok'], k['pulse_sink'], k['pulse_default'], k['tone_rc'], k['amp_off_before'], k['tone_loud'],
+                          k['tone_peaks'], k['amp_on_seen'], k['amp_idle_off']), ('1',) * 6 + ('1',) * 4)
+        self.assertEqual((k['loud'], k['enables'], k['disables'], k['peak_in'], k['peak_out']), ('192000', '1', '1', '32767', '10361'))
+        self.assertEqual(self.verdict(log)['all_ok'], '1')
+        self.assertIn('start marble-sink.service', (self.test / 'started').read_text())
+        self.assertIn('--playback --raw --format=s16le --rate=48000 --channels=2', (self.test / 'pacat-args').read_text())
+        self.assertEqual(len((self.root / 'sink-tone.raw').read_bytes()), 192000)
+        self.assertIn('M19 sink report\n', log)
+        self.assertIn('M19 sink status\n', log)
+        self.assertTrue(any(step.startswith('M19STEP T12-audio OK') for step in steps), steps)
+
+    def test_each_failure_fails(self):
+        cases = (({'M19_START_RC': '1'}, None, None), ({}, {'state': 'failed'}, None), ({}, {'chord_ok': '0'}, None),
+                 ({}, {'regions_mapped': '1'}, None), ({}, {'re_verified': '0'}, None), ({}, {'bytes_played': '767996'}, None),
+                 ({}, {'pdr_seen': '1'}, None), ({}, {'unmap_attempted': '1'}, None), ({}, {'volume_level': '9'}, None),
+                 ({}, {'plan_sha256': 'x'}, None), ({}, {'pid': '99'}, None), ({}, {'streaming': '0'}, None),
+                 ({'M19_PACAT_RC': '1'}, None, None), ({'M19_TONE_LOUD': '100000'}, None, None), ({'M19_TONE_PEAK_IN': '20000'}, None, None),
+                 ({'M19_TONE_PEAK_OUT': '10363'}, None, None), ({'M19_TONE_PEAK_OUT': '5000'}, None, None), ({'M19_TONE_ENABLES': '0'}, None, None),
+                 ({'M19_TONE_STAYS_ON': '1'}, None, None), ({}, None, 'sinks'), ({}, None, 'default-sink'), ({}, None, 'amp-on'))
+        for env, report, fixture in cases:
+            with self.subTest(env=env, report=report, fixture=fixture):
+                self.setUp()
+                if report:
+                    self.write_report(report)
+                if fixture == 'sinks':
+                    (self.test / 'sinks').write_text('0\tauto_null\tmodule-null-sink.c\n')
+                elif fixture == 'default-sink':
+                    (self.test / 'default-sink').write_text('auto_null\n')
+                elif fixture == 'amp-on':
+                    self.write_status(amp_on='1')
+                fields, log, k, _ = self.sink(env)
+                self.assertEqual(k['sink_ok'], '0', log)
+                self.assertEqual(self.verdict(log)['all_ok'], '0')
+
+    def test_a_private_node_fails(self):
+        (self.root / 'dev-clean').mkdir()
+        (self.root / 'dev-clean/m11-snd').write_text('')
+        fields, log, k, _ = self.sink()
+        self.assertEqual((k['private_clean'], k['sink_ok']), ('0', '0'))
+        self.assertIn('M19 R6 sink-dirty ', log)
+
+
+ROUTE_HEAD = 'Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n'
+NMCLI = """#!/bin/sh
+d=$(dirname "$0")
+echo "$*" >> "$d/nmcli-args"
+cat "$d/nm-devices"
+"""
+GETENT = '#!/bin/sh\nexit "${M19_DNS_RC:-0}"\n'
+
+
+class WifiReport(ReportBase):
+    """R6 T12-wifi: m19-wifi's result, NetworkManager's state, the default route, its gateway's echo; nothing named."""
+
+    def setUp(self):
+        super().setUp()
+        for name, text in (('nmcli', NMCLI), ('getent', GETENT)):
+            (self.test / name).write_text(text)
+            (self.test / name).chmod(0o755)
+        (self.root / 'wifi.result').write_text('ready lo\n')
+        (self.root / 'wifi.report').write_text('step=ready\nrc=0\nbdf=0000:01:00.0\niface=lo\n')
+        (self.test / 'nm-devices').write_text('lo:wifi:connected\nusb0:ethernet:unmanaged\n')
+        # The loopback address, little-endian as the kernel prints it.
+        (self.root / 'route').write_text(ROUTE_HEAD + 'lo\t00000000\t0100007F\t0003\t0\t0\t600\t00000000\t0\t0\t0\n')
+        # 'Hi Fi' as NetworkManager's keyfile byte list.
+        (self.root / 'profile').write_text('[wifi]\nssid=72;105;32;70;105;\n[wifi-security]\nkey-mgmt=wpa-psk\n')
+
+    def wifi(self, wait_ms='600', env=None):
+        data, colour = self.run_report(env=dict({'M19_TEST_WIFI': wait_ms}, **(env or {})))
+        fields, log, steps = self.parse(data)
+        line = re.search(r'M19 R6 wifi (.*)\n', log)
+        return fields, log, dict(item.split('=', 1) for item in line.group(1).split()) if line else None, steps
+
+    def test_connected_with_a_route_is_recorded_without_names(self):
+        fields, log, w, steps = self.wifi()
+        self.assertEqual((w['ready'], w['iface'], w['connected'], w['route'], w['dns']), ('1', 'lo', '1', '1', '1'))
+        # The gateway echo needs a raw socket: as root it answers on loopback, otherwise it fails closed.
+        self.assertEqual(w['ping'], '1' if os.geteuid() == 0 else '0')
+        self.assertEqual(w['wifi_ok'], w['ping'])
+        self.assertEqual(self.verdict(log)['all_ok'], w['ping'])
+        self.assertIn('-t -f DEVICE,TYPE,STATE device', (self.test / 'nmcli-args').read_text())
+        self.assertIn('M19 wifi report\n', log)
+        self.assertTrue(any(step.startswith('M19STEP T12-wifi') for step in steps), steps)
+
+    def test_a_failed_bring_up_is_not_waited_for(self):
+        (self.root / 'wifi.result').write_text('failed cbc -110\n')
+        start = time.monotonic()
+        fields, log, w, _ = self.wifi(wait_ms='5000')
+        self.assertLess(time.monotonic() - start, 4.5)
+        self.assertEqual((w['result'], w['ready'], w['connected'], w['wifi_ok']), ('failed_cbc_-110', '0', '0', '0'))
+        self.assertEqual(self.verdict(log)['all_ok'], '0')
+        self.assertFalse((self.test / 'nmcli-args').exists())
+
+    def test_each_missing_piece_fails(self):
+        for change in ('no-result', 'skipped', 'fault', 'disconnected', 'other-device', 'no-route', 'no-gateway-flag'):
+            with self.subTest(change=change):
+                self.setUp()
+                if change == 'no-result':
+                    (self.root / 'wifi.result').unlink()
+                elif change == 'skipped':
+                    (self.root / 'wifi.result').write_text('skipped stage\n')
+                elif change == 'fault':
+                    (self.root / 'wifi.result').write_text('fault owner\n')
+                elif change == 'disconnected':
+                    (self.test / 'nm-devices').write_text('lo:wifi:disconnected\n')
+                elif change == 'other-device':
+                    (self.test / 'nm-devices').write_text('wlan1:wifi:connected\n')
+                elif change == 'no-route':
+                    (self.root / 'route').write_text(ROUTE_HEAD)
+                else:
+                    (self.root / 'route').write_text(ROUTE_HEAD + 'lo\t00000000\t0100007F\t0001\t0\t0\t600\t00000000\t0\t0\t0\n')
+                fields, log, w, _ = self.wifi(wait_ms='300')
+                self.assertEqual(w['wifi_ok'], '0', log)
+                self.assertEqual(self.verdict(log)['all_ok'], '0')
+
+    def test_dns_is_recorded_not_judged(self):
+        fields, log, w, _ = self.wifi(env={'M19_DNS_RC': '2'})
+        self.assertEqual(w['dns'], '0')
+        self.assertEqual(w['wifi_ok'], w['ping'])
+
+    # Built at run time, so the exported source holds no address-shaped text.
+    MAC = ':'.join(('0a', '1B', '2c', '3D', '4e', '5F'))
+    HOST = '.'.join(('192', '168', '1', '20'))
+    GATEWAY = '.'.join(('192', '168', '1', '1'))
+
+    def test_the_report_leaves_out_the_ssid_and_every_address(self):
+        (self.test / 'kmsg').write_text(f'<6>wlan: connected to Hi Fi bssid {self.MAC} ip {self.HOST} via {self.GATEWAY}\n'
+                                        '<6>kernel 5.10.236 Mesa 26.2.2 no address 1.2.3 and 1234.5.6.7\n')
+        fields, log, w, _ = self.wifi()
+        self.assertNotIn('Hi Fi', log)
+        self.assertNotIn(self.MAC, log)
+        self.assertNotIn(self.HOST, log)
+        self.assertIn('connected to ***** bssid xx:xx:xx:xx:xx:xx ip xxx.xxx.x.xx via xxx.xxx.x.x', log)
+        self.assertIn('kernel 5.10.236 Mesa 26.2.2 no address 1.2.3 and 1234.5.6.7', log)
+        redacted = dict(item.split('=') for item in re.search(r'M19 R6 redacted (.*)\n', log).group(1).split())
+        self.assertGreaterEqual(int(redacted['ssid']), 1)
+        self.assertGreaterEqual(int(redacted['mac']), 1)
+        self.assertGreaterEqual(int(redacted['ipv4']), 2)
+        # The hash is the redacted log's.
+        self.assertEqual(hashlib.sha256(log.encode()).hexdigest(), fields[2])
+
+    def test_without_wifi_nothing_is_redacted(self):
+        (self.test / 'kmsg').write_text(f'<6>addr {self.HOST}\n')
+        data, colour = self.run_report()
+        fields, log, _ = self.parse(data)
+        self.assertIn(self.HOST, log)
+        self.assertNotIn('M19 R6', log)
 
 class Report(ReportBase):
     def test_pass_running(self):
@@ -869,7 +1090,7 @@ class Static(unittest.TestCase):
         self.assertNotRegex(text, r'\breboot\(|RB_AUTOBOOT|LINUX_REBOOT')
 
     def test_no_reboot_and_no_block_write_anywhere_in_r2(self):
-        for name in ('handoff.c', 'report.c', 'wire.c', 'pid2.c', 't9-root', 'pid4.c', 'pid5.c', 't9-gpu', 'gpu-probe.c', 'present-probe.c'):
+        for name in ('handoff.c', 'report.c', 'wire.c', 'pid2.c', 't9-root', 'pid4.c', 'pid5.c', 'pid6.c', 't9-gpu', 'gpu-probe.c', 'present-probe.c'):
             text = (HERE / name).read_text()
             self.assertNotRegex(text, r'\b(reboot|poweroff|mkfs|fsck|blkdiscard|fstrim|setrw|wipe|sgdisk|parted)\b|\bof=/dev|O_WRONLY[^\n]*/dev/(sd|block|dm)', name)
         text = (HERE / 't9-root').read_text()
@@ -962,6 +1183,36 @@ class Static(unittest.TestCase):
             self.assertEqual(items[-1], 'NULL')
             self.assertEqual(tuple(items[:-1]), want, name)
         self.assertNotRegex(text, r'\breboot\(|RB_AUTOBOOT|LINUX_REBOOT')
+
+    def test_pid6_is_pid5_with_wifi_the_sink_and_landscape_and_nothing_else(self):
+        def body(name):
+            text = (HERE / name).read_text()
+            return text[text.index('*/\n') + 3:].splitlines()
+        changes = [line[0] + ' ' + line[1:] for line in difflib.unified_diff(body('pid5.c'), body('pid6.c'), lineterm='', n=0)
+                   if line[:1] in '+-' and line[:3] not in ('+++', '---')]
+        self.assertEqual(changes, [
+            '-     {"T9-audio", "/m19/t9-audio", 30000, M19_STEP_REQUIRED},',
+            '+     {"T9-sound", "/m19/t9-sound", 30000, M19_STEP_REQUIRED},',
+            '+     {"T9-wifi", "/m19/t9-wifi", 240000, M19_STEP_REQUIRED},',
+            "+ /* R6: the session's PulseAudio, as XFCE started it for root. */",
+            '+ static const char *const pulse_env[] = {"HOME=/run/m19/session", "XDG_RUNTIME_DIR=/run/m19/xdg", "PULSE_SERVER=unix:/run/m19/xdg/pulse/native",',
+            '+                                         NULL};',
+            '+ ',
+            '-     .present_probe = "/run/m19/m19-present-probe", .present_frames = 120, .judge_copy = 1, .judge_dri3 = 1, .shell = "/bin/sh", .shows = shows,',
+            "+     /* R6: the turned screen adds a composite a frame; the windowed copy's rate is recorded, not judged. */",
+            '+     .present_probe = "/run/m19/m19-present-probe", .present_frames = 120, .judge_copy = 0, .judge_dri3 = 1, .shell = "/bin/sh", .shows = shows,',
+            '-     .speaker_unit = "marble-speaker.service", .speaker_report = "/run/m19/speaker.report",',
+            '+     .sink_unit = "marble-sink.service", .sink_report = "/run/m19/sink.report", .sink_status = "/run/m19/sink.status",',
+            '+     .pactl = "/usr/bin/pactl", .pacat = "/usr/bin/pacat", .sink_name = "marble_speaker", .tone_path = "/run/m19/sink-tone.raw",',
+            '+     .pulse_env = pulse_env, .sink_ms = 60000, .tone_ms = 15000, .idle_wait_ms = 12000,',
+            '+     .wifi = 1, .wifi_ms = 240000, .wifi_result = "/run/m19/wifi.result", .wifi_report = "/run/m19/wifi.report", .nmcli = "/usr/bin/nmcli",',
+            '+     .getent = "/usr/bin/getent", .route = "/proc/net/route", .nm_profile = "/etc/NetworkManager/system-connections/m19-wifi.nmconnection",',
+            '+     .dns_name = "connectivity-check.ubuntu.com",',
+            '+     .rotation = "right",'])
+        names = re.findall(r'\{"(T\d+-[a-z]+)", "/m19/(t\d-[a-z]+)"', (HERE / 'pid6.c').read_text())
+        self.assertEqual(names[0], ('T3-audio', 't3-audio'))
+        self.assertEqual(names[-3:], [('T9-sound', 't9-sound'), ('T9-wifi', 't9-wifi'), ('T8-writes', 't8-writes')])
+        self.assertLessEqual(len(names), int(re.search(r'#define M19_STEPS_MAX (\d+)', (HERE.parent / 'run1/r1.h').read_text()).group(1)))
 
     def test_pid5_is_pid4_with_the_audio_stage_and_nothing_else(self):
         def body(name):
@@ -1131,6 +1382,91 @@ class Plan4(unittest.TestCase):
         # R4e: nothing in the session touches xfwm4's settings; only the reporter runs the compositor script.
         self.assertNotIn('autostart', r4plan.SESSION)
         self.assertNotIn('gpu-compositor', r4plan.SESSION)
+
+
+class Plan6(unittest.TestCase):
+    """R6's plan: R5's, with the landscape glamor configuration, Wi-Fi, NetworkManager, the sink and USB input."""
+
+    def setUp(self):
+        self.files, self.r5 = r6plan.render(), r5plan.render()
+
+    def test_everything_else_is_r5s(self):
+        changed = {name for name in set(self.files) | set(self.r5) if self.files.get(name) != self.r5.get(name)}
+        etc = {name for name in changed if name.startswith('m19/r2/etc/')}
+        self.assertEqual(changed - etc, {'m19/r2/default', 'm19/r2/masks', 'm19/r2/files', 'm19/r3/hidden', 'm19/r4/xorg-glamor.conf',
+                                         'm19/r5/udev-masks', 'm19/r6/udev-masks'})
+        self.assertEqual({name[len('m19/r2/etc/'):] for name in etc}, {
+            'systemd/system/m19-r5.target', 'systemd/system/m19-r5-report.service', 'systemd/system/marble-speaker.service',
+            'systemd/system/m19-r6.target', 'systemd/system/m19-r6-report.service', 'systemd/system/marble-sink.service',
+            'systemd/system/marble-wifi.service', 'systemd/system/NetworkManager.service.d/m19.conf',
+            'systemd/system/wpa_supplicant.service.d/m19.conf', 'NetworkManager/conf.d/m19.conf', 'pulse/default.pa.d/m19-sink.pa',
+            'udev/rules.d/70-m19-usb-input.rules'})
+        self.assertEqual(self.files['m19/r2/default'], b'm19-r6.target\n')
+        self.assertEqual(self.files['m19/r6/udev-masks'], self.r5['m19/r5/udev-masks'])
+        self.assertNotIn('m19/r5/udev-masks', self.files)
+        listed = self.files['m19/r2/files'].decode().split()
+        self.assertEqual(sorted(listed), sorted(name[len('m19/r2/etc/'):] for name in self.files if name.startswith('m19/r2/etc/')))
+
+    def test_the_x_server_turns_right_and_the_touchscreen_with_it(self):
+        conf = self.files['m19/r4/xorg-glamor.conf'].decode()
+        old = self.r5['m19/r4/xorg-glamor.conf'].decode()
+        self.assertEqual(conf.replace('    Option "Rotate" "right"\n', '', 1)[:len(old)], old)
+        self.assertEqual(conf.count('Option "Rotate"'), 1)
+        self.assertIn('    Option "PreferredMode" "1080x2400x120vid"\n    Option "Rotate" "right"\n', conf)
+        self.assertTrue(conf.endswith('\nSection "InputClass"\n    Identifier "marble-touch-landscape"\n    MatchProduct "goodix_ts"\n'
+                                      '    Option "TransformationMatrix" "0 1 0 -1 0 1 0 0 1"\nEndSection\n'), conf[-300:])
+        # The matrix maps the panel's top right corner to the turned screen's top left, as a right turn does.
+        m = [float(v) for v in r6plan.TOUCH_MATRIX.split()]
+        self.assertEqual((m[0] * 1 + m[1] * 0 + m[2], m[3] * 1 + m[4] * 0 + m[5]), (0.0, 0.0))
+        self.assertEqual((m[0] * 1 + m[1] * 1 + m[2], m[3] * 1 + m[4] * 1 + m[5]), (1.0, 0.0))
+        # The CPU fallback stays R3c's portrait configuration.
+        self.assertEqual(self.files['m19/r3/xorg.conf'], self.r5['m19/r3/xorg.conf'])
+        self.assertNotIn(b'Rotate', self.files['m19/r3/xorg.conf'])
+
+    def test_networkmanager_and_wpa_supplicant_run_and_wait_for_wifi(self):
+        masks = self.files['m19/r2/masks'].decode().split()
+        self.assertNotIn('NetworkManager.service', masks)
+        self.assertNotIn('wpa_supplicant.service', masks)
+        self.assertIn('NetworkManager-wait-online.service', masks)
+        self.assertIn('ModemManager.service', masks)
+        self.assertEqual(sorted(set(self.r5['m19/r2/masks'].decode().split()) - set(masks)), ['NetworkManager.service', 'wpa_supplicant.service'])
+        etc = {name[len('m19/r2/etc/'):]: data.decode() for name, data in self.files.items() if name.startswith('m19/r2/etc/')}
+        self.assertEqual(etc['systemd/system/NetworkManager.service.d/m19.conf'],
+                         '[Unit]\nConditionPathExists=/run/m19/wifi.ready\n\n[Service]\nLogLevelMax=warning\n')
+        self.assertEqual(etc['systemd/system/wpa_supplicant.service.d/m19.conf'], '[Service]\nLogLevelMax=warning\n')
+        conf = etc['NetworkManager/conf.d/m19.conf']
+        for line in ('plugins=keyfile', 'unmanaged-devices=except:type:wifi', 'level=WARN', 'enabled=false'):
+            self.assertIn(line + '\n', conf)
+        wifi = etc['systemd/system/marble-wifi.service']
+        for line in ('ExecStart=/run/m19/wifi/m19-wifi', 'Restart=no', 'KillMode=none', 'SendSIGKILL=no', 'ConditionPathExists=/run/m19/wifi.stage'):
+            self.assertIn(line + '\n', wifi)
+        self.assertIn(' marble-wifi.service', etc['systemd/system/m19-r6.target'])
+        self.assertNotIn('NetworkManager', etc['systemd/system/m19-r6.target'])
+
+    def test_the_sink_is_the_reporters_alone_and_pulseaudio_writes_its_fifo(self):
+        etc = {name[len('m19/r2/etc/'):]: data.decode() for name, data in self.files.items() if name.startswith('m19/r2/etc/')}
+        sink = etc['systemd/system/marble-sink.service']
+        for line in ('ExecStart=/run/m19/m19-sink', 'Restart=no', 'KillMode=none', 'SendSIGKILL=no', 'TimeoutStopSec=infinity'):
+            self.assertIn(line + '\n', sink)
+        self.assertNotIn('marble-sink', etc['systemd/system/m19-r6.target'])
+        self.assertEqual(etc['pulse/default.pa.d/m19-sink.pa'],
+                         'load-module module-pipe-sink file=/run/m19/sink/fifo sink_name=marble_speaker format=s16le rate=48000 channels=2 '
+                         'sink_properties=device.description=Speaker\nset-default-sink marble_speaker\n')
+        hidden = self.files['m19/r3/hidden'].decode().split()
+        self.assertNotIn('pulseaudio', hidden)
+        self.assertNotIn('nm-applet', hidden)
+        self.assertEqual(sorted(set(self.r5['m19/r3/hidden'].decode().split()) - set(hidden)), ['nm-applet', 'pulseaudio'])
+        for unit in ('alsa-restore.service', 'alsa-state.service'):
+            self.assertIn(unit, self.files['m19/r2/masks'].decode().split())
+
+    def test_usb_input_nodes_only(self):
+        rule = self.files['m19/r2/etc/udev/rules.d/70-m19-usb-input.rules'].decode()
+        lines = [line for line in rule.splitlines() if line and not line.startswith('#')]
+        self.assertEqual(len(lines), 2)
+        for line in lines:
+            self.assertIn('SUBSYSTEM=="input", KERNEL=="event[0-9]*", DEVPATH=="*/usb[0-9]*"', line)
+        self.assertIn('mknod -m 0660 /dev/input/%k c $major $minor', lines[0])
+        self.assertIn('RUN+="/bin/rm -f /dev/input/%k"', lines[1])
 
 
 class Plan5(unittest.TestCase):
@@ -1770,6 +2106,49 @@ class DesktopFixture(ReportBase):
 
     def desktop(self, log):
         return dict(item.split('=') for item in re.search(r'M19 R3 desktop (.*)\n', log).group(1).split())
+
+
+class Landscape(DesktopFixture):
+    """R6: the desktop turned right, as xrandr reports it, wider than tall."""
+
+    def run_turned(self, query, rotation='right'):
+        (self.test / 'xrandr-query').write_text(query)
+        wire = Wire()
+        environment = dict(os.environ, ASAN_OPTIONS='detect_leaks=0', M19_VBLANK_HZ='120', M19_TEST_ROTATION=rotation)
+        subprocess.run([ARGS.driver, 'report-desktop', str(self.root), wire.path, '300', '5000', '300'], capture_output=True, timeout=60,
+                       env=environment)
+        _, log, _ = self.parse(wire.close())
+        line = re.search(r'M19 R6 landscape (.*)\n', log)
+        return log, dict(item.split('=') for item in line.group(1).split())
+
+    TURNED = ('DSI-1 connected primary 2400x1080+0+0 right (normal left inverted right x axis y axis) 69mm x 154mm\n'
+              '   1080x2400x60vid  60.00 +\n   1080x2400x120vid 90.00   120.00*\n')
+
+    def test_turned_right_passes(self):
+        log, land = self.run_turned(self.TURNED)
+        self.assertEqual(land, {'rotation': 'right', 'screen': '2400x1080', 'landscape_ok': '1'})
+        self.assertEqual(self.desktop(log)['mode'], '1080x2400x120vid')
+        self.assertEqual(self.verdict(log)['all_ok'], '1')
+
+    def test_portrait_or_the_other_way_fails(self):
+        for query, rotation in (('DSI-1 connected primary 1080x2400+0+0 (normal left inverted right x axis y axis) 69mm x 154mm\n'
+                                 '   1080x2400x120vid 120.00*\n', 'normal'),
+                                (self.TURNED.replace(' right (', ' left ('), 'left'),
+                                ('DSI-1 connected primary 1080x2400+0+0 right (normal left inverted right x axis y axis)\n'
+                                 '   1080x2400x120vid 120.00*\n', 'right'),
+                                ('DSI-1 connected (normal left inverted right x axis y axis)\n   1080x2400x120vid 120.00*\n', 'none')):
+            with self.subTest(rotation=rotation, query=query[:40]):
+                log, land = self.run_turned(query)
+                self.assertEqual((land['rotation'], land['landscape_ok']), (rotation, '0'))
+                self.assertEqual(self.verdict(log)['all_ok'], '0')
+
+    def test_without_a_rotation_nothing_is_judged(self):
+        (self.test / 'xrandr-query').write_text('DSI-1 connected primary 1080x2400+0+0\n   1080x2400x120vid 120.00*\n')
+        wire = Wire()
+        subprocess.run([ARGS.driver, 'report-desktop', str(self.root), wire.path, '300', '5000', '300'], capture_output=True, timeout=60,
+                       env=dict(os.environ, ASAN_OPTIONS='detect_leaks=0', M19_VBLANK_HZ='120'))
+        _, log, _ = self.parse(wire.close())
+        self.assertNotIn('M19 R6 landscape', log)
 
 
 class Desktop(DesktopFixture):

@@ -219,6 +219,42 @@ static int report_mode(char **argv)
         for (unsigned i = 0; i < 5; i++)
             c.speaker_clean[i] = speaker[2 + i];
     }
+    /* R6: the sound server's T12-audio on fakes of pactl and pacat, and T12-wifi on fakes of nmcli and getent. */
+    static char sink[6][4200], wifi[7][4200];
+    static const char *pulse[] = {"M19_TEST_PULSE=1", NULL};
+    const char *sink_names[] = {"sink.report", "sink.status", "test/pactl", "test/pacat", "sink-tone.raw", "proc"};
+    const char *wifi_names[] = {"wifi.result", "wifi.report", "test/nmcli", "test/getent", "route", "profile", "unused"};
+    for (unsigned i = 0; i < 6; i++)
+        snprintf(sink[i], sizeof(sink[i]), "%s/%s", root, sink_names[i]);
+    for (unsigned i = 0; i < 7; i++)
+        snprintf(wifi[i], sizeof(wifi[i]), "%s/%s", root, wifi_names[i]);
+    if (getenv("M19_TEST_SINK")) {
+        c.proc = sink[5];
+        for (unsigned i = 0; i < 5; i++)
+            c.speaker_clean[i] = speaker[2 + i];
+        c.sink_unit = "marble-sink.service";
+        c.sink_report = sink[0];
+        c.sink_status = sink[1];
+        c.pactl = sink[2];
+        c.pacat = sink[3];
+        c.tone_path = sink[4];
+        c.sink_name = "marble_speaker";
+        c.pulse_env = pulse;
+        c.sink_ms = 1500;
+        c.tone_ms = 3000;
+        c.idle_wait_ms = 1500;
+    }
+    if (getenv("M19_TEST_WIFI")) {
+        c.wifi = 1;
+        c.wifi_ms = (unsigned)strtoul(getenv("M19_TEST_WIFI"), NULL, 10);
+        c.wifi_result = wifi[0];
+        c.wifi_report = wifi[1];
+        c.nmcli = wifi[2];
+        c.getent = wifi[3];
+        c.route = wifi[4];
+        c.nm_profile = wifi[5];
+        c.dns_name = "example.invalid";
+    }
     return m19_report_main(&c);
 }
 
@@ -241,6 +277,8 @@ static int report_desktop_mode(char **argv)
                            .xinput = paths[10], .ps = paths[11], .proc = paths[12], .interrupts = paths[13], .card = paths[14],
                            .touch_name = "goodix_ts", .xorg_logs = {paths[15], paths[16]}, .guard_unit = "m19-r3-guard.service",
                            .guard_marker = paths[17], .battery_temp = paths[18], .thermal = paths[19]};
+    /* R6: the turned desktop. */
+    c.rotation = getenv("M19_TEST_ROTATION");
     return m19_report_main(&c);
 }
 

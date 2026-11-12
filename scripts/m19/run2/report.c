@@ -19,6 +19,12 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <arpa/inet.h>
+#include <net/if.h>
+#include <netinet/in.h>
+#include <netinet/ip.h>
+#include <netinet/ip_icmp.h>
+#include <sys/socket.h>
 
 #include "../unlock/core.h"
 
@@ -426,6 +432,9 @@ struct desktop {
     long irq_delta;
     double xrandr_hz, vblank_hz;
     char mode[48];
+    /* R6 */
+    int width, height, landscape_ok;
+    char rotation[16];
 };
 
 static int run_quiet(const struct m19_report *c, char *const argv[], unsigned char *out, size_t cap, size_t *taken)
@@ -499,6 +508,43 @@ static void xrandr_mode(const struct m19_report *c, struct desktop *d)
     }
 }
 
+/* R6: the first connected output's screen geometry and rotation, as xrandr prints them:
+ * "DSI-1 connected primary 2400x1080+0+0 right (normal left inverted right x axis y axis) 69mm x 154mm". */
+static void xrandr_turn(const struct m19_report *c, struct desktop *d)
+{
+    static char out[16384];
+    size_t taken = 0;
+    char *argv[] = {(char *)c->xrandr, "--query", NULL};
+    d->width = d->height = 0;
+    snprintf(d->rotation, sizeof(d->rotation), "none");
+    if (run_quiet(c, argv, (unsigned char *)out, sizeof(out) - 1, &taken))
+        return;
+    out[taken] = 0;
+    for (char *line = out; line && *line;) {
+        char *next = strchr(line, '\n');
+        if (next)
+            *next++ = 0;
+        char *at = strstr(line, " connected ");
+        if (at && line[0] != ' ') {
+            at += strlen(" connected ");
+            if (!strncmp(at, "primary ", 8))
+                at += 8;
+            int w, h, x, y, used = 0;
+            if (sscanf(at, "%dx%d+%d+%d %n", &w, &h, &x, &y, &used) == 4 && used) {
+                d->width = w;
+                d->height = h;
+                char word[16] = "";
+                if (at[used] == '(' || sscanf(at + used, "%15s", word) != 1)
+                    snprintf(d->rotation, sizeof(d->rotation), "normal");
+                else
+                    snprintf(d->rotation, sizeof(d->rotation), "%s", word);
+            }
+            return;
+        }
+        line = next;
+    }
+}
+
 /* Interrupts counted on every CPU for the line whose name is the touch device's. */
 static long touch_irqs(const struct m19_report *c)
 {
@@ -565,6 +611,10 @@ static void desktop_phase(const struct m19_report *c, int tty, struct desktop *d
         return;
     xrandr_mode(c, d);
     d->mode_ok = d->xrandr_hz > c->want_hz - 1.0 && d->xrandr_hz < c->want_hz + 1.0;
+    if (c->rotation) {
+        xrandr_turn(c, d);
+        d->landscape_ok = !strcmp(d->rotation, c->rotation) && d->width > d->height && d->height > 0;
+    }
     d->crtc = m19_vblank_rate(c->card, &d->vblank_hz);
     d->vblank_ok = d->crtc >= 0 && d->vblank_hz > c->want_hz * 0.96 && d->vblank_hz < c->want_hz * 1.04;
 
@@ -1646,6 +1696,414 @@ static void audio_phase(const struct m19_report *c, struct audio *a, const struc
     a->audio_ok = a->card >= 0 && a->control && a->playback && a->capture && !a->snd_nodes && (!c->speaker_unit || sp->speaker_ok);
 }
 
+/* ------------------------------------------------------------------ R6 -------------------------------------------- */
+
+/* The value of key in "key=value" lines, matched at a line's start; LONG_MIN when absent or not a number. */
+static long kv_long(const char *text, const char *key)
+{
+    size_t n = strlen(key);
+    for (const char *line = text; line && *line; line = strchr(line, '\n') ? strchr(line, '\n') + 1 : NULL) {
+        if (strncmp(line, key, n) || line[n] != '=')
+            continue;
+        char *end;
+        errno = 0;
+        long value = strtol(line + n + 1, &end, 10);
+        return end == line + n + 1 || errno || (*end && *end != '\n') ? LONG_MIN : value;
+    }
+    return LONG_MIN;
+}
+
+static void kv_text(const char *text, const char *key, char *value, size_t room)
+{
+    size_t n = strlen(key);
+    value[0] = 0;
+    for (const char *line = text; line && *line; line = strchr(line, '\n') ? strchr(line, '\n') + 1 : NULL) {
+        if (strncmp(line, key, n) || line[n] != '=')
+            continue;
+        size_t length = strcspn(line + n + 1, "\n");
+        if (length >= room)
+            length = room - 1;
+        memcpy(value, line + n + 1, length);
+        value[length] = 0;
+        return;
+    }
+}
+
+struct wifi {
+    int ready, connected, route, ping, dns, wifi_ok;
+    long waited_ms;
+    char result[96], iface[32];
+};
+
+/* The default route's gateway on iface, from /proc/net/route. */
+static int gateway_of(const struct m19_report *c, const char *iface, struct in_addr *gateway)
+{
+    char text[8192];
+    if (read_small(c->route, text, sizeof(text)))
+        return 0;
+    for (char *line = strtok(text, "\n"); line; line = strtok(NULL, "\n")) {
+        char name[32];
+        unsigned destination, via, flags;
+        if (sscanf(line, "%31s %x %x %x", name, &destination, &via, &flags) != 4 || strcmp(name, iface))
+            continue;
+        if (destination == 0 && (flags & 0x3) == 0x3 && via) {
+            gateway->s_addr = via; /* already in network order, as the kernel prints it */
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static uint16_t icmp_sum(const void *data, size_t size)
+{
+    const uint8_t *p = data;
+    uint32_t sum = 0;
+    for (size_t i = 0; i + 1 < size; i += 2)
+        sum += (uint32_t)(p[i] << 8 | p[i + 1]);
+    if (size & 1)
+        sum += (uint32_t)p[size - 1] << 8;
+    while (sum >> 16)
+        sum = (sum & 0xffff) + (sum >> 16);
+    return htons((uint16_t)~sum);
+}
+
+/* Up to three ICMP echoes to the gateway through iface; 1 at the first reply. The tree has no ping(8). */
+static int gateway_ping(const char *iface, struct in_addr gateway)
+{
+    int fd = socket(AF_INET, SOCK_RAW | SOCK_CLOEXEC, IPPROTO_ICMP);
+    if (fd < 0)
+        return 0;
+    (void)setsockopt(fd, SOL_SOCKET, SO_BINDTODEVICE, iface, (socklen_t)strlen(iface) + 1);
+    struct sockaddr_in to = {.sin_family = AF_INET, .sin_addr = gateway};
+    uint16_t id = (uint16_t)(getpid() & 0xffff);
+    int ok = 0;
+    for (uint16_t seq = 1; seq <= 3 && !ok; seq++) {
+        struct {
+            struct icmphdr h;
+            char data[32];
+        } ping;
+        memset(&ping, 0, sizeof(ping));
+        ping.h.type = ICMP_ECHO;
+        ping.h.un.echo.id = htons(id);
+        ping.h.un.echo.sequence = htons(seq);
+        memcpy(ping.data, "M19 R6 gateway", 14);
+        ping.h.checksum = icmp_sum(&ping, sizeof(ping));
+        if (sendto(fd, &ping, sizeof(ping), 0, (struct sockaddr *)&to, sizeof(to)) != (ssize_t)sizeof(ping))
+            continue;
+        unsigned long long end = m19_now_ms() + 2000;
+        while (!ok && m19_now_ms() < end) {
+            struct pollfd p = {fd, POLLIN, 0};
+            if (poll(&p, 1, 100) <= 0)
+                continue;
+            unsigned char packet[256];
+            struct sockaddr_in from;
+            socklen_t length = sizeof(from);
+            ssize_t n = recvfrom(fd, packet, sizeof(packet), 0, (struct sockaddr *)&from, &length);
+            if (n < (ssize_t)sizeof(struct iphdr))
+                continue;
+            size_t header = (size_t)(packet[0] & 0x0f) * 4;
+            if (n < (ssize_t)(header + sizeof(struct icmphdr)) || from.sin_addr.s_addr != gateway.s_addr)
+                continue;
+            const struct icmphdr *reply = (const void *)(packet + header);
+            ok = reply->type == ICMP_ECHOREPLY && ntohs(reply->un.echo.id) == id && ntohs(reply->un.echo.sequence) == seq;
+        }
+    }
+    close(fd);
+    return ok;
+}
+
+/* R6: T12-wifi. m19-wifi's result, NetworkManager's state for that interface, the default route through it and
+ * its gateway's echo. No network name, address or credential is printed. */
+static void wifi_phase(const struct m19_report *c, int tty, struct wifi *w)
+{
+    memset(w, 0, sizeof(*w));
+    snprintf(w->result, sizeof(w->result), "none");
+    (void)m19_wire_line(tty, c->pace_ms, M19_DEVICE_STEP " T12-wifi START");
+    unsigned long long start = m19_now_ms(), end = start + c->wifi_ms, beat = start + c->beat_ms;
+    for (;;) {
+        char text[128];
+        if (!read_small(c->wifi_result, text, sizeof(text))) {
+            text[strcspn(text, "\n")] = 0;
+            snprintf(w->result, sizeof(w->result), "%s", text);
+            w->ready = !strncmp(text, "ready ", 6) && text[6];
+            if (w->ready)
+                snprintf(w->iface, sizeof(w->iface), "%s", text + 6);
+        }
+        if (w->ready && !w->connected) {
+            static char out[8192];
+            size_t taken = 0;
+            char *argv[] = {(char *)c->nmcli, "-t", "-f", "DEVICE,TYPE,STATE", "device", NULL};
+            if (!run_quiet(c, argv, (unsigned char *)out, sizeof(out) - 1, &taken)) {
+                out[taken] = 0;
+                char want[64];
+                snprintf(want, sizeof(want), "%s:wifi:connected", w->iface);
+                for (char *line = strtok(out, "\n"); line; line = strtok(NULL, "\n"))
+                    w->connected |= !strcmp(line, want);
+            }
+        }
+        unsigned long long now = m19_now_ms();
+        if (w->connected || now >= end || (!w->ready && strcmp(w->result, "none") && strncmp(w->result, "ready", 5)))
+            break;
+        if (now >= beat) {
+            (void)m19_wire_line(tty, c->pace_ms, M19_DEVICE_BEAT " T12-wifi %llu %d", (now - start) / 1000, w->ready);
+            beat = now + c->beat_ms;
+        }
+        (void)poll(NULL, 0, 1000);
+    }
+    w->waited_ms = (long)(m19_now_ms() - start);
+    struct in_addr gateway;
+    if (w->connected) {
+        /* DHCP may still be settling when NetworkManager says connected: give the route ten seconds. */
+        for (unsigned i = 0; i < 20 && !(w->route = gateway_of(c, w->iface, &gateway)); i++)
+            (void)poll(NULL, 0, 500);
+    }
+    if (w->route)
+        w->ping = gateway_ping(w->iface, gateway);
+    if (w->route && c->getent && c->dns_name) {
+        unsigned char out[512];
+        size_t taken = 0;
+        char *argv[] = {(char *)c->getent, "hosts", (char *)c->dns_name, NULL};
+        w->dns = capture(argv, out, sizeof(out), &taken, c->command_ms) == 0;
+    }
+    w->wifi_ok = w->ready && w->connected && w->route && w->ping;
+    (void)m19_wire_line(tty, c->pace_ms, M19_DEVICE_STEP " T12-wifi %s %d %d %d %d", w->wifi_ok ? "OK" : "FAIL", w->ready, w->connected,
+                        w->route, w->ping);
+}
+
+struct sink {
+    int unit_rc, report_seen, streaming, chord_ok, holder_alive, holder_fds, private_clean, pulse_sink, pulse_default, tone_rc;
+    int amp_off_before, tone_loud, tone_peaks, amp_on_seen, amp_idle_off, sink_ok;
+    long pid, regions, re_verified, re0, re1, played, pcm, pdr_seen, unmap_attempted, volume_level;
+    long loud_before, loud_after, enables_before, enables_after, disables_before, disables_after, peak_in, peak_out, underruns;
+    char state[16], plan_sha[80];
+};
+
+static int sink_status_now(const struct m19_report *c, char *text, size_t room)
+{
+    return file_text(c->sink_status, text, room) > 0;
+}
+
+/* Run1 of the tone file: one second of a full-scale 1 kHz tone, 48 kHz stereo s16le, so the sink's -10 dB and its
+ * clamp are what keep it at -10 dBFS. */
+static int write_tone(const char *path)
+{
+    static int16_t pcm[48000 * 2];
+    for (unsigned i = 0; i < 48000; i++) {
+        /* a sine from a 48-step table of a quarter wave would do; the integer form avoids libm */
+        unsigned phase = i % 48;
+        static const int16_t quarter[13] = {0, 4277, 8481, 12539, 16383, 19947, 23170, 25996, 28377, 30273, 31650, 32487, 32767};
+        int16_t v = phase <= 12 ? quarter[phase] : phase <= 24 ? quarter[24 - phase] : phase <= 36 ? (int16_t)-quarter[phase - 24] : (int16_t)-quarter[48 - phase];
+        pcm[2 * i] = pcm[2 * i + 1] = v;
+    }
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0644);
+    if (fd < 0)
+        return 0;
+    ssize_t n = write(fd, pcm, sizeof(pcm));
+    return !close(fd) && n == (ssize_t)sizeof(pcm);
+}
+
+/* R6: T12-audio for the sound server. The chord (Run31's gates, as R5b judged them) and the switch to the stream,
+ * then a tone through PulseAudio's default sink, which must be marble_speaker. */
+static void sink_phase(const struct m19_report *c, int tty, struct sink *k)
+{
+    memset(k, 0, sizeof(*k));
+    k->unit_rc = -1;
+    snprintf(k->state, sizeof(k->state), "none");
+    (void)m19_wire_line(tty, c->pace_ms, M19_DEVICE_STEP " T12-audio START");
+    char *start_argv[] = {(char *)c->systemctl, "start", (char *)c->sink_unit, NULL};
+    k->unit_rc = section(start_argv, SECTION_CAP / 16, c->command_ms);
+    static char text[8192];
+    unsigned long long began = m19_now_ms(), deadline = began + c->sink_ms, beat = began + c->beat_ms;
+    for (;;) {
+        if (file_text(c->sink_report, text, sizeof(text)) > 0) {
+            k->report_seen = 1;
+            kv_text(text, "state", k->state, sizeof(k->state));
+            if (strcmp(k->state, "pre"))
+                break;
+        }
+        unsigned long long now = m19_now_ms();
+        if (k->unit_rc != 0 || now >= deadline)
+            break;
+        if (c->beat_ms && now >= beat) {
+            (void)m19_wire_line(tty, c->pace_ms, M19_DEVICE_BEAT " T12-audio %llu wait", (now - began) / 1000);
+            beat = now + c->beat_ms;
+        }
+        (void)poll(NULL, 0, 50);
+    }
+    if (k->report_seen) {
+        k->streaming = kv_long(text, "streaming") == 1 && !strcmp(k->state, "streaming");
+        k->chord_ok = kv_long(text, "chord_ok") == 1;
+        k->pid = kv_long(text, "pid");
+        k->regions = kv_long(text, "regions_mapped");
+        k->re_verified = kv_long(text, "re_verified");
+        k->re0 = kv_long(text, "re0_q12");
+        k->re1 = kv_long(text, "re1_q12");
+        k->played = kv_long(text, "bytes_played");
+        k->pcm = kv_long(text, "pcm_bytes");
+        k->pdr_seen = kv_long(text, "pdr_seen");
+        k->unmap_attempted = kv_long(text, "unmap_attempted");
+        k->volume_level = kv_long(text, "volume_level");
+        kv_text(text, "plan_sha256", k->plan_sha, sizeof(k->plan_sha));
+    }
+    struct speaker holder;
+    speaker_init(&holder);
+    holder.pid = k->pid;
+    check_speaker_holder(c, &holder);
+    k->holder_alive = holder.holder_alive;
+    k->holder_fds = holder.holder_fds;
+    k->private_clean = 1;
+    for (unsigned i = 0; i < sizeof(c->speaker_clean) / sizeof(c->speaker_clean[0]); i++) {
+        struct stat st;
+        if (c->speaker_clean[i] && (lstat(c->speaker_clean[i], &st) == 0 || errno != ENOENT)) {
+            addf("M19 R6 sink-dirty %s\n", c->speaker_clean[i]);
+            k->private_clean = 0;
+        }
+    }
+    /* PulseAudio, as the session started it: the pipe sink exists and is the default. */
+    unsigned long long pulse_end = m19_now_ms() + c->sink_ms;
+    while (k->streaming && !k->pulse_sink && m19_now_ms() < pulse_end) {
+        static char out[8192];
+        size_t taken = 0;
+        char *argv[] = {(char *)c->pactl, "list", "short", "sinks", NULL};
+        if (!capture_env(argv, c->pulse_env, (unsigned char *)out, sizeof(out) - 1, &taken, c->command_ms)) {
+            out[taken] = 0;
+            k->pulse_sink = strstr(out, c->sink_name) != NULL;
+        }
+        if (!k->pulse_sink)
+            (void)poll(NULL, 0, 1000);
+    }
+    if (k->pulse_sink) {
+        char out[256];
+        size_t taken = 0;
+        char *argv[] = {(char *)c->pactl, "get-default-sink", NULL};
+        if (!capture_env(argv, c->pulse_env, (unsigned char *)out, sizeof(out) - 1, &taken, c->command_ms)) {
+            out[taken] = 0;
+            out[strcspn(out, "\n")] = 0;
+            k->pulse_default = !strcmp(out, c->sink_name);
+        }
+    }
+    char status[1024];
+    if (k->pulse_sink && k->pulse_default && write_tone(c->tone_path)) {
+        /* The chord's silence first switches the amplifier off; the tone must switch it on again. */
+        unsigned long long off_end = m19_now_ms() + c->idle_wait_ms;
+        while (m19_now_ms() < off_end && !(sink_status_now(c, status, sizeof(status)) && kv_long(status, "amp_on") == 0))
+            (void)poll(NULL, 0, 200);
+        k->amp_off_before = sink_status_now(c, status, sizeof(status)) && kv_long(status, "amp_on") == 0;
+        k->loud_before = kv_long(status, "bytes_loud");
+        k->enables_before = kv_long(status, "amp_enables");
+        k->disables_before = kv_long(status, "amp_disables");
+        char *argv[] = {(char *)c->pacat, "--playback", "--raw", "--format=s16le", "--rate=48000", "--channels=2", "--latency-msec=100",
+                        (char *)c->tone_path, NULL};
+        size_t ignored;
+        unsigned char out[1024];
+        k->tone_rc = capture_env(argv, c->pulse_env, out, sizeof(out), &ignored, c->tone_ms);
+        (void)poll(NULL, 0, 1500);
+        if (sink_status_now(c, status, sizeof(status))) {
+            k->loud_after = kv_long(status, "bytes_loud");
+            k->enables_after = kv_long(status, "amp_enables");
+            k->peak_in = kv_long(status, "peak_in");
+            k->peak_out = kv_long(status, "peak_out");
+            k->underruns = kv_long(status, "underruns");
+        }
+        k->tone_loud = k->loud_after != LONG_MIN && k->loud_before != LONG_MIN && k->loud_after - k->loud_before >= 172800; /* 90 % */
+        k->tone_peaks = k->peak_in >= 30000 && k->peak_out >= 9000 && k->peak_out <= 10362;
+        k->amp_on_seen = k->enables_after != LONG_MIN && k->enables_before != LONG_MIN && k->enables_after > k->enables_before;
+        unsigned long long idle_end = m19_now_ms() + c->idle_wait_ms;
+        while (m19_now_ms() < idle_end) {
+            if (sink_status_now(c, status, sizeof(status)) && kv_long(status, "amp_on") == 0 && kv_long(status, "amp_disables") > k->disables_before)
+                break;
+            (void)poll(NULL, 0, 200);
+        }
+        k->disables_after = kv_long(status, "amp_disables");
+        k->amp_idle_off = kv_long(status, "amp_on") == 0 && k->disables_after != LONG_MIN && k->disables_after > k->disables_before;
+    }
+    k->sink_ok = k->unit_rc == 0 && k->report_seen && k->streaming && k->chord_ok && k->regions == 2 && k->re_verified == 1 && k->re0 > 0 &&
+                 k->re1 > 0 && k->pcm > 0 && k->played == k->pcm && k->pdr_seen == 0 && k->unmap_attempted == 0 && k->volume_level > 0 &&
+                 k->volume_level <= 8 && is_hex64(k->plan_sha) && k->holder_alive && k->holder_fds >= 8 && k->private_clean &&
+                 k->pulse_sink && k->pulse_default && k->tone_rc == 0 && k->amp_off_before && k->tone_loud && k->tone_peaks &&
+                 k->amp_on_seen && k->amp_idle_off;
+    (void)m19_wire_line(tty, c->pace_ms, M19_DEVICE_STEP " T12-audio %s %d %d %d %d %d", k->sink_ok ? "OK" : "FAIL", k->chord_ok,
+                        k->streaming, k->tone_loud, k->tone_peaks, k->amp_idle_off);
+}
+
+/* The bytes of the profile's network name, as NetworkManager's keyfile holds them: a byte list such as 97;98;99; */
+static size_t profile_ssid(const char *path, unsigned char *ssid, size_t room)
+{
+    char text[4096], value[512];
+    if (!path || read_small(path, text, sizeof(text)))
+        return 0;
+    kv_text(text, "ssid", value, sizeof(value));
+    size_t n = 0;
+    for (char *at = value; *at && n < room;) {
+        char *end;
+        unsigned long byte = strtoul(at, &end, 10);
+        if (end == at || *end != ';' || byte > 255)
+            return 0;
+        ssid[n++] = (unsigned char)byte;
+        at = end + 1;
+    }
+    explicit_bzero(text, sizeof(text));
+    return n;
+}
+
+static int is_hexdigit(int ch)
+{
+    return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F');
+}
+
+/* R6: blanks, in place, the profile's SSID, every MAC address and every dotted IPv4 address in the report. */
+static void redact(const struct m19_report *c, unsigned *ssids, unsigned *macs, unsigned *addresses)
+{
+    unsigned char ssid[32];
+    size_t length = profile_ssid(c->nm_profile, ssid, sizeof(ssid));
+    *ssids = *macs = *addresses = 0;
+    if (length >= 2)
+        for (unsigned char *at = report; (at = memmem(at, used - (size_t)(at - report), ssid, length)); at += length) {
+            memset(at, '*', length);
+            (*ssids)++;
+        }
+    explicit_bzero(ssid, sizeof(ssid));
+    for (size_t i = 0; i + 17 <= used; i++) {
+        unsigned char *p = report + i;
+        int mac = (i == 0 || (!is_hexdigit(p[-1]) && p[-1] != ':')) && (i + 17 == used || (!is_hexdigit(p[17]) && p[17] != ':'));
+        for (unsigned j = 0; mac && j < 17; j++)
+            mac = j % 3 == 2 ? p[j] == ':' : is_hexdigit(p[j]);
+        if (mac) {
+            for (unsigned j = 0; j < 17; j++)
+                if (j % 3 != 2)
+                    p[j] = 'x';
+            (*macs)++;
+            i += 16;
+        }
+    }
+    for (size_t i = 0; i < used; i++) {
+        if (report[i] < '0' || report[i] > '9' || (i && ((report[i - 1] >= '0' && report[i - 1] <= '9') || report[i - 1] == '.')))
+            continue;
+        size_t j = i;
+        int parts = 0, ok = 1;
+        while (ok && parts < 4) {
+            size_t digits = 0;
+            while (j < used && report[j] >= '0' && report[j] <= '9' && digits < 4) {
+                j++;
+                digits++;
+            }
+            ok = digits >= 1 && digits <= 3;
+            parts++;
+            if (ok && parts < 4) {
+                ok = j < used && report[j] == '.';
+                j++;
+            }
+        }
+        if (!ok || parts != 4 || (j < used && ((report[j] >= '0' && report[j] <= '9') || report[j] == '.')))
+            continue;
+        for (size_t k = i; k < j; k++)
+            if (report[k] != '.')
+                report[k] = 'x';
+        (*addresses)++;
+        i = j;
+    }
+}
+
 int m19_report_main(const struct m19_report *c)
 {
     unsigned long long start = m19_now_ms();
@@ -1687,6 +2145,15 @@ int m19_report_main(const struct m19_report *c)
     }
     if (c->audio && c->speaker_unit && (!c->desktop || d.x_ok))
         speaker_phase(c, tty, &sp);
+    /* R6: Wi-Fi, then the sound server, after the desktop and the GPU. */
+    struct wifi w;
+    struct sink k;
+    memset(&w, 0, sizeof(w));
+    memset(&k, 0, sizeof(k));
+    if (c->wifi)
+        wifi_phase(c, tty, &w);
+    if (c->audio && c->sink_unit && (!c->desktop || d.x_ok))
+        sink_phase(c, tty, &k);
 
     char exe[256];
     ssize_t n = readlink(c->proc1_exe, exe, sizeof(exe) - 1);
@@ -1734,11 +2201,13 @@ int m19_report_main(const struct m19_report *c)
         (void)read_long(c->battery_temp, &battery);
         long hottest = hottest_zone(c->thermal, &zones);
         int guard_ok = guard_active && !tripped;
-        desktop_ok = d.x_ok && d.session_ok && d.mode_ok && d.vblank_ok && d.touch_ok && guard_ok;
+        desktop_ok = d.x_ok && d.session_ok && d.mode_ok && d.vblank_ok && d.touch_ok && guard_ok && (!c->rotation || d.landscape_ok);
         addf("M19 R3 desktop x=%d session=%d mode=%s xrandr_hz=%.2f mode_ok=%d crtc=%d vblank_hz=%.2f vblank_ok=%d touch_device=%d "
              "touch_irqs=%ld touch_events=%d touch_ok=%d guard=%d tripped=%d battery=%ld zones=%d hottest=%ld\n", d.x_ok, d.session_ok, d.mode,
              d.xrandr_hz, d.mode_ok, d.crtc, d.vblank_hz, d.vblank_ok, d.touch_device, d.irq_delta, d.events, d.touch_ok, guard_ok, tripped,
              battery == LONG_MIN ? -1 : battery, zones, hottest == LONG_MIN ? -1 : hottest);
+        if (c->rotation)
+            addf("M19 R6 landscape rotation=%s screen=%dx%d landscape_ok=%d\n", d.rotation, d.width, d.height, d.landscape_ok);
     }
     int gpu_ok = 1;
     if (c->gpu) {
@@ -1810,15 +2279,47 @@ int m19_report_main(const struct m19_report *c)
                 (void)add_file(c->speaker_report, SECTION_CAP / 4);
             }
         }
+        if (c->sink_unit) {
+            audio_ok = audio_ok && k.sink_ok;
+            addf("M19 R6 sink unit_rc=%d report_seen=%d state=%s streaming=%d chord_ok=%d pid=%ld played=%ld pcm=%ld re=%ld/%ld/%ld "
+                 "regions=%ld volume=%ld holder_alive=%d holder_fds=%d private_clean=%d pulse_sink=%d pulse_default=%d tone_rc=%d "
+                 "amp_off_before=%d loud=%ld enables=%ld disables=%ld peak_in=%ld peak_out=%ld underruns=%ld tone_loud=%d tone_peaks=%d "
+                 "amp_on_seen=%d amp_idle_off=%d sink_ok=%d\n",
+                 k.unit_rc, k.report_seen, k.state, k.streaming, k.chord_ok, k.pid, k.played, k.pcm, k.re_verified, k.re0, k.re1, k.regions,
+                 k.volume_level, k.holder_alive, k.holder_fds, k.private_clean, k.pulse_sink, k.pulse_default, k.tone_rc, k.amp_off_before,
+                 k.loud_after == LONG_MIN || k.loud_before == LONG_MIN ? -1L : k.loud_after - k.loud_before,
+                 k.enables_after == LONG_MIN || k.enables_before == LONG_MIN ? -1L : k.enables_after - k.enables_before,
+                 k.disables_after == LONG_MIN || k.disables_before == LONG_MIN ? -1L : k.disables_after - k.disables_before, k.peak_in,
+                 k.peak_out, k.underruns, k.tone_loud, k.tone_peaks, k.amp_on_seen, k.amp_idle_off, k.sink_ok);
+            addf("M19 sink report\n");
+            (void)add_file(c->sink_report, SECTION_CAP / 4);
+            addf("M19 sink status\n");
+            (void)add_file(c->sink_status, SECTION_CAP / 8);
+        }
         addf("M19 asound cards\n");
         (void)add_file(c->asound_cards, SECTION_CAP);
         addf("M19 asound pcm\n");
         (void)add_file(c->asound_pcm, SECTION_CAP);
     }
-    int all_ok = init_ok && state_ok && targets_ok && writes_ok && ro_ok && mounts_ok && !write_warning && desktop_ok && gpu_ok && audio_ok;
+    int wifi_ok = 1;
+    if (c->wifi) {
+        wifi_ok = w.wifi_ok;
+        addf("M19 R6 wifi result=%s ready=%d iface=%s connected=%d route=%d ping=%d dns=%d waited_ms=%ld wifi_ok=%d\n", token(w.result), w.ready,
+             w.iface[0] ? w.iface : "none", w.connected, w.route, w.ping, w.dns, w.waited_ms, w.wifi_ok);
+        addf("M19 wifi report\n");
+        (void)add_file(c->wifi_report, SECTION_CAP / 8);
+    }
+    int all_ok = init_ok && state_ok && targets_ok && writes_ok && ro_ok && mounts_ok && !write_warning && desktop_ok && gpu_ok && audio_ok &&
+                 wifi_ok;
     addf("M19 R2 verdict init=%d state=%s targets=%d writes=%d read_only=%d mounts=%d write_warning=%d all_ok=%d\n", init_ok, state, targets_ok,
          writes_ok, ro_ok, mounts_ok, write_warning, all_ok);
 
+    if (c->wifi) {
+        /* Network names and addresses stay on the phone: the journal and the kernel log may hold them. */
+        unsigned ssids, macs, addresses;
+        redact(c, &ssids, &macs, &addresses);
+        addf("M19 R6 redacted ssid=%u mac=%u ipv4=%u\n", ssids, macs, addresses);
+    }
     uint8_t digest[32];
     char hash[65];
     m19_sha256(report, used, digest);

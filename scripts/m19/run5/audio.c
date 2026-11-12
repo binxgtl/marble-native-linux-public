@@ -13,6 +13,10 @@
  *     Loads PHASE's modules in LIST's order. Each is read whole, from DLKM for vendor_dlkm and from BOOT for
  *     vendor_boot, and its size and SHA256 are checked. Only when the whole phase checks out is the first one
  *     loaded, from the very bytes that were hashed. The first failure stops.
+ *     (R6) hwid.ko alone is loaded with parameters: the bootloader's hwid.hwid_value, hwid.project,
+ *     hwid.build_adc and hwid.project_adc from the kernel command line, all four decimal and each once, as
+ *     Android's modprobe passes them (M12 Run6: without them CNSS picks the generic BDF). Every other module
+ *     gets none. A missing or malformed value stops the phase before anything loads.
  *
  * LIST holds one module a line: "PHASE SOURCE NAME SIZE SHA256".
  * Exit status: 0 done; 2 failed, with the kernel as it was; 1 failed after a change (a module loaded, or a
@@ -30,6 +34,7 @@
 #include <unistd.h>
 
 #include "audio.h"
+#include "../../m12/run7/hwid.h"
 
 void m19_sha256(const void *data, size_t size, uint8_t digest[32]);
 
@@ -42,7 +47,7 @@ void m19_sha256(const void *data, size_t size, uint8_t digest[32]);
 #define METADATA_MAX (1u << 20)
 #define EXTENTS_MAX 8u
 #define LIST_MAX 64u
-#define MODULE_MAX (4u << 20)
+#define MODULE_MAX (20u << 20) /* R6: the WLAN driver is 15.9 MB */
 #define DM_BUFFER 4096u
 
 enum { DONE = 0, CHANGED = 1, UNCHANGED = 2 };
@@ -400,6 +405,24 @@ static void release(uint8_t **images, int count)
     }
 }
 
+/* hwid.ko's parameters from the command line at path, as "hwid_value=N project=N build_adc=N project_adc=N". */
+static int hwid_params(const char *path, char *out, size_t room)
+{
+    char text[16384];
+    struct m12_hwid values;
+    int fd = path ? open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    if (fd < 0)
+        return -1;
+    ssize_t n = read(fd, text, sizeof(text) - 1);
+    close(fd);
+    if (n <= 0 || n == (ssize_t)sizeof(text) - 1)
+        return -1;
+    text[n] = 0;
+    if (m12_hwid_parse(text, (unsigned long)n, 1, &values) || m12_hwid_format(&values, out, room))
+        return -1;
+    return 0;
+}
+
 /* argv: LIST PHASE DLKM BOOT for load, LIST DLKM BOOT for check (phase NULL). */
 static int load(const struct m19_audio_kernel *kernel, const char *list, const char *phase, const char *dlkm, const char *boot)
 {
@@ -420,12 +443,22 @@ static int load(const struct m19_audio_kernel *kernel, const char *list, const c
         fprintf(stderr, "M19 audio load: phase %s %s\n", phase, wanted ? "not checked" : "is empty");
         goto out;
     }
+    static char hwid[160];
+    hwid[0] = 0;
+    for (int i = 0; i < count; i++)
+        if (images[i] && !strcmp(rows[i].name, "hwid.ko") && hwid_params(kernel->cmdline, hwid, sizeof(hwid))) {
+            fprintf(stderr, "M19 audio load: hwid parameters missing or malformed\n");
+            wanted = 0;
+            goto out;
+        }
     for (int i = 0; i < count; i++) {
         if (!images[i])
             continue;
+        const char *params = strcmp(rows[i].name, "hwid.ko") ? "" : hwid;
         errno = 0;
-        long rc = kernel->load(images[i], rows[i].size);
-        fprintf(stderr, "M19 audio load: %s %s rc=%ld errno=%d\n", rows[i].phase, rows[i].name, rc, rc ? errno : 0);
+        long rc = kernel->load(images[i], rows[i].size, params);
+        fprintf(stderr, "M19 audio load: %s %s rc=%ld errno=%d%s%s\n", rows[i].phase, rows[i].name, rc, rc ? errno : 0, *params ? " params=" : "",
+                params);
         if (rc) {
             status = loaded ? CHANGED : UNCHANGED;
             goto out;
@@ -485,14 +518,14 @@ static int real_dm(const char *control, unsigned long request, void *io)
     return rc;
 }
 
-static long real_load(const void *image, size_t size)
+static long real_load(const void *image, size_t size, const char *params)
 {
-    return syscall(SYS_init_module, image, (unsigned long)size, "");
+    return syscall(SYS_init_module, image, (unsigned long)size, params);
 }
 
 int main(int argc, char **argv)
 {
-    static const struct m19_audio_kernel kernel = {real_block, real_dm, real_load};
+    static const struct m19_audio_kernel kernel = {real_block, real_dm, real_load, "/proc/cmdline"};
     return m19_audio_main(argc, argv, &kernel);
 }
 #endif

@@ -149,6 +149,11 @@ jobs:
         run: bash scripts/m19/run5/test.sh artifacts/m19/${{ runner.arch }}/run5
         env:
           M19_MUTANTS: '0'
+      - name: R6 Wi-Fi runner, T9-wifi, T9-sound and the desktop sound server on synthetic trees, normal and ASan/UBSan, static binaries (no device)
+        timeout-minutes: 8
+        run: bash scripts/m19/run6/test.sh artifacts/m19/${{ runner.arch }}/run6
+        env:
+          M19_MUTANTS: '0'
       - name: M11 Run12's PD mapper, from its pinned linux-msm sources, static and built twice (ARM64, no device)
         if: runner.arch == 'ARM64'
         run: |
@@ -196,6 +201,12 @@ jobs:
             artifacts/m19/**/pid4-b
             artifacts/m19/**/pid5-a
             artifacts/m19/**/pid5-b
+            artifacts/m19/**/pid6-a
+            artifacts/m19/**/pid6-b
+            artifacts/m19/**/m19-wifi-a
+            artifacts/m19/**/m19-wifi-b
+            artifacts/m19/**/m19-sink-a
+            artifacts/m19/**/m19-sink-b
             artifacts/m19/**/m19-audio-a
             artifacts/m19/**/m19-audio-b
             artifacts/m19/**/m19-speaker-a
@@ -243,6 +254,10 @@ jobs:
             needs_probes: true
           - suite: run5
             script: scripts/m19/run5/mutate.py
+            args: ''
+            needs_probes: false
+          - suite: run6
+            script: scripts/m19/run6/mutate.py
             args: ''
             needs_probes: false
     runs-on: ubuntu-24.04
