@@ -187,7 +187,28 @@ def main():
         if old not in source:
             sys.exit(f'mutant {number} does not apply to {name}: {old}')
     with tempfile.TemporaryDirectory() as obj_tmp:
-        spk_objs = precompile_speaker_objects(Path(obj_tmp))
+        obj_dir = Path(obj_tmp)
+        os.chmod(obj_dir, 0o755)
+        spk_objs = precompile_speaker_objects(obj_dir)
+        base_drv = obj_dir / 'base-driver'
+        built = subprocess.run(
+            ['gcc', '-std=c11', '-O1', '-w', '-DM19_AUDIO_TEST',
+             str(HERE.parent / 'unlock/hash.c'), str(HERE / 'audio.c'), str(HERE / 'test-audio.c'),
+             '-o', str(base_drv)],
+            capture_output=True, timeout=120)
+        if built.returncode:
+            sys.exit(f'baseline driver failed to compile:\n{built.stderr.decode("utf-8", "replace")}')
+        base_spk = obj_dir / 'base-speaker-driver'
+        built_spk = subprocess.run(
+            ['gcc', *SPK_CFLAGS, f'-I{HERE}', str(HERE / 'speaker.c'), *spk_objs, '-o', str(base_spk)],
+            capture_output=True, timeout=120)
+        if built_spk.returncode:
+            sys.exit(f'baseline speaker-driver failed to compile:\n{built_spk.stderr.decode("utf-8", "replace")}')
+        baseline = subprocess.run(
+            [sys.executable, str(HERE / 'test.py'), '--driver', str(base_drv), '--speaker-driver', str(base_spk)],
+            cwd=HERE, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=180)
+        if baseline.returncode != 0:
+            sys.exit(f'baseline test.py failed (rc={baseline.returncode}):\n{baseline.stdout}{baseline.stderr}')
         workers = max(1, min(8, os.cpu_count() or 1))
         killed = [False] * len(MUTANTS)
         with concurrent.futures.ThreadPoolExecutor(workers) as pool:

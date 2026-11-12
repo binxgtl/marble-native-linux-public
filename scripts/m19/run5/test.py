@@ -934,7 +934,9 @@ class Speaker(unittest.TestCase):
         (snd / 'pcmC0D32p').write_text('')
         self.assertEqual(self.scan(snd), 1)
         (snd / 'controlC0').write_text('')
-        self.assertEqual(self.scan(snd), 2)
+        self.assertEqual(self.scan(snd), 3)
+        (snd / 'controlC0').unlink()
+        self.assertEqual(self.scan(snd), 1)
 
         top_file = self.root / 'top-file'
         top_file.write_text('')

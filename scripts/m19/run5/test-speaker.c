@@ -161,19 +161,25 @@ static void kv_str(const char *rep, const char *key, char *out, size_t cap) {
 }
 
 /* ---------------- synthetic M11SPK01 plan builder ---------------- */
-static uint8_t plan_buf[262144];
+static uint8_t plan_buf[M19_SPK_PLAN_MAX];
 static size_t pl_at;
-static void put32(uint32_t v) { memcpy(plan_buf + pl_at, &v, 4); pl_at += 4; }
+static void put32(uint32_t v) {
+    assert(pl_at + 4u <= sizeof plan_buf);
+    memcpy(plan_buf + pl_at, &v, 4);
+    pl_at += 4u;
+}
 static void putb(const void *p, size_t n) {
-    memcpy(plan_buf + pl_at, p, n);
+    assert(pl_at + ((n + 7u) & ~(size_t)7u) <= sizeof plan_buf);
+    if (n) memcpy(plan_buf + pl_at, p, n);
     pl_at += n;
-    for (; n % 8; n++) plan_buf[pl_at++] = 0;
+    for (; n % 8u; n++) plan_buf[pl_at++] = 0;
 }
 static size_t sec_begin(uint32_t type) { put32(type); size_t at = pl_at; put32(0); return at; }
 static void sec_end(size_t at) {
-    uint32_t n = (uint32_t)(pl_at - at - 4);
+    assert(pl_at >= at + 4u && ((pl_at + 7u) & ~(size_t)7u) <= sizeof plan_buf);
+    uint32_t n = (uint32_t)(pl_at - at - 4u);
     memcpy(plan_buf + at, &n, 4);
-    while (pl_at % 8) plan_buf[pl_at++] = 0;
+    while (pl_at % 8u) plan_buf[pl_at++] = 0;
 }
 static void param(uint8_t *out, size_t *len, uint32_t miid, uint32_t pid, uint32_t v) {
     uint32_t w[6] = {miid, pid, 4, 0, v, 0};
@@ -213,9 +219,11 @@ static size_t build_plan_custom(uint32_t duration_ms, int32_t peak_mdbfs, uint32
     uint32_t be1[6] = {1, 96000, 2, SNDRV_PCM_FORMAT_S32_LE, 1024, 2};
     char nm[64];
     for (int i = 0; i < 6; i++) put32(be0[i]);
-    memset(nm, 0, sizeof nm); strcpy(nm, "TDM-LPAIF-RX-TERTIARY-VIRT-2"); memcpy(plan_buf + pl_at, nm, 64); pl_at += 64;
+    assert(pl_at + 64u <= sizeof plan_buf);
+    memset(nm, 0, sizeof nm); strcpy(nm, "TDM-LPAIF-RX-TERTIARY-VIRT-2"); memcpy(plan_buf + pl_at, nm, 64); pl_at += 64u;
     for (int i = 0; i < 6; i++) put32(be1[i]);
-    memset(nm, 0, sizeof nm); strcpy(nm, "TDM-LPAIF-TX-TERTIARY"); memcpy(plan_buf + pl_at, nm, 64); pl_at += 64;
+    assert(pl_at + 64u <= sizeof plan_buf);
+    memset(nm, 0, sizeof nm); strcpy(nm, "TDM-LPAIF-TX-TERTIARY"); memcpy(plan_buf + pl_at, nm, 64); pl_at += 64u;
     sec_end(s);
     s = sec_begin(4);
     for (int i = 0; i < 2; i++) {
@@ -223,7 +231,8 @@ static size_t build_plan_custom(uint32_t duration_ms, int32_t peak_mdbfs, uint32
         int cn = snprintf(c, 44, "aw_dev_%d_prof", i);
         assert(cn > 0 && cn < 44);
         strcpy(c + 44, "Music");
-        memcpy(plan_buf + pl_at, c, 64); pl_at += 64;
+        assert(pl_at + 64u <= sizeof plan_buf);
+        memcpy(plan_buf + pl_at, c, 64); pl_at += 64u;
     }
     sec_end(s);
     s = sec_begin(5); put32(6372); put32(7003); sec_end(s);
@@ -232,6 +241,7 @@ static size_t build_plan_custom(uint32_t duration_ms, int32_t peak_mdbfs, uint32
     put32(0); put32(440); sec_end(s);
     s = sec_begin(7);
     uint32_t bytes = 48000u * duration_ms / 1000u * 4u;
+    assert(pl_at + bytes <= sizeof plan_buf);
     for (uint32_t i = 0; i < bytes; i++) plan_buf[pl_at++] = (uint8_t)(i * 7u);
     sec_end(s);
     memcpy(plan_buf, "M11SPK01", 8);
