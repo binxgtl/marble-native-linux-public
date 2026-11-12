@@ -13,6 +13,10 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
 
 HERE = Path(__file__).resolve().parent
 ARGS = None
@@ -434,6 +438,9 @@ def tree(root, test):
 
 class Stage(unittest.TestCase):
     def setUp(self):
+        prev_test = getattr(self, 'test', None)
+        if prev_test is not None and prev_test.exists():
+            (prev_test / 'stop').write_text('')
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name) / 'root'
@@ -449,7 +456,7 @@ class Stage(unittest.TestCase):
     def run_stage(self, **env):
         environment = {**os.environ, 'M19_ROOT': str(self.root), 'M19_BB': str(self.test / 'bb'), 'M19_TEST': str(self.test),
                        'M19_AUDIO': str(self.test / 'helper'), 'M19_MAPPER': str(self.test / 'mapper'), 'M19_AUDIO_WAIT': '20', **env}
-        return subprocess.run(['sh', str(HERE / 'audio-stage')], capture_output=True, text=True, env=environment, timeout=120)
+        return subprocess.run(['sh', str(HERE / 'audio-stage')], stdin=subprocess.DEVNULL, capture_output=True, text=True, env=environment, timeout=120)
 
     def log(self, name):
         path = self.test / name
@@ -680,6 +687,9 @@ class Observer(unittest.TestCase):
     PCM = '00-00: MultiMedia1 (*) :  : playback 1 : capture 1\n00-01: MultiMedia2 (*) :  : playback 1\n'
 
     def setUp(self):
+        prev_mapper = getattr(self, 'mapper', None)
+        if prev_mapper is not None:
+            self.reap(prev_mapper)
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name) / 'root'
@@ -691,7 +701,7 @@ class Observer(unittest.TestCase):
         (self.root / 'sys/class/remoteproc/remoteproc0/state').write_text('running\n')
         (self.root / 'run/m19/audio.result').write_text('ready\n')
         (self.root / 'run/m19/adsp.owner').write_text('/sys/class/remoteproc/remoteproc0\n')
-        self.mapper = subprocess.Popen(['sleep', '60'])
+        self.mapper = subprocess.Popen(['sleep', '60'], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         self.addCleanup(self.reap, self.mapper)
         (self.root / 'run/m11').mkdir(parents=True)
         (self.root / 'run/m11/pd.pid').write_text(f'{self.mapper.pid}\n')
@@ -709,7 +719,7 @@ class Observer(unittest.TestCase):
 
     def run_step(self, **env):
         environment = {**os.environ, 'M19_ROOT': str(self.root), 'M19_BB': str(self.test / 'bb'), 'M19_TEST': str(self.test), 'M19_AUDIO_WAIT': '20', **env}
-        return subprocess.run(['sh', str(HERE / 't3-audio')], capture_output=True, text=True, env=environment, timeout=60)
+        return subprocess.run(['sh', str(HERE / 't3-audio')], stdin=subprocess.DEVNULL, capture_output=True, text=True, env=environment, timeout=60)
 
     def assertFails(self, reason):
         result = self.run_step()
@@ -790,7 +800,7 @@ class AudioPrep(unittest.TestCase):
 
     def run_step(self, **env):
         environment = {**os.environ, 'M19_ROOT': str(self.root), 'M19_BB': str(self.test / 'bb'), 'M19_TEST': str(self.test), **env}
-        return subprocess.run(['sh', str(HERE / 't9-audio')], capture_output=True, text=True, env=environment, timeout=60)
+        return subprocess.run(['sh', str(HERE / 't9-audio')], stdin=subprocess.DEVNULL, capture_output=True, text=True, env=environment, timeout=60)
 
     def assertFails(self, reason, **env):
         result = self.run_step(**env)
@@ -872,21 +882,32 @@ class Speaker(unittest.TestCase):
         env = {**os.environ, 'ASAN_OPTIONS': 'detect_leaks=0'}
         cmd = [ARGS.speaker_driver, *map(str, args)]
         if as_root and os.geteuid() != 0:
-            check = subprocess.run(['sudo', '-n', 'true'], capture_output=True)
+            check = subprocess.run(['sudo', '-n', 'true'], stdin=subprocess.DEVNULL, capture_output=True)
             if check.returncode != 0:
                 if os.environ.get('CI'):
                     self.fail('sudo -n required on CI for Speaker root session tests')
                 self.skipTest('sudo -n unavailable')
             cmd = ['sudo', '-n', 'timeout', '--kill-after=5', '90', *cmd]
-            self.addCleanup(lambda: subprocess.run(['sudo', '-n', 'rm', '-rf', str(self.root)], capture_output=True))
-        return subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=180)
+            root = str(self.root)
+            self.addCleanup(lambda: subprocess.run(['sudo', '-n', 'rm', '-rf', root], stdin=subprocess.DEVNULL, capture_output=True))
+        if as_root and fcntl is not None:
+            lock_fd = os.open('/tmp/m19-speaker-root.lock', os.O_CREAT | os.O_RDWR, 0o666)
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX)
+                return subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True, env=env, timeout=180)
+            finally:
+                try:
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                finally:
+                    os.close(lock_fd)
+        return subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True, env=env, timeout=180)
 
     def scan(self, path):
         res = self.run_speaker('scan-snd', path)
         self.assertEqual(res.returncode, 0, res.stderr)
         return int(res.stdout.strip())
 
-    def test_scan_snd(self):
+    def test_1_scan_snd(self):
         self.assertEqual(self.scan(self.root / 'absent'), 0)
         snd = self.root / 'snd'
         snd.mkdir()
@@ -923,12 +944,12 @@ class Speaker(unittest.TestCase):
         cur.mkdir(parents=True)
         self.assertGreaterEqual(self.scan(deep), 1)
 
-    def test_prechecks(self):
+    def test_2_prechecks(self):
         res = self.run_speaker('prechecks', self.root)
         self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
         self.assertIn('PASS m19-speaker prechecks\n', res.stdout)
 
-    def test_root_session(self):
+    def test_3_root_session(self):
         if ARGS.no_root_speaker:
             return
         res = self.run_speaker('session', self.root, as_root=True)

@@ -70,7 +70,7 @@ jobs:
           )
           installed=0
           echo "Tier 1: trying runner default APT mirror..."
-          if sudo apt-get --error-on=any update "${apt_common[@]}" &&
+          if sudo timeout --kill-after=5 45 apt-get --error-on=any update "${apt_common[@]}" &&
              sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "${apt_common[@]}" --no-install-recommends "${pkgs[@]}"; then
             installed=1
           fi
@@ -109,7 +109,7 @@ jobs:
                 -o Dir::Etc::sourceparts=/tmp/m19-apt-src
                 -o Dir::State::lists=/tmp/m19-apt-lists
               )
-              if sudo apt-get --error-on=any update "${apt_common[@]}" "${iso_opts[@]}" &&
+              if sudo timeout --kill-after=5 45 apt-get --error-on=any update "${apt_common[@]}" "${iso_opts[@]}" &&
                  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "${apt_common[@]}" "${iso_opts[@]}" --no-install-recommends "${pkgs[@]}"; then
                 installed=1
                 break
@@ -269,7 +269,7 @@ jobs:
           )
           installed=0
           echo "Tier 1: trying runner default APT mirror..."
-          if sudo apt-get --error-on=any update "${apt_common[@]}" &&
+          if sudo timeout --kill-after=5 45 apt-get --error-on=any update "${apt_common[@]}" &&
              sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "${apt_common[@]}" --no-install-recommends "${pkgs[@]}"; then
             installed=1
           fi
@@ -298,7 +298,7 @@ jobs:
                 -o Dir::Etc::sourceparts=/tmp/m19-apt-src
                 -o Dir::State::lists=/tmp/m19-apt-lists
               )
-              if sudo apt-get --error-on=any update "${apt_common[@]}" "${iso_opts[@]}" &&
+              if sudo timeout --kill-after=5 45 apt-get --error-on=any update "${apt_common[@]}" "${iso_opts[@]}" &&
                  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "${apt_common[@]}" "${iso_opts[@]}" --no-install-recommends "${pkgs[@]}"; then
                 installed=1
                 break

@@ -388,7 +388,7 @@ class SpeakerReport(Audio):
         data, colour = self.run_report(env=merged)
         fields, log, steps = self.parse(data)
         audio_line = re.search(r'M19 R5 audio (.*)\n', log)
-        spk_line = re.search(r'M19 R5 speaker (.*)\n', log)
+        spk_line = re.search(r'M19 R5 speaker (unit_rc=.*)\n', log)
         audio = dict(item.split('=') for item in audio_line.group(1).split()) if audio_line else None
         spk = dict(item.split('=') for item in spk_line.group(1).split()) if spk_line else None
         return fields, log, steps, audio, spk, colour
@@ -466,10 +466,13 @@ class SpeakerReport(Audio):
             with self.subTest(label=label):
                 self.setUp()
                 change()
-                fields, _, steps, audio, spk, colour = self.run_speaker_report(env=env)
+                fields, log, steps, audio, spk, colour = self.run_speaker_report(env=env)
                 self.assertEqual((spk['speaker_ok'], audio['audio_ok'], fields[3], colour), ('0', '0', '0', YELLOW))
                 if label == 'missing_report':
                     self.assertTrue(any(s.startswith('M19BEAT T12-audio ') for s in steps))
+                if label == 'dirty_priv_node':
+                    self.assertEqual(spk['private_clean'], '0')
+                    self.assertIn('M19 R5 speaker-dirty ', log)
 
 
 class Report(ReportBase):

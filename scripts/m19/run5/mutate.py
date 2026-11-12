@@ -175,7 +175,7 @@ def run(number, name, old, new, classes, spk_objs):
         cmd.extend(classes)
         try:
             # The first failure kills the mutant, so the rest of its classes need not run.
-            result = subprocess.run(cmd, cwd=target, capture_output=True, timeout=600)
+            result = subprocess.run(cmd, cwd=target, stdin=subprocess.DEVNULL, capture_output=True, timeout=180)
             return result.returncode != 0
         except subprocess.TimeoutExpired:
             return True
@@ -189,12 +189,19 @@ def main():
     with tempfile.TemporaryDirectory() as obj_tmp:
         spk_objs = precompile_speaker_objects(Path(obj_tmp))
         workers = max(1, min(8, os.cpu_count() or 1))
+        killed = [False] * len(MUTANTS)
         with concurrent.futures.ThreadPoolExecutor(workers) as pool:
-            futures = [pool.submit(run, number, *mutant, spk_objs) for number, mutant in enumerate(MUTANTS)]
+            future_to_num = {pool.submit(run, number, *mutant, spk_objs): number for number, mutant in enumerate(MUTANTS)}
+            done = 0
             try:
-                killed = [future.result() for future in futures]
+                for future in concurrent.futures.as_completed(future_to_num):
+                    number = future_to_num[future]
+                    dead = future.result()
+                    killed[number] = dead
+                    done += 1
+                    print(f'[{done}/{len(MUTANTS)}] mutant {number} ({MUTANTS[number][0]}) {"killed" if dead else "SURVIVED"}', flush=True)
             except Broken as error:
-                for future in futures:
+                for future in future_to_num:
                     future.cancel()
                 sys.exit(str(error))
     survivors = [(number, name, old) for number, ((name, old, _, _), dead) in enumerate(zip(MUTANTS, killed)) if not dead]

@@ -1562,7 +1562,7 @@ static void speaker_phase(const struct m19_report *c, int tty, struct speaker *s
             continue;
         struct stat st;
         if (lstat(c->speaker_clean[i], &st) == 0 || errno != ENOENT) {
-            addf("M19 R5 speaker dirty %s\n", c->speaker_clean[i]);
+            addf("M19 R5 speaker-dirty %s\n", c->speaker_clean[i]);
             sp->private_clean = 0;
         }
     }

@@ -1371,6 +1371,8 @@ static void run_root_session_case(const char *base, const char *tag, struct adsp
         c.session_ready_fn = session_ready_handshake;
         c.session_ready_user = &ph;
         int rc = m19_speaker_run(&c);
+        stop_peer(&ph);
+        (void)umount2(pts, MNT_DETACH);
 
         /* Verify no ALSA fds or private nodes remain, while pool + anchor fds remain open */
         for (int k = 0; k < 8; k++) assert(!afd[k].open);
@@ -1379,9 +1381,6 @@ static void run_root_session_case(const char *base, const char *tag, struct adsp
         assert(path_is_absent(w.ep) && path_is_absent(w.ion) && path_is_absent(w.cma) && path_is_absent(w.hdir));
         for (int pfd = 200; pfd < 204; pfd++) assert(fcntl(pfd, F_GETFD) != -1);
         assert(count_open_fds_self() >= 8);
-
-        stop_peer(&ph);
-        (void)umount2(pts, MNT_DETACH);
 
         /* Ship ALSA event log to parent before exiting */
         for (unsigned i = 0; i < nev; i++) {
