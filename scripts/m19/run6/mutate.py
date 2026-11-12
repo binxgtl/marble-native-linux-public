@@ -62,8 +62,11 @@ MUTANTS = (
     ('stream.c', '        if (!st->amp_on && (rc = amp_set(s, 1))) return rc;\n', '', SINK),
     ('stream.c', '    } else if (st->amp_on && t - st->last_loud_ms >= sio->idle_off_ms && (rc = amp_set(s, 0))) {', '    } else if (0) {', SINK),
     ('stream.c', '        if (!rc && !stopping && sio->stop_fn(sio->user)) {', '        if (0) {', SINK),
-    ('stream.c', '    if (!rc) rc = switches_read(s, item);\n    rec(s, "phase=stream amp=%s rc=%d", item, rc);',
-     '    rec(s, "phase=stream amp=%s rc=%d", item, rc);', SINK),
+    # Not mutated: amp_set's second readback (switches_read). m11_snd_ctl_set already reads every write back and fails
+    # on a mismatch, so the second read differs only if something writes in between, which no fixture here does. It is
+    # kept as Run31 keeps it. The write itself is mutated instead.
+    ('stream.c', '    int rc = set_switches(s, item);\n    if (!rc) rc = switches_read(s, item);',
+     '    int rc = 0;\n    if (!rc) rc = switches_read(s, item);', SINK),
     # The sink: the qualifications and its stop.
     ('sink.c', '           r->amp_on == 1 && r->amp_off_verified == 0 && r->pdr_seen == 0 &&', '           r->amp_on == 1 && r->pdr_seen == 0 &&', SINK),
     ('sink.c', '           st->streaming == 1 && st->amp_on == 1;', '           st->streaming == 1;', SINK),
