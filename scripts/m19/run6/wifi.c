@@ -329,7 +329,7 @@ static int pci_ready(char *bdf, size_t room)
         if (!driver_is(path, "cnss_pci"))
             continue;
         if (++found == 1)
-            snprintf(bdf, room, "%s", entry->d_name);
+            snprintf(bdf, room, "%.31s", entry->d_name); /* a PCI address, "0000:01:00.0" */
     }
     closedir(directory);
     return found == 1 ? 0 : found ? -EEXIST : -ENODEV;
@@ -380,7 +380,7 @@ static int find_iface(const char *bdf, char *iface, size_t room)
               (have_platform && below(device, platform_real) && below(phy, platform_real))))
             continue;
         if (++found == 1)
-            snprintf(iface, room, "%s", entry->d_name);
+            snprintf(iface, room, "%.15s", entry->d_name); /* below IFNAMSIZ, checked above */
     }
     closedir(directory);
     return found == 1 ? 0 : found ? -EEXIST : -ENODEV;
@@ -494,7 +494,9 @@ static int finish(int ready, const char *step, int rc)
                 say("result write failed errno=%d", errno);
             write_report();
         }
-        (void)poll(NULL, 0, owner.fd >= 0 && !owner_fault ? 1000 : 60000);
+        /* Tests come back within return_after_ms; production watches the daemon each second, or sleeps without one. */
+        int nap = owner.fd >= 0 && !owner_fault ? 1000 : 60000;
+        (void)poll(NULL, 0, C->return_after_ms ? (int)C->pump_ms : nap);
     }
 }
 
