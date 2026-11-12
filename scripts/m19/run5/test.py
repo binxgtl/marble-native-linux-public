@@ -901,13 +901,13 @@ class Speaker(unittest.TestCase):
             lock_fd = os.open('/tmp/m19-speaker-root.lock', os.O_CREAT | os.O_RDWR, 0o666)
             try:
                 fcntl.flock(lock_fd, fcntl.LOCK_EX)
-                return subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True, env=env, timeout=180)
+                return subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True, env=env, timeout=180, start_new_session=True)
             finally:
                 try:
                     fcntl.flock(lock_fd, fcntl.LOCK_UN)
                 finally:
                     os.close(lock_fd)
-        return subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True, env=env, timeout=180)
+        return subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True, env=env, timeout=180, start_new_session=True)
 
     def scan(self, path):
         res = self.run_speaker('scan-snd', path)

@@ -13,7 +13,7 @@ jobs:
       matrix:
         runner: [ubuntu-24.04, ubuntu-24.04-arm]
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 60
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - name: Gates, plans and parsers on synthetic inputs (no device)
@@ -140,10 +140,12 @@ jobs:
             fi
           done
       - name: R2 to R5 hand-off, reporter, T9, desktop and GPU checks on synthetic trees, normal and ASan/UBSan, static PID 1 (no device)
+        timeout-minutes: 12
         run: bash scripts/m19/run2/test.sh artifacts/m19/${{ runner.arch }}/run2
         env:
           M19_MUTANTS: '0'
       - name: R5a/R5b audio helper, T9-audio and Run31 speaker gate on synthetic trees, normal and ASan/UBSan, static binaries (no device)
+        timeout-minutes: 6
         run: bash scripts/m19/run5/test.sh artifacts/m19/${{ runner.arch }}/run5
         env:
           M19_MUTANTS: '0'
@@ -214,29 +216,47 @@ jobs:
             artifacts/m19/**/load-heaps-b
             artifacts/m19/**/*.txt
   mutants:
-    # The slow mutation checks of R1, R2 to R4 and R5, once each and in parallel with the regression jobs.
+    # The slow mutation checks of R1, R2 to R4 (sharded 4-way) and R5, once each and in parallel with the regression jobs.
     strategy:
       fail-fast: false
       matrix:
         include:
           - suite: run1
             script: scripts/m19/run1/mutate.py
-          - suite: run2
+            args: ''
+            needs_probes: false
+          - suite: run2-1
             script: scripts/m19/run2/mutate.py
+            args: '--shard-index 0 --shard-count 4'
+            needs_probes: true
+          - suite: run2-2
+            script: scripts/m19/run2/mutate.py
+            args: '--shard-index 1 --shard-count 4'
+            needs_probes: true
+          - suite: run2-3
+            script: scripts/m19/run2/mutate.py
+            args: '--shard-index 2 --shard-count 4'
+            needs_probes: true
+          - suite: run2-4
+            script: scripts/m19/run2/mutate.py
+            args: '--shard-index 3 --shard-count 4'
+            needs_probes: true
           - suite: run5
             script: scripts/m19/run5/mutate.py
+            args: ''
+            needs_probes: false
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - name: Runner APT cache key for probe mutants (no device)
-        if: matrix.suite == 'run2'
+        if: matrix.needs_probes
         id: apt-key
         run: |
           fp=$(dpkg-query -W libc6 libdrm2 libx11-6 2>/dev/null | sha256sum | cut -c1-12)
           echo "key=m19-apt-debs-v1-${RUNNER_OS}-${RUNNER_ARCH}-${ImageVersion:-unknown}-${fp}" >> "$GITHUB_OUTPUT"
       - name: GitHub cache of Ubuntu APT binary packages for probe mutants (no device)
-        if: matrix.suite == 'run2'
+        if: matrix.needs_probes
         uses: actions/cache@v4
         with:
           path: /tmp/m19-apt-cache
@@ -245,7 +265,7 @@ jobs:
             ${{ steps.apt-key.outputs.key }}
             m19-apt-debs-v1-${{ runner.os }}-${{ runner.arch }}-
       - name: Vulkan and Present headers, lavapipe and Xvfb for the probe mutants (no device)
-        if: matrix.suite == 'run2'
+        if: matrix.needs_probes
         run: |
           set -euo pipefail
           pkgs=(libvulkan-dev mesa-vulkan-drivers libxcb-present-dev libxcb-dri3-dev xvfb)
@@ -329,4 +349,5 @@ jobs:
             fi
           done
       - name: Mutants of ${{ matrix.suite }} (no device)
-        run: python3 ${{ matrix.script }}
+        timeout-minutes: 12
+        run: python3 ${{ matrix.script }} ${{ matrix.args }}

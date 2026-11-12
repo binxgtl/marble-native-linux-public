@@ -129,6 +129,8 @@ MUTANTS = (
     ('speaker.c', 'm11_snd_release(&ctx->snd);', '(void)0;', SPEAKER),
     ('speaker.c', 're_verified == 1 && re0_q12 > 0u && re1_q12 > 0u &&', 're0_q12 > 0u && re1_q12 > 0u &&', SPEAKER),
     ('speaker.c', 'r->bytes_played == plan->pcm.len &&', '1 &&', SPEAKER),
+    ('speaker.c', 'if (ctx->entry.boot.spawner.pid > 0 && ctx->entry.boot.spawner.sock >= 0)',
+     'if (ctx->entry.boot.spawner.sock >= 0)', SPEAKER),
 )
 
 
@@ -136,19 +138,31 @@ class Broken(Exception):
     """A mutant that does not apply or does not build: the check itself is wrong."""
 
 
-def precompile_speaker_objects(obj_dir: Path):
-    objs = []
+def compile_obj(cmd, label):
+    built = subprocess.run(cmd, capture_output=True, timeout=120)
+    if built.returncode:
+        raise Broken(f'precompile failed for {label}:\n{built.stderr.decode("utf-8", "replace")}')
+
+
+def precompile_objects(obj_dir: Path):
+    jobs = []
+    spk_objs = []
     for idx, src in enumerate(SPK_FIXED_SRCS):
         obj = obj_dir / f'o{idx}_{src.stem}.o'
-        built = subprocess.run(['gcc', *SPK_CFLAGS, f'-I{HERE}', '-c', str(src), '-o', str(obj)],
-                               capture_output=True, timeout=120)
-        if built.returncode:
-            raise Broken(f'precompile failed for {src}:\n{built.stderr.decode("utf-8", "replace")}')
-        objs.append(str(obj))
-    return objs
+        spk_objs.append(str(obj))
+        jobs.append((['gcc', *SPK_CFLAGS, f'-I{HERE}', '-c', str(src), '-o', str(obj)], str(src)))
+    hash_o = obj_dir / 'audio_hash.o'
+    test_audio_o = obj_dir / 'test_audio.o'
+    jobs.append((['gcc', '-std=c11', '-O1', '-w', '-DM19_AUDIO_TEST', '-c', str(HERE.parent / 'unlock/hash.c'), '-o', str(hash_o)], 'hash.c'))
+    jobs.append((['gcc', '-std=c11', '-O1', '-w', '-DM19_AUDIO_TEST', f'-I{HERE}', '-c', str(HERE / 'test-audio.c'), '-o', str(test_audio_o)], 'test-audio.c'))
+    with concurrent.futures.ThreadPoolExecutor(max(1, min(8, os.cpu_count() or 1))) as pool:
+        futures = [pool.submit(compile_obj, cmd, label) for cmd, label in jobs]
+        for fut in futures:
+            fut.result()
+    return spk_objs, str(hash_o), str(test_audio_o)
 
 
-def run(number, name, old, new, classes, spk_objs):
+def run(number, name, old, new, classes, spk_objs, audio_objs, base_drv):
     """True when test.py fails on the mutant. Each mutant gets its own tree, so they run side by side."""
     source = (HERE / name).read_text(encoding='utf-8')
     if old not in source:
@@ -161,11 +175,14 @@ def run(number, name, old, new, classes, spk_objs):
         for item in ('core.h', 'hash.c'):
             shutil.copy(HERE.parent / 'unlock' / item, root / 'unlock')
         (target / name).write_text(source.replace(old, new), encoding='utf-8', newline='\n')
-        built = subprocess.run(['gcc', '-std=c11', '-O1', '-w', '-DM19_AUDIO_TEST', '../unlock/hash.c', 'audio.c', 'test-audio.c', '-o', 'driver'],
-                               cwd=target, capture_output=True, timeout=120)
-        if built.returncode:
-            raise Broken(f'mutant {number} does not compile:\n{built.stderr.decode("utf-8", "replace")}')
-        cmd = [sys.executable, 'test.py', '--failfast', '--driver', 'driver']
+        drv_path = str(base_drv)
+        if name == 'audio.c':
+            built = subprocess.run(['gcc', '-std=c11', '-O1', '-w', '-DM19_AUDIO_TEST', 'audio.c', *audio_objs, '-o', 'driver'],
+                                   cwd=target, capture_output=True, timeout=120)
+            if built.returncode:
+                raise Broken(f'mutant {number} does not compile:\n{built.stderr.decode("utf-8", "replace")}')
+            drv_path = 'driver'
+        cmd = [sys.executable, 'test.py', '--failfast', '--driver', drv_path]
         if 'Speaker' in classes:
             built_spk = subprocess.run(['gcc', *SPK_CFLAGS, '-I.', 'speaker.c', *spk_objs, '-o', 'speaker-driver'],
                                        cwd=target, capture_output=True, timeout=120)
@@ -175,7 +192,7 @@ def run(number, name, old, new, classes, spk_objs):
         cmd.extend(classes)
         try:
             # The first failure kills the mutant, so the rest of its classes need not run.
-            result = subprocess.run(cmd, cwd=target, stdin=subprocess.DEVNULL, capture_output=True, timeout=180)
+            result = subprocess.run(cmd, cwd=target, stdin=subprocess.DEVNULL, capture_output=True, timeout=180, start_new_session=True)
             return result.returncode != 0
         except subprocess.TimeoutExpired:
             return True
@@ -189,12 +206,11 @@ def main():
     with tempfile.TemporaryDirectory() as obj_tmp:
         obj_dir = Path(obj_tmp)
         os.chmod(obj_dir, 0o755)
-        spk_objs = precompile_speaker_objects(obj_dir)
+        spk_objs, hash_o, test_audio_o = precompile_objects(obj_dir)
+        audio_objs = (hash_o, test_audio_o)
         base_drv = obj_dir / 'base-driver'
         built = subprocess.run(
-            ['gcc', '-std=c11', '-O1', '-w', '-DM19_AUDIO_TEST',
-             str(HERE.parent / 'unlock/hash.c'), str(HERE / 'audio.c'), str(HERE / 'test-audio.c'),
-             '-o', str(base_drv)],
+            ['gcc', '-std=c11', '-O1', '-w', '-DM19_AUDIO_TEST', str(HERE / 'audio.c'), *audio_objs, '-o', str(base_drv)],
             capture_output=True, timeout=120)
         if built.returncode:
             sys.exit(f'baseline driver failed to compile:\n{built.stderr.decode("utf-8", "replace")}')
@@ -206,13 +222,13 @@ def main():
             sys.exit(f'baseline speaker-driver failed to compile:\n{built_spk.stderr.decode("utf-8", "replace")}')
         baseline = subprocess.run(
             [sys.executable, str(HERE / 'test.py'), '--driver', str(base_drv), '--speaker-driver', str(base_spk)],
-            cwd=HERE, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=180)
+            cwd=HERE, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=180, start_new_session=True)
         if baseline.returncode != 0:
             sys.exit(f'baseline test.py failed (rc={baseline.returncode}):\n{baseline.stdout}{baseline.stderr}')
         workers = max(1, min(8, os.cpu_count() or 1))
         killed = [False] * len(MUTANTS)
         with concurrent.futures.ThreadPoolExecutor(workers) as pool:
-            future_to_num = {pool.submit(run, number, *mutant, spk_objs): number for number, mutant in enumerate(MUTANTS)}
+            future_to_num = {pool.submit(run, number, *mutant, spk_objs, audio_objs, base_drv): number for number, mutant in enumerate(MUTANTS)}
             done = 0
             try:
                 for future in concurrent.futures.as_completed(future_to_num):

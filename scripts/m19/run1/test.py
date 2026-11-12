@@ -595,10 +595,11 @@ def main():
     global ARGS
     parser = argparse.ArgumentParser()
     parser.add_argument('--driver', required=True)
+    parser.add_argument('--failfast', action='store_true', help='stop at the first failure, as mutants need')
     parser.add_argument('tests', nargs='*', help='test classes to run; all when empty')
     ARGS = parser.parse_args()
     ARGS.driver = os.path.abspath(ARGS.driver)
-    program = unittest.main(argv=['test', *ARGS.tests], exit=False, verbosity=1)
+    program = unittest.main(argv=['test', *ARGS.tests], exit=False, verbosity=1, failfast=ARGS.failfast)
     sys.exit(not program.result.wasSuccessful())
 
 

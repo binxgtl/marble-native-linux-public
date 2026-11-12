@@ -27,11 +27,16 @@ for u in gpr_transport_native shmem_backend_native dmabuf_pool_native heap_node_
 done
 srcs+=("$r5/speaker.c" "$r5/speaker-main.c")
 
+spk_pids=()
 for copy in a b; do
   gcc -std=c11 -O2 -Wall -Wextra -Werror -static -no-pie -Wl,--build-id=none \
     -DM11_ANCHOR_NATIVE -DM11_CUSTODIAN_NATIVE -DM11_ANCHOR_NATIVE_ION \
     -I"$own" -I"$repair" -I"$native" -I"$r5" \
-    "${srcs[@]}" -o "$out/m19-speaker-$copy"
+    "${srcs[@]}" -o "$out/m19-speaker-$copy" &
+  spk_pids+=("$!")
+done
+for pid in "${spk_pids[@]}"; do
+  wait "$pid"
 done
 
 cmp "$out/m19-speaker-a" "$out/m19-speaker-b"

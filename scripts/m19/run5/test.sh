@@ -24,27 +24,48 @@ for u in gpr_transport_native shmem_backend_native dmabuf_pool_native heap_node_
 done
 spk_srcs+=("$src/speaker.c" "$src/test-speaker.c")
 
+build_pids=()
 for variant in normal sanitize; do
   flags=(-std=c11 -O2 -Wall -Wextra -Werror)
-  extra_py=()
   if [[ $variant == sanitize ]]; then
     flags+=(-O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer)
-    extra_py+=(--no-root-speaker)
   fi
-  gcc "${flags[@]}" -DM19_AUDIO_TEST "$hash" "$src/audio.c" "$src/test-audio.c" -o "$out/test-audio-$variant"
+  gcc "${flags[@]}" -DM19_AUDIO_TEST "$hash" "$src/audio.c" "$src/test-audio.c" -o "$out/test-audio-$variant" &
+  build_pids+=("$!")
   gcc "${flags[@]}" -DM11_ANCHOR_NATIVE -DM11_CUSTODIAN_NATIVE -DM11_ANCHOR_NATIVE_ION \
     -I"$own" -I"$repair" -I"$native" -I"$src" \
-    "${spk_srcs[@]}" -o "$out/test-speaker-$variant"
-  python3 "$src/test.py" --driver "$out/test-audio-$variant" --speaker-driver "$out/test-speaker-$variant" \
-    "${extra_py[@]}" 2>&1 | tee "$out/run-$variant.txt"
+    "${spk_srcs[@]}" -o "$out/test-speaker-$variant" &
+  build_pids+=("$!")
 done
+for pid in "${build_pids[@]}"; do
+  wait "$pid"
+done
+
+python3 "$src/test.py" --driver "$out/test-audio-normal" --speaker-driver "$out/test-speaker-normal" \
+  >"$out/run-normal.txt" 2>&1 &
+pid_normal=$!
+python3 "$src/test.py" --driver "$out/test-audio-sanitize" --speaker-driver "$out/test-speaker-sanitize" \
+  --no-root-speaker >"$out/run-sanitize.txt" 2>&1 &
+pid_sanitize=$!
+rc_normal=0
+wait "$pid_normal" || rc_normal=$?
+rc_sanitize=0
+wait "$pid_sanitize" || rc_sanitize=$?
+cat "$out/run-normal.txt" "$out/run-sanitize.txt"
+test "$rc_normal" -eq 0 && test "$rc_sanitize" -eq 0
+
 # Mutants depend on the tests, not on the CPU: CI runs them once, in a job of their own.
 if [[ ${M19_MUTANTS:-1} == 1 ]]; then
   python3 "$src/mutate.py" | tee "$out/mutants.txt"
 fi
 # Reviewable binaries only, never a boot image. Independent outputs must match.
+audio_pids=()
 for copy in a b; do
-  gcc -std=c11 -Os -Wall -Wextra -Werror -static -Wl,--build-id=none "$hash" "$src/audio.c" -o "$out/m19-audio-$copy"
+  gcc -std=c11 -Os -Wall -Wextra -Werror -static -Wl,--build-id=none "$hash" "$src/audio.c" -o "$out/m19-audio-$copy" &
+  audio_pids+=("$!")
+done
+for pid in "${audio_pids[@]}"; do
+  wait "$pid"
 done
 cmp "$out/m19-audio-a" "$out/m19-audio-b"
 sha256sum "$out/m19-audio-a" | tee "$out/run5-binaries.txt"

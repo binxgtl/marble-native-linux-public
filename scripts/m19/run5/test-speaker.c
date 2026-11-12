@@ -1331,6 +1331,31 @@ static void test_preboot_entry_refusals(const char *base) {
     assert(strstr(jbuf, "phase=reboot_failed rc=-1\n") != NULL);
     assert(path_is_absent(w.ep) && path_is_absent(w.ion) && path_is_absent(w.snd_dir));
     clean_dir(w.root);
+
+    /* 4. QRTR open fails with zero child processes in PGID -> must not close fd 0 or kill(0, SIGKILL) */
+    make_world(&w, base, "entry-nochild-qrtr");
+    fflush(stdout);
+    pid_t npid = fork();
+    assert(npid >= 0);
+    if (npid == 0) {
+        alarm(20);
+        assert(setsid() != (pid_t)-1);
+        isolate_stdio_pipes();
+        int dummy_st = 0;
+        assert(waitpid(0, &dummy_st, WNOHANG) == -1 && errno == ECHILD);
+        assert(fcntl(0, F_GETFD) != -1);
+        qs[0] = -1;
+        struct m19_speaker_config c = cfg_for_world(&w);
+        c.pd_ready_budget_ms = 120u;
+        int rc = m19_speaker_run(&c);
+        if (rc != -ECANCELED || fcntl(0, F_GETFD) == -1) _exit(92);
+        _exit(0);
+    }
+    int nst = 0;
+    assert(waitpid(npid, &nst, 0) == npid && WIFEXITED(nst) && WEXITSTATUS(nst) == 0);
+    slurp(w.report, rep, sizeof rep);
+    assert(kv_long(rep, "ok") == 0 && kv_long(rep, "entry_phase") == 2 && kv_long(rep, "fail_step") == 4);
+    clean_dir(w.root);
 }
 
 /* ---------------- root end-to-end session cases ---------------- */

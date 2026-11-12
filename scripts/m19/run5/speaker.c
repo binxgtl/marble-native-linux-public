@@ -581,7 +581,9 @@ static void speaker_terminal_hold(void *user) {
     m11_snd_release(&ctx->snd);
     (void)write_report_file(ctx, 0, 0);
     if (ctx->cfg.return_from_hold) {
-        if (ctx->entry.boot.spawner.sock >= 0) (void)m11_spawner_stop(&ctx->entry.boot.spawner);
+        if (ctx->entry.boot.spawner.pid > 0 && ctx->entry.boot.spawner.sock >= 0) {
+            (void)m11_spawner_stop(&ctx->entry.boot.spawner);
+        }
         return;
     }
     for (;;) pause();
@@ -654,6 +656,8 @@ int m19_speaker_run(const struct m19_speaker_config *cfg) {
     ctx->entry.journal_fd = -1;
     ctx->entry.pdmon.fd = -1;
     ctx->entry.boot.heap.fd = -1;
+    ctx->entry.boot.spawner.sock = -1;
+    ctx->entry.boot.spawner.pid = -1;
     ctx->snd.ctl_fd = -1;
     ctx->snd.pcm[0].fd = -1;
     ctx->snd.pcm[1].fd = -1;
