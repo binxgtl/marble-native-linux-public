@@ -1983,7 +1983,8 @@ static void sink_phase(const struct m19_report *c, int tty, struct sink *k)
         }
     }
     char status[1024] = "";
-    if (k->pulse_sink && k->pulse_default && write_tone(c->tone_path)) {
+    /* The tone goes to the sink by name, so the default sink (what desktop programs use) is a gate of its own. */
+    if (k->pulse_sink && write_tone(c->tone_path)) {
         /* The chord's silence first switches the amplifier off; the tone must switch it on again. */
         unsigned long long off_end = m19_now_ms() + c->idle_wait_ms;
         while (m19_now_ms() < off_end && !(sink_status_now(c, status, sizeof(status)) && kv_long(status, "amp_on") == 0))
@@ -1992,7 +1993,9 @@ static void sink_phase(const struct m19_report *c, int tty, struct sink *k)
         k->loud_before = kv_long(status, "bytes_loud");
         k->enables_before = kv_long(status, "amp_enables");
         k->disables_before = kv_long(status, "amp_disables");
-        char *argv[] = {(char *)c->pacat, "--playback", "--raw", "--format=s16le", "--rate=48000", "--channels=2", "--latency-msec=100",
+        char device[96];
+        snprintf(device, sizeof(device), "--device=%.80s", c->sink_name);
+        char *argv[] = {(char *)c->pacat, "--playback", "--raw", "--format=s16le", "--rate=48000", "--channels=2", "--latency-msec=100", device,
                         (char *)c->tone_path, NULL};
         size_t ignored;
         unsigned char out[1024];

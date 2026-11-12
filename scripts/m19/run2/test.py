@@ -553,7 +553,8 @@ class SinkReport(Audio):
         self.assertEqual((k['loud'], k['enables'], k['disables'], k['peak_in'], k['peak_out']), ('192000', '1', '1', '32767', '10361'))
         self.assertEqual(self.verdict(log)['all_ok'], '1')
         self.assertIn('start marble-sink.service', (self.test / 'started').read_text())
-        self.assertIn('--playback --raw --format=s16le --rate=48000 --channels=2', (self.test / 'pacat-args').read_text())
+        self.assertIn('--playback --raw --format=s16le --rate=48000 --channels=2 --latency-msec=100 --device=marble_speaker ',
+                      (self.test / 'pacat-args').read_text())
         self.assertEqual(len((self.root / 'sink-tone.raw').read_bytes()), 192000)
         self.assertIn('M19 sink report\n', log)
         self.assertIn('M19 sink status\n', log)
@@ -581,6 +582,17 @@ class SinkReport(Audio):
                 fields, log, k, _ = self.sink(env)
                 self.assertEqual(k['sink_ok'], '0', log)
                 self.assertEqual(self.verdict(log)['all_ok'], '0')
+
+    def test_a_dead_holder_or_another_default_sink_fails_on_its_own(self):
+        (self.root / 'proc/4242/stat').write_text('4242 (m19-sink) Z 1 4242 4242 0 -1\n')
+        fields, log, k, _ = self.sink()
+        self.assertEqual((k['holder_alive'], k['holder_fds'], k['tone_loud'], k['sink_ok']), ('0', '10', '1', '0'))
+        self.setUp()
+        (self.test / 'default-sink').write_text('auto_null\n')
+        fields, log, k, _ = self.sink()
+        # The tone still reaches the sink by name; only the default fails.
+        self.assertEqual((k['pulse_sink'], k['pulse_default'], k['tone_loud'], k['tone_peaks'], k['amp_idle_off'], k['sink_ok']),
+                         ('1', '0', '1', '1', '1', '0'))
 
     def test_a_private_node_fails(self):
         (self.root / 'dev-clean').mkdir()

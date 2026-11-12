@@ -1638,6 +1638,8 @@ static void run_root_session_case(const char *base, const char *tag, struct adsp
         assert(kv_long(rep, "bytes_in") == FEED_FIRST + FEED_SECOND && kv_long(rep, "bytes_loud") == FEED_FIRST + FEED_SECOND);
         assert(kv_long(rep, "peak_in") == 32768 && kv_long(rep, "peak_out") == 10362);
         assert(kv_long(rep, "amp_enables") >= 1 && kv_long(rep, "amp_disables") >= 2);
+        /* Every switch write is read back: the chord's eight reads, then both switches at each toggle. */
+        assert(kv_long(rep, "ctl_readbacks") >= 8 + 2 * (kv_long(rep, "amp_enables") + kv_long(rep, "amp_disables")));
         assert(kv_long(rep, "stream_buffers") >= 1);
         slurp(w.status, status, sizeof status);
         assert(kv_long(status, "stopped") == 1 && kv_long(status, "amp_on") == 0 && kv_long(status, "peak_out") == 10362);
