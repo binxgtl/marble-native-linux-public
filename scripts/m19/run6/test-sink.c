@@ -1478,8 +1478,9 @@ static pid_t start_feeder(const struct world *w) {
     int marker = open(w->stop, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
     if (marker < 0) _exit(73);
     close(marker);
-    usleep(300000);
-    _exit(0);
+    /* Alive until the session child kills it: an exited feeder would be a zombie descendant, whose fd table the
+     * runner's tree census cannot read. */
+    for (;;) pause();
 }
 
 static void run_root_session_case(const char *base, const char *tag, struct adsp_cfg ac, int want_ok) {
@@ -1522,6 +1523,13 @@ static void run_root_session_case(const char *base, const char *tag, struct adsp
         c.session_ready_user = &ph;
         pid_t feeder = start_feeder(&w);
         int rc = m19_sink_run(&c);
+        {
+            char rc_path[768], rc_text[32];
+            FMT_CHK(rc_path, "%s/child.rc", w.root);
+            FMT_CHK(rc_text, "%d\n", rc);
+            put_text(w.root, "child.rc", rc_text);
+            (void)rc_path;
+        }
         (void)kill(feeder, SIGKILL);
         (void)waitpid(feeder, NULL, 0);
         stop_peer(&ph);
@@ -1567,7 +1575,29 @@ static void run_root_session_case(const char *base, const char *tag, struct adsp
     }
 
     int st = 0;
-    assert(waitpid(pid, &st, 0) == pid && WIFEXITED(st) && WEXITSTATUS(st) == 0);
+    pid_t waited = waitpid(pid, &st, 0);
+    if (waited != pid || !WIFEXITED(st) || WEXITSTATUS(st) != 0) {
+        /* The child's stdio is isolated: say here what it left behind. */
+        static char diag[1u << 20];
+        char rc_path[768];
+        fprintf(stderr, "session case %s: waited=%d exited=%d code=%d signaled=%d signal=%d\n", tag, (int)waited, WIFEXITED(st),
+                WIFEXITED(st) ? WEXITSTATUS(st) : -1, WIFSIGNALED(st), WIFSIGNALED(st) ? WTERMSIG(st) : 0);
+        FMT_CHK(rc_path, "%s/child.rc", w.root);
+        if (!path_is_absent(rc_path)) {
+            slurp(rc_path, diag, sizeof diag);
+            fprintf(stderr, "m19_sink_run rc=%s", diag);
+        }
+        if (!path_is_absent(w.report)) {
+            slurp(w.report, diag, sizeof diag);
+            fprintf(stderr, "report:\n%s\n", diag);
+        }
+        if (!path_is_absent(w.journal)) {
+            size_t n = slurp(w.journal, diag, sizeof diag);
+            fprintf(stderr, "journal tail:\n%s\n", diag + (n > 6000 ? n - 6000 : 0));
+        }
+        for (unsigned i = 0; i < nev; i++) fprintf(stderr, "event %s\n", ev[i]);
+        abort();
+    }
 
     /* the stream journals every buffer: the journal can run to megabytes */
     static char jbuf[64u << 20];
