@@ -45,11 +45,19 @@
 #include <unistd.h>
 
 /* ---------------- event log inside the session child ---------------- */
+#define FMT_CHK(buf, ...) do { \
+    _Static_assert(sizeof(buf) > sizeof(char *), "FMT_CHK requires a char array"); \
+    int _n = snprintf((buf), sizeof(buf), __VA_ARGS__); \
+    if (_n < 0 || (size_t)_n >= sizeof(buf)) abort(); \
+} while (0)
+
 #define EV_MAX 512
 static char ev[EV_MAX][48];
 static unsigned nev;
 static void evlog(const char *s) {
-    if (nev < EV_MAX) snprintf(ev[nev++], sizeof ev[0], "%s", s);
+    size_t len = strlen(s);
+    assert(len < sizeof ev[0]);
+    if (nev < EV_MAX) memcpy(ev[nev++], s, len + 1u);
 }
 
 /* ---------------- filesystem helpers ---------------- */
@@ -65,9 +73,8 @@ static void clean_dir(const char *p) {
 
 static void put_bytes(const char *root, const char *rel, const void *data, size_t len) {
     char path[PATH_MAX], dir[PATH_MAX];
-    int n = snprintf(path, sizeof path, "%s/%s", root, rel);
-    assert(n > 0 && (size_t)n < sizeof path);
-    snprintf(dir, sizeof dir, "%s", path);
+    FMT_CHK(path, "%s/%s", root, rel);
+    FMT_CHK(dir, "%s", path);
     for (char *s = dir + strlen(root) + 1; (s = strchr(s, '/')); s++) {
         *s = '\0';
         (void)mkdir(dir, 0755);
@@ -213,7 +220,9 @@ static size_t build_plan_custom(uint32_t duration_ms, int32_t peak_mdbfs, uint32
     s = sec_begin(4);
     for (int i = 0; i < 2; i++) {
         char c[64]; memset(c, 0, sizeof c);
-        snprintf(c, 44, "aw_dev_%d_prof", i); strcpy(c + 44, "Music");
+        int cn = snprintf(c, 44, "aw_dev_%d_prof", i);
+        assert(cn > 0 && cn < 44);
+        strcpy(c + 44, "Music");
         memcpy(plan_buf + pl_at, c, 64); pl_at += 64;
     }
     sec_end(s);
@@ -247,13 +256,13 @@ static void write_plan_files(const char *root, uint32_t duration_ms, int32_t pea
     char hex[65], sha_line[80];
     sha_hex_of(plan_buf, len, hex);
     if (sha_out) memcpy(sha_out, hex, 65);
-    snprintf(sha_line, sizeof sha_line, "%s  plan.bin\n", hex);
+    FMT_CHK(sha_line, "%s  plan.bin\n", hex);
     put_bytes(root, "speaker/plan.bin", plan_buf, len);
     put_text(root, "speaker/plan.sha256", sha_line);
 }
 
 /* ---------------- ALSA fixture (private directory + virtual char nodes) ---------------- */
-static struct { char path[256]; dev_t rdev; int live; } nodes[8];
+static struct { char path[PATH_MAX]; dev_t rdev; int live; } nodes[8];
 static struct { int fd; dev_t rdev; int open; } afd[8];
 static int a_next;
 static const char *elem_names[4] = {"aw_dev_0_switch", "aw_dev_1_switch", "aw_dev_0_prof", "aw_dev_1_prof"};
@@ -283,7 +292,7 @@ static int a_mknod(const char *p, mode_t m, dev_t d) {
     (void)m;
     for (int i = 0; i < 8; i++) {
         if (!nodes[i].live) {
-            snprintf(nodes[i].path, sizeof nodes[i].path, "%s", p);
+            FMT_CHK(nodes[i].path, "%s", p);
             nodes[i].rdev = d;
             nodes[i].live = 1;
             return 0;
@@ -351,7 +360,8 @@ static int a_ioctl(int fd, unsigned long req, void *arg) {
                     memset(&l->pids[i], 0, sizeof l->pids[i]);
                     l->pids[i].numid = i + 1;
                     l->pids[i].iface = SNDRV_CTL_ELEM_IFACE_MIXER;
-                    snprintf((char *)l->pids[i].name, sizeof l->pids[i].name, "%s", elem_names[i]);
+                    int nm = snprintf((char *)l->pids[i].name, sizeof l->pids[i].name, "%s", elem_names[i]);
+                    assert(nm > 0 && (size_t)nm < sizeof l->pids[i].name);
                 }
                 l->used = 4;
             }
@@ -364,14 +374,14 @@ static int a_ioctl(int fd, unsigned long req, void *arg) {
             in->type = SNDRV_CTL_ELEM_TYPE_ENUMERATED;
             in->count = 1;
             in->value.enumerated.items = 2;
-            if (it < 2) snprintf(in->value.enumerated.name, sizeof in->value.enumerated.name, "%s", el < 2 ? sw[it] : pf[it]);
+            if (it < 2) FMT_CHK(in->value.enumerated.name, "%s", el < 2 ? sw[it] : pf[it]);
             return 0;
         }
         if (req == SNDRV_CTL_IOCTL_ELEM_WRITE) {
             struct snd_ctl_elem_value *v = arg;
             unsigned el = v->id.numid - 1, val = v->value.enumerated.item[0];
             if (el < 2) {
-                snprintf(e, sizeof e, "sw%u=%s", el, val ? "Enable" : "Disable");
+                FMT_CHK(e, "sw%u=%s", el, val ? "Enable" : "Disable");
                 evlog(e);
             }
             elem_value[el] = val;
@@ -392,13 +402,13 @@ static int a_ioctl(int fd, unsigned long req, void *arg) {
             i->max = i->min;
             i->integer = 1;
         }
-        snprintf(e, sizeof e, "%s_hw", t);
+        FMT_CHK(e, "%s_hw", t);
         evlog(e);
         return 0;
     }
     if (req == SNDRV_PCM_IOCTL_SW_PARAMS) return 0;
-    if (req == SNDRV_PCM_IOCTL_PREPARE) { snprintf(e, sizeof e, "%s_prepare", t); evlog(e); return 0; }
-    if (req == SNDRV_PCM_IOCTL_DROP) { snprintf(e, sizeof e, "%s_drop", t); evlog(e); return 0; }
+    if (req == SNDRV_PCM_IOCTL_PREPARE) { FMT_CHK(e, "%s_prepare", t); evlog(e); return 0; }
+    if (req == SNDRV_PCM_IOCTL_DROP) { FMT_CHK(e, "%s_drop", t); evlog(e); return 0; }
     return -ENOTTY;
 }
 static const m11_snd_sys asys = {a_open, a_fstat, a_close, a_ioctl, a_mknod, a_unlink, a_mkdir, a_rmdir, a_read_text};
@@ -674,7 +684,7 @@ static void peer_loop(int q, int ctl, int ack, int ntf, const struct peer_sync *
                 size_t pll = 0;
                 if (m11_gpr_validate_packet(buf, size, &h, &pl, &pll) < 0) _exit(125);
                 char want[48];
-                snprintf(want, sizeof want, "op=%08x tok=%08x", h.opcode, h.token);
+                FMT_CHK(want, "op=%08x tok=%08x", h.opcode, h.token);
                 if (!journal_has(ac.journal_path, want)) _exit(110);
 
                 if (h.opcode == M11_APM_CMD_SHARED_MEM_UNMAP_REGIONS || h.opcode == M11_APM_CMD_CLOSE_ALL ||
@@ -807,12 +817,12 @@ static void session_ready_handshake(void *user, m11_entry *e) {
 
 /* ---------------- synthetic world builder ---------------- */
 struct world {
-    char root[PATH_MAX];
-    char started[PATH_MAX], plan[PATH_MAX], plan_sha[PATH_MAX], report[PATH_MAX];
-    char dev[PATH_MAX], holder_proc[PATH_MAX], sys[PATH_MAX], proc_devs[PATH_MAX];
-    char cmdline[PATH_MAX], journal[PATH_MAX], panic[PATH_MAX];
-    char ep[PATH_MAX], ion[PATH_MAX], cma[PATH_MAX], hdir[PATH_MAX], hnode[PATH_MAX];
-    char proc_pcm[PATH_MAX], sys_sound[PATH_MAX], snd_dir[PATH_MAX];
+    char root[512];
+    char started[640], plan[640], plan_sha[640], report[640];
+    char dev[640], holder_proc[640], sys[640], proc_devs[640];
+    char cmdline[640], journal[640], panic[640];
+    char ep[640], ion[640], cma[640], hdir[640], hnode[640];
+    char proc_pcm[640], sys_sound[640], snd_dir[640];
     char sha_hex[65];
 };
 
@@ -831,7 +841,7 @@ static const char *CMDLINE_OK = "console=ttyMSM0 iommu.strict=1 rdinit=/init\n";
 static void make_world(struct world *w, const char *base, const char *tag) {
     static unsigned seq;
     memset(w, 0, sizeof *w);
-    snprintf(w->root, sizeof w->root, "%s/%s-%ld-%u", base, tag, (long)getpid(), seq++);
+    FMT_CHK(w->root, "%s/%s-%ld-%u", base, tag, (long)getpid(), seq++);
     assert(mkdir(w->root, 0700) == 0);
 
     put_text(w->root, "sys/class/aud_pasthru_adsp/aud_pasthru_adsp/dev", "5:2\n");
@@ -856,38 +866,38 @@ static void make_world(struct world *w, const char *base, const char *tag) {
     put_text(w->root, "journal", "");
     put_text(w->root, "panic", "0\n");
 
-    snprintf(w->dev, sizeof w->dev, "%s/dev", w->root);
-    snprintf(w->holder_proc, sizeof w->holder_proc, "%s/holder-proc", w->root);
+    FMT_CHK(w->dev, "%s/dev", w->root);
+    FMT_CHK(w->holder_proc, "%s/holder-proc", w->root);
     assert(mkdir(w->dev, 0755) == 0 && chmod(w->dev, 0755) == 0);
     assert(mkdir(w->holder_proc, 0755) == 0);
     /* clean non-audio process entry in holder-proc */
     put_text(w->root, "holder-proc/100/comm", "systemd\n");
-    char reg_fd_dir[PATH_MAX], reg_link[PATH_MAX], reg_target[PATH_MAX];
-    snprintf(reg_fd_dir, sizeof reg_fd_dir, "%s/100/fd", w->holder_proc);
+    char reg_fd_dir[768], reg_link[896], reg_target[768];
+    FMT_CHK(reg_fd_dir, "%s/100/fd", w->holder_proc);
     assert(mkdir(reg_fd_dir, 0755) == 0);
-    snprintf(reg_target, sizeof reg_target, "%s/panic", w->root);
-    snprintf(reg_link, sizeof reg_link, "%s/3", reg_fd_dir);
+    FMT_CHK(reg_target, "%s/panic", w->root);
+    FMT_CHK(reg_link, "%s/3", reg_fd_dir);
     assert(symlink(reg_target, reg_link) == 0);
 
     write_plan_files(w->root, 500u, -10000, 8u, w->sha_hex);
 
-    snprintf(w->started, sizeof w->started, "%s/speaker.started", w->root);
-    snprintf(w->plan, sizeof w->plan, "%s/speaker/plan.bin", w->root);
-    snprintf(w->plan_sha, sizeof w->plan_sha, "%s/speaker/plan.sha256", w->root);
-    snprintf(w->report, sizeof w->report, "%s/speaker.report", w->root);
-    snprintf(w->sys, sizeof w->sys, "%s/sys", w->root);
-    snprintf(w->proc_devs, sizeof w->proc_devs, "%s/proc_devices", w->root);
-    snprintf(w->cmdline, sizeof w->cmdline, "%s/cmdline", w->root);
-    snprintf(w->journal, sizeof w->journal, "%s/journal", w->root);
-    snprintf(w->panic, sizeof w->panic, "%s/panic", w->root);
-    snprintf(w->ep, sizeof w->ep, "%s/dev/ep_node", w->root);
-    snprintf(w->ion, sizeof w->ion, "%s/dev/ion_node", w->root);
-    snprintf(w->cma, sizeof w->cma, "%s/dev/cma_node", w->root);
-    snprintf(w->hdir, sizeof w->hdir, "%s/dev/heap", w->root);
-    snprintf(w->hnode, sizeof w->hnode, "%s/dev/heap/system", w->root);
-    snprintf(w->proc_pcm, sizeof w->proc_pcm, "%s/proc/asound/pcm", w->root);
-    snprintf(w->sys_sound, sizeof w->sys_sound, "%s/sys/class/sound", w->root);
-    snprintf(w->snd_dir, sizeof w->snd_dir, "%s/dev/priv-snd", w->root);
+    FMT_CHK(w->started, "%s/speaker.started", w->root);
+    FMT_CHK(w->plan, "%s/speaker/plan.bin", w->root);
+    FMT_CHK(w->plan_sha, "%s/speaker/plan.sha256", w->root);
+    FMT_CHK(w->report, "%s/speaker.report", w->root);
+    FMT_CHK(w->sys, "%s/sys", w->root);
+    FMT_CHK(w->proc_devs, "%s/proc_devices", w->root);
+    FMT_CHK(w->cmdline, "%s/cmdline", w->root);
+    FMT_CHK(w->journal, "%s/journal", w->root);
+    FMT_CHK(w->panic, "%s/panic", w->root);
+    FMT_CHK(w->ep, "%s/dev/ep_node", w->root);
+    FMT_CHK(w->ion, "%s/dev/ion_node", w->root);
+    FMT_CHK(w->cma, "%s/dev/cma_node", w->root);
+    FMT_CHK(w->hdir, "%s/dev/heap", w->root);
+    FMT_CHK(w->hnode, "%s/dev/heap/system", w->root);
+    FMT_CHK(w->proc_pcm, "%s/proc/asound/pcm", w->root);
+    FMT_CHK(w->sys_sound, "%s/sys/class/sound", w->root);
+    FMT_CHK(w->snd_dir, "%s/dev/priv-snd", w->root);
 }
 
 static struct m19_speaker_config cfg_for_world(const struct world *w) {
@@ -1075,8 +1085,8 @@ static void test_single_run_lock(const char *base) {
 
     /* symlink at started_path is also refused without overwriting target */
     assert(unlink(w.started) == 0);
-    char target[PATH_MAX];
-    snprintf(target, sizeof target, "%s/target", w.root);
+    char target[768];
+    FMT_CHK(target, "%s/target", w.root);
     put_text(w.root, "target", "untouched\n");
     assert(symlink(target, w.started) == 0);
     int rc = m19_speaker_run(&c);
@@ -1106,13 +1116,12 @@ static void test_dev_clean_checks(const char *base) {
     /* Live symlink inside /dev/snd/by-path also fails M19_SPK_PRE_DEV */
     struct world w;
     make_world(&w, base, "livesym");
-    char bypath[PATH_MAX], linkp[PATH_MAX];
-    snprintf(bypath, sizeof bypath, "%s/snd/by-path", w.dev);
+    char sndd[768], bypath[896], linkp[1024];
+    FMT_CHK(bypath, "%s/snd/by-path", w.dev);
     assert(mkdir(w.dev, 0755) == -1 && errno == EEXIST);
-    char sndd[PATH_MAX];
-    snprintf(sndd, sizeof sndd, "%s/snd", w.dev);
+    FMT_CHK(sndd, "%s/snd", w.dev);
     assert(mkdir(sndd, 0755) == 0 && mkdir(bypath, 0755) == 0);
-    snprintf(linkp, sizeof linkp, "%s/live", bypath);
+    FMT_CHK(linkp, "%s/live", bypath);
     assert(symlink(w.panic, linkp) == 0);
     struct m19_speaker_config c = cfg_for_world(&w);
     assert(m19_speaker_run(&c) == -EEXIST);
@@ -1123,24 +1132,24 @@ static void test_foreign_holder_checks(const char *base) {
     struct stat ur;
     assert(stat("/dev/urandom", &ur) == 0 && S_ISCHR(ur.st_mode));
     char dev_txt[32];
-    snprintf(dev_txt, sizeof dev_txt, "%u:%u\n", major(ur.st_rdev), minor(ur.st_rdev));
+    FMT_CHK(dev_txt, "%u:%u\n", major(ur.st_rdev), minor(ur.st_rdev));
 
     /* 1. Foreign holder of an ALSA PCM char device in holder-proc -> -EBUSY at M19_SPK_PRE_HOLDERS */
     struct world w;
     make_world(&w, base, "holder-alsa");
     put_text(w.root, "sys/class/sound/pcmC0D32p/dev", dev_txt);
     /* Empty /dev/snd/by-path + dangling udev symlink is allowed by check_dev_clean */
-    char sndd[PATH_MAX], bypath[PATH_MAX], dlink[PATH_MAX];
-    snprintf(sndd, sizeof sndd, "%s/snd", w.dev);
-    snprintf(bypath, sizeof bypath, "%s/by-path", sndd);
-    snprintf(dlink, sizeof dlink, "%s/platform-sound", bypath);
+    char sndd[768], bypath[896], dlink[1024];
+    FMT_CHK(sndd, "%s/snd", w.dev);
+    FMT_CHK(bypath, "%s/by-path", sndd);
+    FMT_CHK(dlink, "%s/platform-sound", bypath);
     assert(mkdir(sndd, 0755) == 0 && mkdir(bypath, 0755) == 0);
     assert(symlink("../controlC0", dlink) == 0);
 
-    char pdir[PATH_MAX], fddir[PATH_MAX], fdlink[PATH_MAX];
-    snprintf(pdir, sizeof pdir, "%s/4242", w.holder_proc);
-    snprintf(fddir, sizeof fddir, "%s/fd", pdir);
-    snprintf(fdlink, sizeof fdlink, "%s/7", fddir);
+    char pdir[768], fddir[896], fdlink[1024];
+    FMT_CHK(pdir, "%s/4242", w.holder_proc);
+    FMT_CHK(fddir, "%s/fd", pdir);
+    FMT_CHK(fdlink, "%s/7", fddir);
     assert(mkdir(pdir, 0755) == 0 && mkdir(fddir, 0755) == 0);
     assert(symlink("/dev/urandom", fdlink) == 0);
 
@@ -1156,16 +1165,16 @@ static void test_foreign_holder_checks(const char *base) {
     make_world(&w, base, "holder-ep");
     put_text(w.root, "sys/class/aud_pasthru_adsp/aud_pasthru_adsp/dev", dev_txt);
     char uev_rel[128], uev_body[128], pdevs[320];
-    snprintf(uev_rel, sizeof uev_rel, "sys/dev/char/%u:%u/uevent", major(ur.st_rdev), minor(ur.st_rdev));
-    snprintf(uev_body, sizeof uev_body, "MAJOR=%u\nMINOR=%u\nDEVNAME=aud_pasthru_adsp\n", major(ur.st_rdev), minor(ur.st_rdev));
+    FMT_CHK(uev_rel, "sys/dev/char/%u:%u/uevent", major(ur.st_rdev), minor(ur.st_rdev));
+    FMT_CHK(uev_body, "MAJOR=%u\nMINOR=%u\nDEVNAME=aud_pasthru_adsp\n", major(ur.st_rdev), minor(ur.st_rdev));
     put_text(w.root, uev_rel, uev_body);
-    snprintf(pdevs, sizeof pdevs,
-             "Character devices:\n  1 msm_audio_ion\n  1 msm_audio_ion_cma\n  1 dma_heap\n%3u aud_pasthru_adsp\n\nBlock devices:\n  7 loop\n",
-             major(ur.st_rdev));
+    FMT_CHK(pdevs,
+            "Character devices:\n  1 msm_audio_ion\n  1 msm_audio_ion_cma\n  1 dma_heap\n%3u aud_pasthru_adsp\n\nBlock devices:\n  7 loop\n",
+            major(ur.st_rdev));
     put_text(w.root, "proc_devices", pdevs);
-    snprintf(pdir, sizeof pdir, "%s/5150", w.holder_proc);
-    snprintf(fddir, sizeof fddir, "%s/fd", pdir);
-    snprintf(fdlink, sizeof fdlink, "%s/4", fddir);
+    FMT_CHK(pdir, "%s/5150", w.holder_proc);
+    FMT_CHK(fddir, "%s/fd", pdir);
+    FMT_CHK(fdlink, "%s/4", fddir);
     assert(mkdir(pdir, 0755) == 0 && mkdir(fddir, 0755) == 0);
     assert(symlink("/dev/urandom", fdlink) == 0);
     c = cfg_for_world(&w);
@@ -1174,8 +1183,8 @@ static void test_foreign_holder_checks(const char *base) {
 
     /* 3. Fewer than 3 sound cdevs in /sys/class/sound -> -ENODEV at M19_SPK_PRE_HOLDERS */
     make_world(&w, base, "holder-short");
-    char pcm33[PATH_MAX];
-    snprintf(pcm33, sizeof pcm33, "%s/pcmC0D33c/dev", w.sys_sound);
+    char pcm33[768];
+    FMT_CHK(pcm33, "%s/pcmC0D33c/dev", w.sys_sound);
     assert(unlink(pcm33) == 0);
     c = cfg_for_world(&w);
     assert(m19_speaker_run(&c) == -ENODEV);
@@ -1206,7 +1215,7 @@ static void test_plan_verification(const char *base) {
     /* 2. Uppercase hex in plan.sha256 */
     make_world(&w, base, "plan-upper");
     char upper[80];
-    snprintf(upper, sizeof upper, "%s  plan.bin\n", w.sha_hex);
+    FMT_CHK(upper, "%s  plan.bin\n", w.sha_hex);
     for (int i = 0; i < 64; i++) if (upper[i] >= 'a' && upper[i] <= 'f') upper[i] = (char)(upper[i] - 'a' + 'A');
     put_text(w.root, "speaker/plan.sha256", upper);
     assert_plan_refused(&w);
@@ -1214,8 +1223,8 @@ static void test_plan_verification(const char *base) {
 
     /* 3. Symlink plan.bin */
     make_world(&w, base, "plan-sym");
-    char copy_p[PATH_MAX];
-    snprintf(copy_p, sizeof copy_p, "%s/plan.copy", w.root);
+    char copy_p[768];
+    FMT_CHK(copy_p, "%s/plan.copy", w.root);
     assert(rename(w.plan, copy_p) == 0 && symlink(copy_p, w.plan) == 0);
     assert_plan_refused(&w);
     clean_dir(w.root);
@@ -1226,7 +1235,7 @@ static void test_plan_verification(const char *base) {
     plan_buf[0] ^= 0xffu;
     char hex[65], line[80];
     sha_hex_of(plan_buf, len, hex);
-    snprintf(line, sizeof line, "%s  plan.bin\n", hex);
+    FMT_CHK(line, "%s  plan.bin\n", hex);
     put_bytes(w.root, "speaker/plan.bin", plan_buf, len);
     put_text(w.root, "speaker/plan.sha256", line);
     assert_plan_refused(&w);
@@ -1264,7 +1273,7 @@ static void run_early_entry_child(struct world *w, int require_kmsg, enum pmode 
         alarm(20);
         isolate_stdio_pipes();
         struct adsp_cfg ac = {.pm = pm};
-        snprintf(ac.journal_path, sizeof ac.journal_path, "%s", w->journal);
+        FMT_CHK(ac.journal_path, "%s", w->journal);
         struct peer_handle ph = start_peer(ac);
         struct m19_speaker_config c = cfg_for_world(w);
         c.journal_require_kmsg = require_kmsg;
@@ -1336,10 +1345,10 @@ static void run_root_session_case(const char *base, const char *tag, struct adsp
     struct world w;
     make_world(&w, base, tag);
     /* Dangling udev symlink inside /dev/snd/by-path must not block session bring-up */
-    char sndd[PATH_MAX], bypath[PATH_MAX], dlink[PATH_MAX];
-    snprintf(sndd, sizeof sndd, "%s/snd", w.dev);
-    snprintf(bypath, sizeof bypath, "%s/by-path", sndd);
-    snprintf(dlink, sizeof dlink, "%s/platform-sound", bypath);
+    char sndd[768], bypath[896], dlink[1024];
+    FMT_CHK(sndd, "%s/snd", w.dev);
+    FMT_CHK(bypath, "%s/by-path", sndd);
+    FMT_CHK(dlink, "%s/platform-sound", bypath);
     assert(mkdir(sndd, 0755) == 0 && mkdir(bypath, 0755) == 0 && symlink("../controlC0", dlink) == 0);
 
     int ev_pipe[2];
@@ -1353,8 +1362,8 @@ static void run_root_session_case(const char *base, const char *tag, struct adsp
         isolate_stdio_pipes();
         assert(unshare(CLONE_NEWNS) == 0);
         assert(mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL) == 0);
-        char pts[PATH_MAX];
-        snprintf(pts, sizeof pts, "%s/pts", w.dev);
+        char pts[768];
+        FMT_CHK(pts, "%s/pts", w.dev);
         assert(mkdir(pts, 0755) == 0 && mount("/dev/pts", pts, NULL, MS_BIND, NULL) == 0);
 
         nev = 0;
@@ -1364,7 +1373,7 @@ static void run_root_session_case(const char *base, const char *tag, struct adsp
         memset(elem_value, 0, sizeof elem_value);
         elem_value[2] = elem_value[3] = 1; /* start at Voice; session switches to Music */
 
-        snprintf(ac.journal_path, sizeof ac.journal_path, "%s", w.journal);
+        FMT_CHK(ac.journal_path, "%s", w.journal);
         struct peer_handle ph = start_peer(ac);
 
         struct m19_speaker_config c = cfg_for_world(&w);

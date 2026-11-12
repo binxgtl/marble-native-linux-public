@@ -337,7 +337,13 @@ case "$command" in
   case "$1" in --getro) echo "${M19_GETRO:-1}";; esac
   exit 0;;
  cp)
-  case "${M19_FAIL:-}" in cp) exit 1;; esac
+  case "${M19_FAIL:-}" in
+   cp) exit 1;;
+   corrupt-plan-cp)
+    cp "$@" || exit 1
+    case "$2" in */plan.bin) printf x >> "$2";; esac
+    exit 0;;
+  esac
   exec cp "$@";;
  *) exec "$command" "$@";;
 esac
@@ -829,6 +835,7 @@ class AudioPrep(unittest.TestCase):
 
     def test_every_precondition_and_integrity_fault_fails(self):
         self.assertFails('root', M19_ROOT='relative')
+        self.assertFails('plan-rehash', M19_FAIL='corrupt-plan-cp')
         cases = (
             ('no-stage-result', lambda: (self.root / 'run/m19/audio.result').unlink()),
             ('audio-stage', lambda: (self.root / 'run/m19/audio.result').write_text('partial amps\n')),
