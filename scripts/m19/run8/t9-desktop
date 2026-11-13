@@ -1,0 +1,90 @@
+#!/bin/busybox sh
+# T9-desktop for R8 (docs/m19-r8.md): R3's, except the session home. The panel must offer the 120 Hz and 60 Hz modes
+# the two Xorg configurations name. /dev gains one input node, the touchscreen, found by name; no key ever gets a node.
+# The session's home is the tree's /root, kept on the read-write /data. M19 adds nothing there: the autostart entries
+# it hides (lockers, the keyring) are in RAM, first in the session's XDG_CONFIG_DIRS. The power manager is no longer
+# hidden. Services that keep a home of their own, PulseAudio and the keypad, keep R7's in RAM.
+set -eu
+R=${M19_ROOT:-}
+BB=${M19_BB:-/bin/busybox}
+fail() { printf 'M19 T9 desktop failed: %s\n' "$*" >&2 || :; exit 1; }
+# Production runs with an empty R, the real root. A test root must be absolute and not a link.
+case "$R" in ''|/*) ;; *) fail root;; esac
+[ -z "$R" ] || [ ! -L "$R" ] || fail root
+plan=$R/m19/r3
+src=$R/m19-data/ubuntu
+new=$R/newroot
+safe_dir() { [ ! -L "$1" ] && [ -d "$1" ]; }
+number_ok() { case "$1" in *[!0-9:]*|:*|*:|*:*:*|'') return 1;; esac; }
+safe_dir "$new/run/m19" && safe_dir "$new/dev" || fail newroot
+
+# 1. The panel and both modes.
+panel=$R/sys/class/drm/card0-DSI-1
+[ "$($BB cat "$panel/status")" = connected ] || fail panel-status
+modes=0
+while read -r mode; do
+ case "$mode" in ''|'#'*) continue;; esac
+ case "$mode" in *[!0-9a-z]*) fail "mode name $mode";; esac
+ $BB grep -qx "$mode" "$panel/modes" || fail "panel mode $mode"
+ modes=$((modes+1))
+done <"$plan/modes"
+[ "$modes" -eq 2 ] || fail mode-count
+# R3a: Xorg died with the writeback connector enabled as a second output. Forcing it off is a
+# display state in the kernel, gone at the next boot; nothing is written to storage.
+writeback=$($BB cat "$plan/writeback") || fail writeback-name
+case "$writeback" in card0-Virtual-[0-9]) ;; *) fail "writeback name $writeback";; esac
+if [ -e "$R/sys/class/drm/$writeback/status" ]; then
+ printf off >"$R/sys/class/drm/$writeback/status" || fail writeback-off
+ [ "$($BB cat "$R/sys/class/drm/$writeback/status")" = disconnected ] || fail writeback-still-connected
+ wb=off
+else
+ wb=absent
+fi
+$BB cp "$plan/xorg.conf" "$new/run/m19/xorg.conf" || fail xorg-conf
+$BB cp "$plan/xorg-60.conf" "$new/run/m19/xorg-60.conf" || fail xorg-conf
+# The preload library both Xorg units load: it drops connector properties modesetting cannot handle.
+[ -f "$R/m19/m19-xorg-shim.so" ] || fail xorg-shim
+$BB cp "$R/m19/m19-xorg-shim.so" "$new/run/m19/m19-xorg-shim.so" || fail xorg-shim
+$BB chmod 644 "$new/run/m19/m19-xorg-shim.so" || fail xorg-shim
+offered=$($BB tr '\n' ' ' <"$panel/modes") || fail panel-modes
+
+# 2. Exactly one input node: the touchscreen.
+touch=$($BB cat "$plan/touch") || fail touch-name
+case "$touch" in ''|*[!a-z0-9_]*) fail "touch name $touch";; esac
+found=
+for entry in "$R"/sys/class/input/event*; do
+ [ -e "$entry/device/name" ] || continue
+ [ "$($BB cat "$entry/device/name")" = "$touch" ] || continue
+ [ -z "$found" ] || fail "touch duplicate"
+ found=$entry
+done
+[ -n "$found" ] || fail "touch missing"
+node=${found##*/}
+case "$node" in event|event*[!0-9]*) fail "touch node $node";; esac
+number=$($BB cat "$found/dev") || fail "touch number"
+number_ok "$number" || fail "touch number"
+$BB mkdir -p "$new/dev/input" || fail input-directory
+$BB mknod -m 600 "$new/dev/input/$node" c "${number%%:*}" "${number#*:}" || fail "touch node $node"
+
+# 3. The session home is the tree's /root. The hidden entries go to RAM, where XDG_CONFIG_DIRS puts them first.
+safe_dir "$new/root" || fail home
+autostart=$new/run/m19/xdg-config/autostart
+$BB mkdir -p "$autostart" || fail autostart
+hidden=0
+while read -r item; do
+ case "$item" in ''|'#'*) continue;; esac
+ case "$item" in .*|*[!A-Za-z0-9._-]*) fail "hidden name $item";; esac
+ printf '[Desktop Entry]\nHidden=true\n' >"$autostart/$item.desktop" || fail "hide $item"
+ hidden=$((hidden+1))
+done <"$plan/hidden"
+$BB mkdir -m 700 "$new/run/m19/session" "$new/run/m19/xdg" || fail ram-homes
+
+# 4. What the units run, seen through the new root.
+for tool in usr/lib/xorg/Xorg usr/lib/xorg/modules/drivers/modesetting_drv.so usr/lib/xorg/modules/input/libinput_drv.so \
+ usr/bin/startxfce4 usr/bin/dbus-run-session usr/bin/xfwm4 usr/bin/xfce4-panel usr/bin/xfdesktop usr/bin/xdpyinfo usr/bin/xrandr \
+ usr/bin/xinput usr/bin/ps; do
+ [ -e "$new/$tool" ] || fail "missing $tool"
+done
+printf 'M19 T9 desktop: panel modes %s writeback=%s\n' "$offered" "$wb" >&2
+printf 'M19 T9 desktop: touch=%s node=%s home=/root hidden=%s\n' "$touch" "$node" "$hidden" >&2
+exit 0

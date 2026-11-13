@@ -1,6 +1,7 @@
 /* The R2 reporter. systemd starts it early; it waits for the boot to settle, gathers the
  * evidence, judges it, sends it over the serial line with a hash, then paints the verdict.
- * It only reads: systemd's state, the journal, the kernel log, /proc and /sys. */
+ * It only reads: systemd's state, the journal, the kernel log, /proc and /sys. R8's T12-persist is
+ * the one exception: one small file in the tree, when persist_path is set. */
 #define _GNU_SOURCE
 #include "r2.h"
 
@@ -15,8 +16,10 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
+#include <sys/vfs.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #include <arpa/inet.h>
@@ -335,6 +338,203 @@ static void check_blocks(const char *block, int *writes_ok, int *ro_ok)
     }
 }
 
+/* R8: one disk's, partition's or dm device's counters and read-only flag; 0 when both read. */
+struct counts {
+    unsigned long long writes, sectors, discards, discarded;
+    int ro;
+};
+
+static int block_counts(const char *directory, struct counts *n)
+{
+    char path[1400], text[512], flag[16];
+    memset(n, 0, sizeof(*n));
+    snprintf(path, sizeof(path), "%s/stat", directory);
+    if (read_small(path, text, sizeof(text)))
+        return -1;
+    unsigned long long field[17] = {0};
+    int count = 0;
+    char *cursor = text;
+    while (count < 17) {
+        char *end;
+        errno = 0;
+        unsigned long long value = strtoull(cursor, &end, 10);
+        if (end == cursor || errno)
+            break;
+        field[count++] = value;
+        cursor = end;
+    }
+    snprintf(path, sizeof(path), "%s/ro", directory);
+    if (count < 7 || read_small(path, flag, sizeof(flag)))
+        return -1;
+    n->writes = field[4];
+    n->sectors = field[6];
+    n->discards = field[11];
+    n->discarded = field[13];
+    n->ro = !strcmp(flag, "1\n");
+    return 0;
+}
+
+static int counts_zero(const struct counts *n)
+{
+    return !n->writes && !n->sectors && !n->discards && !n->discarded;
+}
+
+static void counts_line(const char *name, const char *role, const struct counts *n)
+{
+    addf("M19 R8 block %s %s writes=%llu sectors=%llu discards=%llu discarded=%llu ro=%d\n", name, role, n->writes, n->sectors, n->discards,
+         n->discarded, n->ro);
+}
+
+/* The value of key in a uevent file, or "". */
+static void uevent_value(const char *path, const char *key, char *value, size_t room)
+{
+    char text[2048];
+    size_t length = strlen(key);
+    value[0] = 0;
+    if (read_small(path, text, sizeof(text)))
+        return;
+    for (char *line = text; line && *line;) {
+        char *next = strchr(line, '\n');
+        if (next)
+            *next++ = 0;
+        if (!strncmp(line, key, length) && line[length] == '=') {
+            snprintf(value, room, "%s", line + length + 1);
+            return;
+        }
+        line = next;
+    }
+}
+
+static int is_partition_of(const char *part, const char *disk)
+{
+    size_t length = strlen(disk);
+    return !strncmp(part, disk, length) && part[length];
+}
+
+/* R8: /data is read-write. Only the data partition (data_part) and the dm device made from it (data_dm) are writable
+ * and may count writes; the disk holding the partition may count them too, read-only itself, while every other
+ * partition on it counts none. Every other disk, partition and dm device is read-only and unwritten, as in R2. The
+ * data table has no discard, so none may count on the data path. */
+static void check_blocks_rw(const struct m19_report *c, int *writes_ok, int *ro_ok)
+{
+    DIR *directory = opendir(c->block);
+    int disks = 0, data_parts = 0, data_dms = 0;
+    *writes_ok = *ro_ok = 1;
+    if (!directory) {
+        *writes_ok = *ro_ok = 0;
+        addf("M19 R2 no %s\n", c->block);
+        return;
+    }
+    struct dirent *entry;
+    while ((entry = readdir(directory))) {
+        const char *name = entry->d_name;
+        int disk = !strncmp(name, "sd", 2);
+        if (!disk && strncmp(name, "dm-", 3))
+            continue;
+        char path[1024];
+        struct counts n;
+        snprintf(path, sizeof(path), "%s/%s", c->block, name);
+        if (block_counts(path, &n)) {
+            addf("M19 R8 block %s unreadable\n", name);
+            *writes_ok = *ro_ok = 0;
+            continue;
+        }
+        if (!disk) {
+            char inner[1100], dm[128];
+            snprintf(inner, sizeof(inner), "%s/dm/name", path);
+            if (read_small(inner, dm, sizeof(dm)))
+                dm[0] = 0;
+            dm[strcspn(dm, "\n")] = 0;
+            int data = dm[0] && !strcmp(dm, c->data_dm);
+            counts_line(name, data ? "data" : "other", &n);
+            if (data) {
+                data_dms++;
+                if (n.ro)
+                    *ro_ok = 0;
+                if (n.discards || n.discarded)
+                    *writes_ok = 0;
+            } else {
+                if (!n.ro)
+                    *ro_ok = 0;
+                if (!counts_zero(&n))
+                    *writes_ok = 0;
+            }
+            continue;
+        }
+        disks++;
+        DIR *parts = opendir(path);
+        if (!parts) {
+            *ro_ok = 0;
+            continue;
+        }
+        /* The partitions first: which one holds /data, and every other one read-only. */
+        char data[256] = "";
+        struct dirent *part;
+        while ((part = readdir(parts))) {
+            if (!is_partition_of(part->d_name, name))
+                continue;
+            char inner[1300], partname[64], flag[16];
+            snprintf(inner, sizeof(inner), "%s/%s/uevent", path, part->d_name);
+            uevent_value(inner, "PARTNAME", partname, sizeof(partname));
+            if (partname[0] && !strcmp(partname, c->data_part)) {
+                data_parts++;
+                snprintf(data, sizeof(data), "%s", part->d_name);
+                continue;
+            }
+            snprintf(inner, sizeof(inner), "%s/%s/ro", path, part->d_name);
+            if (read_small(inner, flag, sizeof(flag)) || strcmp(flag, "1\n")) {
+                addf("M19 R2 partition %s writable\n", part->d_name);
+                *ro_ok = 0;
+            }
+        }
+        counts_line(name, data[0] ? "data-disk" : "disk", &n);
+        if (!n.ro)
+            *ro_ok = 0;
+        if (!data[0]) {
+            if (!counts_zero(&n))
+                *writes_ok = 0;
+            closedir(parts);
+            continue;
+        }
+        if (n.discards || n.discarded)
+            *writes_ok = 0;
+        /* Then the data disk's partitions' own counters: the data partition's, and any other that counts. */
+        rewinddir(parts);
+        while ((part = readdir(parts))) {
+            if (!is_partition_of(part->d_name, name))
+                continue;
+            char inner[1300];
+            struct counts p;
+            snprintf(inner, sizeof(inner), "%s/%s", path, part->d_name);
+            if (block_counts(inner, &p)) {
+                addf("M19 R8 block %s unreadable\n", part->d_name);
+                *writes_ok = *ro_ok = 0;
+                continue;
+            }
+            if (!strcmp(part->d_name, data)) {
+                counts_line(part->d_name, "data", &p);
+                if (p.ro)
+                    *ro_ok = 0;
+                if (p.discards || p.discarded)
+                    *writes_ok = 0;
+            } else if (!counts_zero(&p)) {
+                counts_line(part->d_name, "other", &p);
+                *writes_ok = 0;
+            }
+        }
+        closedir(parts);
+    }
+    closedir(directory);
+    if (!disks) {
+        addf("M19 R2 no disk\n");
+        *writes_ok = 0;
+    }
+    if (data_parts != 1 || data_dms != 1) {
+        addf("M19 R8 data devices partitions=%d dm=%d\n", data_parts, data_dms);
+        *writes_ok = *ro_ok = 0;
+    }
+}
+
 static const char *const rw_allowed[] = {"tmpfs", "proc", "sysfs", "devpts", "cgroup", "cgroup2", "securityfs", "debugfs", "tracefs", "configfs",
                                          "selinuxfs", "pstore", "bpf", "mqueue", "hugetlbfs", "fusectl", "binfmt_misc", "ramfs", "functionfs",
                                          "efivarfs", "autofs", "rpc_pipefs", "nsfs", NULL};
@@ -344,9 +544,15 @@ static int starts_ro(const char *options)
     return !strncmp(options, "ro", 2) && (options[2] == ',' || options[2] == 0);
 }
 
+static int starts_rw(const char *options)
+{
+    return !strncmp(options, "rw", 2) && (options[2] == ',' || options[2] == 0);
+}
+
 /* Any filesystem that is not RAM or a kernel view must be read-only at the mount and the
- * superblock, and / must be the f2fs root. */
-static int check_mounts(const char *mountinfo)
+ * superblock, and / must be the f2fs root. R8 (data_rw): / is the f2fs root read-write, and every other
+ * mount of a disk filesystem is read-only at the mount; an f2fs one shares /'s superblock. */
+static int check_mounts(const char *mountinfo, int data_rw)
 {
     FILE *file = fopen(mountinfo, "re");
     if (!file) {
@@ -372,11 +578,15 @@ static int check_mounts(const char *mountinfo)
         int allowed = 0;
         for (unsigned i = 0; rw_allowed[i]; i++)
             allowed |= !strcmp(type, rw_allowed[i]);
+        if (!strcmp(point, "/") && data_rw) {
+            root = !strcmp(type, "f2fs") && starts_rw(options) && starts_rw(super);
+            continue;
+        }
         if (!strcmp(point, "/"))
             root = !strcmp(type, "f2fs") && starts_ro(options) && starts_ro(super);
         if (allowed)
             continue;
-        if (!starts_ro(options) || !starts_ro(super)) {
+        if (!starts_ro(options) || !(starts_ro(super) || (data_rw && !strcmp(type, "f2fs")))) {
             addf("M19 R2 writable mount %s %s\n", point, type);
             ok = 0;
         }
@@ -1940,6 +2150,198 @@ static void ce_phase(const struct m19_report *c, int tty, struct ce *e)
                         e->entry_seen, e->entries);
 }
 
+/* R8: T12-battery. upower must be running (the session's power manager and panel start it), show the battery at
+ * the percentage the kernel reads, within two points, in a known state, and the power manager must run. */
+struct battery {
+    int unit_active, capacity, upower_pct, pm_running, battery_ok;
+    char status[24], state[24];
+};
+
+static void battery_phase(const struct m19_report *c, int tty, struct battery *b)
+{
+    memset(b, 0, sizeof(*b));
+    b->capacity = b->upower_pct = -1;
+    (void)m19_wire_line(tty, c->pace_ms, M19_DEVICE_STEP " T12-battery START");
+    char *active[] = {(char *)c->systemctl, "is-active", (char *)c->battery_unit, NULL};
+    b->unit_active = section(active, SECTION_CAP / 16, c->command_ms) == 0;
+    char path[600], value[32];
+    long number;
+    snprintf(path, sizeof(path), "%s/capacity", c->battery_dir);
+    if (!read_long(path, &number) && number >= 0 && number <= 100)
+        b->capacity = (int)number;
+    snprintf(path, sizeof(path), "%s/status", c->battery_dir);
+    if (!read_small(path, b->status, sizeof(b->status)))
+        b->status[strcspn(b->status, "\n")] = 0;
+    char *info[] = {(char *)c->upower, "-i", (char *)c->upower_device, NULL};
+    size_t start = 0, length = 0;
+    if (section_env(info, NULL, SECTION_CAP / 8, c->command_ms, &start, &length) == 0) {
+        char *text = section_text(start, length);
+        line_value(text, "percentage:", value, sizeof(value));
+        char *end;
+        errno = 0;
+        number = strtol(value, &end, 10);
+        if (end != value && !errno && *end == '%' && number >= 0 && number <= 100)
+            b->upower_pct = (int)number;
+        line_value(text, "state:", b->state, sizeof(b->state));
+    }
+    b->pm_running = pid_of(c, c->battery_pm) > 0;
+    int close = b->capacity >= 0 && b->upower_pct >= 0 && abs(b->capacity - b->upower_pct) <= 2;
+    int known = b->state[0] && strcmp(b->state, "unknown");
+    b->battery_ok = b->unit_active && close && known && b->pm_running;
+    (void)m19_wire_line(tty, c->pace_ms, M19_DEVICE_STEP " T12-battery %s %d %d %s %d", b->battery_ok ? "OK" : "FAIL", b->capacity, b->upower_pct,
+                        token(b->state), b->pm_running);
+}
+
+/* R8: T12-persist. This boot's id goes to persist_path in the tree through a temporary name, the file and its
+ * directory each synced, and is read back. Android's check after the run reads the same file from /data. */
+struct persist {
+    int had, on_disk, written, synced, read_back, persist_ok;
+    char id[40];
+};
+
+static void persist_phase(const struct m19_report *c, int tty, struct persist *p)
+{
+    memset(p, 0, sizeof(*p));
+    (void)m19_wire_line(tty, c->pace_ms, M19_DEVICE_STEP " T12-persist START");
+    char text[64], directory[512], temporary[600], line[64], back[64];
+    if (!read_small(c->boot_id, text, sizeof(text))) {
+        text[strcspn(text, "\n")] = 0;
+        if (strlen(text) == 36 && strspn(text, "0123456789abcdef-") == 36)
+            snprintf(p->id, sizeof(p->id), "%s", text);
+    }
+    snprintf(directory, sizeof(directory), "%s", c->persist_path);
+    char *slash = strrchr(directory, '/');
+    if (p->id[0] && slash && slash != directory) {
+        *slash = 0;
+        p->had = !access(c->persist_path, F_OK);
+        if (mkdir(directory, 0755) && errno != EEXIST)
+            directory[0] = 0;
+        struct statfs fs;
+        p->on_disk = directory[0] && !statfs(directory, &fs) && (unsigned long)fs.f_type == c->persist_fs;
+        int length = snprintf(line, sizeof(line), "M19 R8 %s\n", p->id);
+        snprintf(temporary, sizeof(temporary), "%s.new", c->persist_path);
+        int fd = p->on_disk ? open(temporary, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW, 0644) : -1;
+        if (fd >= 0) {
+            p->written = write(fd, line, (size_t)length) == length;
+            p->synced = !fsync(fd);
+            close(fd);
+        }
+        if (p->written && p->synced && !rename(temporary, c->persist_path)) {
+            int dfd = open(directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+            p->synced = dfd >= 0 && !fsync(dfd);
+            if (dfd >= 0)
+                close(dfd);
+        } else {
+            p->synced = 0;
+        }
+        p->read_back = p->synced && !read_small(c->persist_path, back, sizeof(back)) && !strcmp(back, line);
+    }
+    p->persist_ok = p->on_disk && p->written && p->synced && p->read_back;
+    (void)m19_wire_line(tty, c->pace_ms, M19_DEVICE_STEP " T12-persist %s %d %d %d %d", p->persist_ok ? "OK" : "FAIL", p->on_disk, p->written,
+                        p->synced, p->read_back);
+}
+
+/* R8: T12-media, once the CE key is in. media_view must be a read-only mount listing what ce_android lists, and the
+ * first JPEG or PNG a bounded walk meets must start with its format's bytes. No name is printed. */
+struct media {
+    int mounted_ro, entries, same, walked, kind_ok, media_ok;
+    char kind[8];
+};
+
+/* 1 for a JPEG or PNG that reads as one, 0 for one that does not, -1 for any other file. */
+static int media_magic(const char *path, char *kind, size_t room)
+{
+    const char *dot = strrchr(path, '/');
+    dot = strrchr(dot ? dot : path, '.');
+    int jpeg = dot && (!strcasecmp(dot, ".jpg") || !strcasecmp(dot, ".jpeg")), png = dot && !strcasecmp(dot, ".png");
+    if (!jpeg && !png)
+        return -1;
+    snprintf(kind, room, "%s", jpeg ? "jpeg" : "png");
+    unsigned char head[8];
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    if (fd < 0)
+        return 0;
+    ssize_t n = read(fd, head, sizeof(head));
+    close(fd);
+    if (jpeg)
+        return n >= 3 && head[0] == 0xff && head[1] == 0xd8 && head[2] == 0xff;
+    return n == 8 && !memcmp(head, "\x89PNG\r\n\x1a\n", 8);
+}
+
+static int media_walk(const char *directory, unsigned depth, unsigned *budget, char *kind, size_t room)
+{
+    DIR *dir = opendir(directory);
+    if (!dir)
+        return -1;
+    int result = -1;
+    struct dirent *entry;
+    while (result < 0 && *budget && (entry = readdir(dir))) {
+        if (entry->d_name[0] == '.')
+            continue;
+        (*budget)--;
+        char path[4096];
+        struct stat st;
+        if (snprintf(path, sizeof(path), "%s/%s", directory, entry->d_name) >= (int)sizeof(path) || lstat(path, &st))
+            continue;
+        if (S_ISREG(st.st_mode))
+            result = media_magic(path, kind, room);
+        else if (S_ISDIR(st.st_mode) && depth > 1)
+            result = media_walk(path, depth - 1, budget, kind, room);
+    }
+    closedir(dir);
+    return result;
+}
+
+static int mounted_ro(const char *mountinfo, const char *point)
+{
+    FILE *file = fopen(mountinfo, "re");
+    if (!file)
+        return 0;
+    char line[4096];
+    int found = 0, ro = 1;
+    while (fgets(line, sizeof(line), file)) {
+        char *field[8];
+        int count = 0;
+        for (char *token = strtok(line, " \n"); token && count < 8; token = strtok(NULL, " \n"))
+            field[count++] = token;
+        if (count < 6 || strcmp(field[4], point))
+            continue;
+        found = 1;
+        ro &= starts_ro(field[5]);
+    }
+    fclose(file);
+    return found && ro;
+}
+
+static int count_entries(const char *path)
+{
+    DIR *directory = opendir(path);
+    if (!directory)
+        return -1;
+    int entries = 0;
+    for (struct dirent *entry; (entry = readdir(directory));)
+        entries += strcmp(entry->d_name, ".") && strcmp(entry->d_name, "..");
+    closedir(directory);
+    return entries;
+}
+
+static void media_phase(const struct m19_report *c, int tty, int ce_entries, struct media *m)
+{
+    memset(m, 0, sizeof(*m));
+    snprintf(m->kind, sizeof(m->kind), "none");
+    (void)m19_wire_line(tty, c->pace_ms, M19_DEVICE_STEP " T12-media START");
+    m->mounted_ro = mounted_ro(c->mountinfo, c->media_view);
+    m->entries = count_entries(c->media_view);
+    m->same = m->entries >= 0 && m->entries == ce_entries;
+    unsigned budget = c->media_walk;
+    int found = media_walk(c->media_view, c->media_depth, &budget, m->kind, sizeof(m->kind));
+    m->walked = (int)(c->media_walk - budget);
+    m->kind_ok = found == 1;
+    m->media_ok = m->mounted_ro && m->same && m->kind_ok;
+    (void)m19_wire_line(tty, c->pace_ms, M19_DEVICE_STEP " T12-media %s %d %d %s", m->media_ok ? "OK" : "FAIL", m->mounted_ro, m->entries,
+                        m->kind);
+}
+
 struct sink {
     int unit_rc, report_seen, streaming, chord_ok, holder_alive, holder_fds, private_clean, held_empty, pulse_unit_rc, pulse_sink,
         pulse_default, tone_rc;
@@ -2266,11 +2668,26 @@ int m19_report_main(const struct m19_report *c)
         wifi_phase(c, tty, &w);
     if (c->audio && c->sink_unit && (!c->desktop || d.x_ok))
         sink_phase(c, tty, &k);
+    /* R8: the battery on the panel and this boot's id kept in the tree, before the PIN. */
+    struct battery b;
+    struct persist p;
+    memset(&b, 0, sizeof(b));
+    memset(&p, 0, sizeof(p));
+    if (c->upower && (!c->desktop || d.x_ok))
+        battery_phase(c, tty, &b);
+    if (c->persist_path)
+        persist_phase(c, tty, &p);
     /* R7: the owner's PIN, last, once everything else is judged. */
     struct ce e;
     memset(&e, 0, sizeof(e));
     if (c->ce && (!c->desktop || d.x_ok))
         ce_phase(c, tty, &e);
+    /* R8: the owner's storage where the file manager lists it, once its names and contents decrypt. */
+    struct media m;
+    memset(&m, 0, sizeof(m));
+    snprintf(m.kind, sizeof(m.kind), "none");
+    if (c->media_view && e.ce_ok)
+        media_phase(c, tty, e.entries, &m);
 
     char exe[256];
     ssize_t n = readlink(c->proc1_exe, exe, sizeof(exe) - 1);
@@ -2295,10 +2712,13 @@ int m19_report_main(const struct m19_report *c)
     (void)section(units, SECTION_CAP, c->command_ms);
 
     int writes_ok, ro_ok;
-    check_blocks(c->block, &writes_ok, &ro_ok);
+    if (c->data_rw)
+        check_blocks_rw(c, &writes_ok, &ro_ok);
+    else
+        check_blocks(c->block, &writes_ok, &ro_ok);
     addf("M19 mountinfo\n");
     (void)add_file(c->mountinfo, SECTION_CAP);
-    int mounts_ok = check_mounts(c->mountinfo);
+    int mounts_ok = check_mounts(c->mountinfo, (int)c->data_rw);
 
     addf("M19 kernel log\n");
     size_t kernel = used;
@@ -2434,8 +2854,24 @@ int m19_report_main(const struct m19_report *c)
         addf("M19 R7 ce unit_rc=%d result_seen=%d status=%s entry_seen=%d entries=%d waited_ms=%ld ce_ok=%d\n", e.unit_rc, e.result_seen,
              e.status[0] ? e.status : "none", e.entry_seen, e.entries, e.waited_ms, e.ce_ok);
     }
+    int battery_ok = 1, persist_ok = 1, media_ok = 1;
+    if (c->upower) {
+        battery_ok = b.battery_ok;
+        addf("M19 R8 battery unit=%d capacity=%d status=%s upower=%d state=%s pm=%d battery_ok=%d\n", b.unit_active, b.capacity, token(b.status),
+             b.upower_pct, token(b.state), b.pm_running, b.battery_ok);
+    }
+    if (c->persist_path) {
+        persist_ok = p.persist_ok;
+        addf("M19 R8 persist had=%d on_disk=%d written=%d synced=%d read_back=%d id=%s persist_ok=%d\n", p.had, p.on_disk, p.written, p.synced,
+             p.read_back, p.id[0] ? p.id : "none", p.persist_ok);
+    }
+    if (c->media_view) {
+        media_ok = m.media_ok;
+        addf("M19 R8 media mounted_ro=%d entries=%d same=%d walked=%d kind=%s media_ok=%d\n", m.mounted_ro, m.entries, m.same, m.walked, m.kind,
+             m.media_ok);
+    }
     int all_ok = init_ok && state_ok && targets_ok && writes_ok && ro_ok && mounts_ok && !write_warning && desktop_ok && gpu_ok && audio_ok &&
-                 wifi_ok && ce_ok;
+                 wifi_ok && ce_ok && battery_ok && persist_ok && media_ok;
     addf("M19 R2 verdict init=%d state=%s targets=%d writes=%d read_only=%d mounts=%d write_warning=%d all_ok=%d\n", init_ok, state, targets_ok,
          writes_ok, ro_ok, mounts_ok, write_warning, all_ok);
 

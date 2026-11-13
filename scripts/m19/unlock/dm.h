@@ -14,6 +14,8 @@ struct m19_dm_real {
 };
 
 extern const struct m19_dm_ops m19_dm_real_ops;
+/* R8 only: the same table, read-write. */
+extern const struct m19_dm_ops m19_dm_real_rw_ops;
 
 #ifdef __cplusplus
 }

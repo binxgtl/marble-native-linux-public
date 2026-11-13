@@ -1,0 +1,192 @@
+#!/bin/busybox sh
+# T9 for R8 (docs/m19-r8.md): the root systemd will run on is the tree itself, read-write on the read-write /data, so
+# what the owner installs and saves stays. M19 writes nothing into it:
+#  - M19's units, masks, drop-ins and settings go to the new root's /run, which is RAM. systemd's
+#    /run/systemd/system.control comes before /etc/systemd/system, so its masks and default target win; every other
+#    file goes where the tree's /etc holds no file of the same name, which this step checks.
+#  - Three directories of /etc are RAM for the boot: NetworkManager's connections, so the Wi-Fi profile never reaches
+#    the disk, and udev's rules and PulseAudio's default.pa.d, copies, so T9-sound's mask and the sink's script stay in
+#    RAM.
+#  - The tree's machine-id must be present and SELinux's config absent, so systemd neither commits an ID nor applies
+#    first-boot presets to the writable /etc.
+# Every block device is set read-only first, except the userdata partition and the dm device T2 made from it. The new
+# /dev holds a short list of character nodes and no block node at all.
+set -eu
+R=${M19_ROOT:-}
+BB=${M19_BB:-/bin/busybox}
+fail() { printf 'M19 T9 failed: %s\n' "$*" >&2 || :; exit 1; }
+# Production runs with an empty R, the real root. A test root must be absolute and not a link.
+case "$R" in ''|/*) ;; *) fail root;; esac
+[ -z "$R" ] || [ ! -L "$R" ] || fail root
+. "$R/m19/pins"
+plan=$R/m19/r8
+src=$R/m19-data/ubuntu
+new=$R/newroot
+safe_dir() { [ ! -L "$1" ] && [ -d "$1" ]; }
+# Checks every component below $1, so no mount can follow a link out of the new root.
+safe_path() {
+ at=$1; rest=${2#/}
+ [ -n "$rest" ] || return 1
+ while [ -n "$rest" ]; do
+  part=${rest%%/*}
+  case "$part" in ''|.|..) return 1;; esac
+  at=$at/$part
+  safe_dir "$at" || return 1
+  case "$rest" in */*) rest=${rest#*/};; *) rest=;; esac
+ done
+}
+number_ok() { case "$1" in *[!0-9:]*|:*|*:|*:*:*|'') return 1;; esac; }
+mounted() { $BB awk -v point="$1" '$5 == point { o = $6 } END { print o }' "$R/proc/self/mountinfo"; }
+
+safe_dir "$R/m19-data" && safe_dir "$src" || fail rootfs
+[ ! -e "$new" ] && [ ! -L "$new" ] || fail newroot-exists
+line=$($BB cat "$R/run/m19/unlock.line") || fail unlock-line
+case "$line" in "M19_UNLOCK status=OK "*" table=rw dev="*) ;; *) fail unlock-table;; esac
+data_number=${line##*dev=}
+number_ok "$data_number" || fail data-number
+
+# 1. Every block device read-only, through nodes in the old /dev, except the userdata partition and its dm device.
+#    Ubuntu never gets a block node.
+blocks=0
+kept=
+for entry in "$R"/sys/class/block/*; do
+ [ -e "$entry/dev" ] || continue
+ name=${entry##*/}
+ case "$name" in ''|*[!A-Za-z0-9._-]*) fail "block name";; esac
+ number=$($BB cat "$entry/dev") || fail "block number $name"
+ number_ok "$number" || fail "block number $name"
+ if [ "$number" = "$data_number" ] || $BB grep -qx PARTNAME=userdata "$entry/uevent" 2>/dev/null; then
+  kept="$kept $name"
+  continue
+ fi
+ node=$R/dev/m19-ro-$name
+ $BB mknod -m 400 "$node" b "${number%%:*}" "${number#*:}" || fail "block node $name"
+ $BB blockdev --setro "$node" || fail "set read-only $name"
+ [ "$($BB blockdev --getro "$node")" = 1 ] || fail "read-only check $name"
+ blocks=$((blocks+1))
+done
+[ "$blocks" -gt 0 ] || fail no-block-device
+set -- $kept
+writable=$#
+[ "$writable" -eq 2 ] || fail "writable devices$kept"
+
+# 2. / is the tree, read-write, checked in mountinfo.
+$BB mkdir -m 755 "$new" || fail newroot
+$BB mount -o bind "$src" "$new" || fail root-bind
+options=$(mounted "$new") || fail mountinfo
+case "$options" in rw|rw,*) ;; *) fail "root-read-write-check $options";; esac
+
+# 3. The tree's own state, read only.
+safe_path "$new" /etc || fail etc
+[ -f "$new/etc/machine-id" ] && [ ! -L "$new/etc/machine-id" ] && [ -s "$new/etc/machine-id" ] || fail machine-id
+! $BB grep -qx uninitialized "$new/etc/machine-id" || fail machine-id
+[ ! -e "$new/etc/selinux/config" ] && [ ! -L "$new/etc/selinux/config" ] || fail selinux-config
+fstab=0
+[ ! -f "$new/etc/fstab" ] || fstab=$($BB grep -cvE '^[[:space:]]*(#|$)' "$new/etc/fstab" || :)
+default=$($BB readlink "$new/etc/systemd/system/default.target" || echo none)
+
+# 4. RAM where M19 writes: /run first, then the rest of the plan's list. Each mount point must already exist, and a
+#    "copy" directory gets the tree's files back on top.
+tmpfs=0
+copied=0
+ram=
+while read -r point mode size kind; do
+ case "$point" in ''|'#'*) continue;; esac
+ case "$point" in /*) ;; *) fail "tmpfs path $point";; esac
+ case "$point" in *[!A-Za-z0-9/._-]*) fail "tmpfs path $point";; esac
+ case "$mode" in [0-7][0-7][0-7][0-7]) ;; *) fail "tmpfs mode $point";; esac
+ case "$size" in [1-9]*m) ;; *) fail "tmpfs size $point";; esac
+ case "$kind" in ''|empty|copy) ;; *) fail "tmpfs kind $point";; esac
+ [ "$tmpfs" -gt 0 ] || [ "$point" = /run ] || fail "tmpfs order $point"
+ safe_path "$new" "$point" || fail "mount point $point"
+ $BB mount -t tmpfs -o "mode=$mode,nosuid,nodev,size=$size" tmpfs "$new$point" || fail "tmpfs $point"
+ if [ "$kind" = copy ]; then
+  $BB cp -a "$src$point/." "$new$point/" || fail "copy $point"
+  copied=$((copied+1))
+ fi
+ ram="$ram $point "
+ tmpfs=$((tmpfs+1))
+done <"$plan/tmpfs"
+
+# 5. M19's files. Under /run, none may have a namesake in the tree's /etc that would outrank it; under /etc, only into
+#    the RAM directories just made.
+files=0
+while read -r file; do
+ case "$file" in ''|'#'*) continue;; esac
+ case "$file" in /*|.*|*/.*|*[!A-Za-z0-9@._/-]*) fail "plan file $file";; esac
+ case "$file" in
+  run/systemd/system.control/*|run/m19/*) ;;
+  run/*)
+   twin=$new/etc/${file#run/}
+   [ ! -e "$twin" ] && [ ! -L "$twin" ] || fail "etc outranks $file";;
+  etc/*)
+   case "$ram" in *" /${file%/*} "*) ;; *) fail "etc file outside RAM $file";; esac;;
+  *) fail "plan file $file";;
+ esac
+ $BB mkdir -p "$new/${file%/*}" || fail "plan directory $file"
+ [ ! -e "$new/$file" ] && [ ! -L "$new/$file" ] || fail "plan file exists $file"
+ $BB cp "$plan/root/$file" "$new/$file" || fail "plan file $file"
+ $BB chmod 644 "$new/$file" || fail "plan file $file"
+ files=$((files+1))
+done <"$plan/files"
+control=$new/run/systemd/system.control
+$BB mkdir -p "$control" "$new/run/systemd/system-generators" || fail unit-directories
+masks=0
+while read -r unit; do
+ case "$unit" in ''|'#'*) continue;; esac
+ case "$unit" in .*|*[!A-Za-z0-9@._:-]*) fail "unit name $unit";; esac
+ case "$unit" in *.service|*.socket|*.target|*.timer|*.path|*.mount) ;; *) fail "unit type $unit";; esac
+ [ ! -e "$control/$unit" ] && [ ! -L "$control/$unit" ] || fail "mask over plan unit $unit"
+ $BB ln -s /dev/null "$control/$unit" || fail "mask $unit"
+ masks=$((masks+1))
+done <"$plan/masks"
+generators=0
+while read -r name; do
+ case "$name" in ''|'#'*) continue;; esac
+ case "$name" in .*|*[!A-Za-z0-9._-]*) fail "generator name $name";; esac
+ [ ! -e "$new/etc/systemd/system-generators/$name" ] && [ ! -L "$new/etc/systemd/system-generators/$name" ] || fail "etc generator $name"
+ $BB ln -s /dev/null "$new/run/systemd/system-generators/$name" || fail "mask generator $name"
+ generators=$((generators+1))
+done <"$plan/generators"
+default_unit=$($BB cat "$plan/default") || fail default-target
+case "$default_unit" in m19-r[0-9].target) ;; *) fail "default target $default_unit";; esac
+[ -f "$control/$default_unit" ] && [ ! -L "$control/$default_unit" ] || fail "default target missing $default_unit"
+$BB ln -s "$default_unit" "$control/default.target" || fail default-target
+
+# 6. /dev with the listed character nodes only, then proc and sysfs.
+safe_path "$new" /dev && safe_path "$new" /proc && safe_path "$new" /sys || fail api-mount-points
+$BB mount -t tmpfs -o mode=0755,nosuid,noexec,size=1m tmpfs "$new/dev" || fail dev-tmpfs
+nodes=0
+while read -r name class mode; do
+ case "$name" in ''|'#'*) continue;; esac
+ case "$name" in /*|.*|*/.*|*[!a-z0-9/A-Z_-]*) fail "node name $name";; esac
+ case "$class" in */*/*|*[!a-z0-9/A-Z_-]*|/*|*/) fail "node class $name";; esac
+ case "$class" in mem/*|tty/*|drm/*) ;; *) fail "node class $name";; esac
+ case "$mode" in [0-7][0-7][0-7]) ;; *) fail "node mode $name";; esac
+ number=$($BB cat "$R/sys/class/$class/dev") || fail "char number $name"
+ number_ok "$number" || fail "char number $name"
+ case "$name" in */*) $BB mkdir -p "$new/dev/${name%/*}" || fail "node directory $name";; esac
+ $BB mknod -m "$mode" "$new/dev/$name" c "${number%%:*}" "${number#*:}" || fail "char node $name"
+ nodes=$((nodes+1))
+done <"$plan/nodes"
+$BB mount -t proc -o nosuid,nodev,noexec proc "$new/proc" || fail proc
+$BB mount -t sysfs -o nosuid,nodev,noexec sysfs "$new/sys" || fail sysfs
+
+# 7. The reporter is this PID 1's own binary; the display paints its verdict.
+$BB mkdir -p "$new/run/m19" || fail run-m19
+$BB cp "$R/sbin/m19-pid1" "$new/run/m19/m19-report" || fail reporter
+$BB cp "$R/sbin/m16-display" "$new/run/m19/m16-display" || fail display
+$BB chmod 755 "$new/run/m19/m19-report" "$new/run/m19/m16-display" || fail run-modes
+
+# 8. The init that PID 1 will exec is the one T6 hashed, seen through the new root: an upgraded systemd stops here.
+hash=$($BB sha256sum "$new/$ROOTFS_PROBE") || fail probe-read
+[ "${hash%% *}" = "$ROOTFS_PROBE_SHA256" ] || fail probe-hash
+for tool in usr/bin/systemctl usr/bin/journalctl usr/bin/systemd-analyze; do
+ [ -x "$new/$tool" ] || fail "missing $tool"
+done
+printf 'M19 T9 new root: read-write blocks-read-only=%s writable=%s machine-id=present fstab-lines=%s selinux-config=absent default-was=%s\n' \
+ "$blocks" "$writable" "$fstab" "$default" >&2
+printf 'M19 T9 masks=%s generators=%s files=%s tmpfs=%s copied=%s nodes=%s\n' "$masks" "$generators" "$files" "$tmpfs" "$copied" "$nodes" >&2
+wants=$($BB ls "$new/etc/systemd/system/multi-user.target.wants" 2>/dev/null | $BB tr '\n' ' ' || :)
+printf 'M19 T9 multi-user wants: %s\n' "$wants" >&2
+exit 0

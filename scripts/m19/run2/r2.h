@@ -116,6 +116,27 @@ struct m19_report {
      * ce_entry has its real name only once the CE key is added. Counts only; no entry name is printed. */
     unsigned ce, ce_ms;
     const char *ce_unit, *ce_result, *ce_android, *ce_entry;
+    /* R8, when data_rw is set (docs/m19-r8.md): /data is read-write and / is the tree on it. Only the partition named
+     * data_part (PARTNAME in its uevent) and the dm device named data_dm may be writable and written; the disk holding
+     * that partition may count its writes, read-only itself, and every other partition on it must count none. Every
+     * other disk, partition and dm device stays read-only and unwritten, and no discard counts on the data path. / must
+     * be the f2fs root, read-write; every other mount of a disk filesystem is read-only at the mount. */
+    unsigned data_rw;
+    const char *data_dm, *data_part;
+    /* R8, when persist_path is set: T12-persist writes this boot's id (read from boot_id) there through a temporary
+     * name, each step synced, reads it back, and checks the directory's filesystem is persist_fs (statfs's f_type).
+     * Android's check after the run reads the same file from /data. The reporter's only write. */
+    const char *persist_path, *boot_id;
+    unsigned long persist_fs;
+    /* R8, when upower is set: T12-battery. battery_unit must be active (the session started it), upower must show
+     * upower_device at the percentage battery_dir/capacity holds, within two points, in a known state, and the power
+     * manager (battery_pm, its comm) must run. */
+    const char *upower, *upower_device, *battery_unit, *battery_dir, *battery_pm;
+    /* R8, when media_view is set: T12-media, after T12-ce. media_view must be a read-only mount listing as many entries as
+     * ce_android, and the first JPEG or PNG a bounded walk meets (media_walk entries, media_depth levels) must start with
+     * its format's bytes: names and contents both decrypt. Counts and the format only; no name is printed. */
+    const char *media_view;
+    unsigned media_walk, media_depth;
 };
 
 /* R3's guard, a service of its own beside the desktop. It stops the desktop units and paints YELLOW

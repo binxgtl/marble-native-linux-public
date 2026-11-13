@@ -165,6 +165,11 @@ jobs:
       - name: R7 keypad logic, normal and ASan/UBSan, and the binary in Xvfb tapped through XTEST (no device, PIN or key)
         timeout-minutes: 6
         run: bash scripts/m19/run7/test.sh artifacts/m19/${{ runner.arch }}/run7
+      - name: R8 read-write steps (T2-unlock, T5-mount, T8-writes, T9-root, T9-desktop, T9-ce) on synthetic trees, and systemd's search path (no device)
+        timeout-minutes: 6
+        run: bash scripts/m19/run8/test.sh artifacts/m19/${{ runner.arch }}/run8
+        env:
+          M19_MUTANTS: '0'
       - name: M11 Run12's PD mapper, from its pinned linux-msm sources, static and built twice (ARM64, no device)
         if: runner.arch == 'ARM64'
         run: |
@@ -219,6 +224,8 @@ jobs:
             artifacts/m19/**/pid6-b
             artifacts/m19/**/pid7-a
             artifacts/m19/**/pid7-b
+            artifacts/m19/**/pid8-a
+            artifacts/m19/**/pid8-b
             artifacts/m19/**/m19-wifi-a
             artifacts/m19/**/m19-wifi-b
             artifacts/m19/**/m19-sink-a
@@ -280,6 +287,10 @@ jobs:
             needs_probes: false
           - suite: ce
             script: scripts/m19/ce/mutate.py
+            args: ''
+            needs_probes: false
+          - suite: run8
+            script: scripts/m19/run8/mutate.py
             args: ''
             needs_probes: false
     runs-on: ubuntu-24.04

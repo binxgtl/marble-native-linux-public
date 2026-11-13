@@ -1,0 +1,71 @@
+#!/bin/busybox sh
+# T8 for R8 (docs/m19-r8.md): the block layer's own counters, as R1's T8, with /data read-write. Only the userdata
+# partition, the disk that holds it and the dm device T2 made from it may count writes. metadata, recovery_a, ssd and
+# every other partition, disk and dm device must count none. The data table has no discard, so no discard may count
+# anywhere. RPMB is not a block disk, so this cannot see it. It runs even after an earlier step failed.
+set -u
+R=${M19_ROOT:-}
+BB=${M19_BB:-/bin/busybox}
+fail=0
+counts() {
+ set -- $($BB cat "$1/stat")
+ writes=$5 sectors=$7 discards=${12:-0} discarded=${14:-0}
+ printf 'M19 T8 %s writes=%s sectors=%s discards=%s discarded=%s\n' "$2" "$writes" "$sectors" "$discards" "$discarded" >&2
+}
+zero() { [ "$writes" = 0 ] && [ "$sectors" = 0 ] && [ "$discards" = 0 ] && [ "$discarded" = 0 ] || fail=1; }
+nodiscard() { [ "$discards" = 0 ] && [ "$discarded" = 0 ] || fail=1; }
+data=
+for name in userdata metadata recovery_a ssd; do
+ found=
+ for entry in "$R"/sys/class/block/*; do
+  if $BB grep -qx "PARTNAME=$name" "$entry/uevent" 2>/dev/null; then
+   [ -z "$found" ] || { printf 'M19 T8 duplicate partition %s\n' "$name" >&2; fail=1; }
+   found=$entry
+  fi
+ done
+ if [ -z "$found" ]; then
+  printf 'M19 T8 no partition %s\n' "$name" >&2
+  fail=1
+  continue
+ fi
+ counts "$found" "$name"
+ if [ "$name" = userdata ]; then
+  data=${found##*/}
+  nodiscard
+ else
+  zero
+ fi
+done
+seen=
+for disk in "$R"/sys/block/sd*; do
+ [ -e "$disk/stat" ] || continue
+ seen=1
+ counts "$disk" "${disk##*/}"
+ if [ -n "$data" ] && [ -e "$disk/$data/stat" ]; then
+  # The data disk: its total holds the data partition's writes, and every other partition on it counts none.
+  nodiscard
+  for part in "$disk/${disk##*/}"*; do
+   [ -e "$part/stat" ] || continue
+   [ "${part##*/}" = "$data" ] && continue
+   counts "$part" "${part##*/}"
+   zero
+  done
+ else
+  zero
+ fi
+done
+[ -n "$seen" ] || { printf 'M19 T8 no disk\n' >&2; fail=1; }
+dm=0
+for device in "$R"/sys/block/dm-*; do
+ [ -e "$device/stat" ] || continue
+ name=$($BB cat "$device/dm/name" 2>/dev/null) || name=unknown
+ counts "$device" "${device##*/}:$name"
+ if [ "$name" = m19-userdata ]; then
+  dm=$((dm+1))
+  nodiscard
+ else
+  zero
+ fi
+done
+[ "$dm" = 1 ] || { printf 'M19 T8 data dm devices %s\n' "$dm" >&2; fail=1; }
+exit "$fail"

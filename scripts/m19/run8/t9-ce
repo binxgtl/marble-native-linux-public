@@ -1,0 +1,44 @@
+#!/bin/busybox sh
+# T9-ce for R8 (docs/m19-r8.md): R7's, with user 0's storage also at /media/Android, read-only, where the file manager
+# lists it. After T9-root built the new root:
+# - Android's /data/media, read-only, at the session's /run/m19/android (root only), and user 0's at /media/Android:
+#   their names stay encrypted until the owner's PIN adds the CE key;
+# - the keypad, for the reporter's T12-ce;
+# - the CE broker, inside the TEE island, its socket in the session's /run/m19/ce. The broker's root is the island,
+#   which the hand-off spares.
+set -eu
+R=${M19_ROOT:-}
+BB=${M19_BB:-/bin/busybox}
+fail() { printf 'M19 T9-ce failed: %s\n' "$*" >&2 || :; exit 1; }
+new=$R/newroot
+[ -d "$new/run/m19" ] && [ ! -L "$new/run/m19" ] || fail run-m19
+[ -d "$R/m19-data/media" ] && [ ! -L "$R/m19-data/media" ] || fail media
+for dir in "$new/run/m19/android" "$new/run/m19/ce" "$R/tee/m19-ce"; do
+ [ ! -e "$dir" ] && [ ! -L "$dir" ] || fail "exists ${dir##*/}"
+ $BB mkdir -m 0700 "$dir" || fail "dir ${dir##*/}"
+done
+$BB mount -o bind "$R/m19-data/media" "$new/run/m19/android" || fail media-bind
+$BB mount -o remount,bind,ro "$new/run/m19/android" || fail media-read-only
+options=$($BB awk -v point="$new/run/m19/android" '$5 == point { o = $6 } END { print o }' "$R/proc/self/mountinfo") || fail mountinfo
+case "$options" in ro|ro,*) ;; *) fail "media-read-only-check $options";; esac
+# /media is RAM (T9-root), so the mount point is too.
+[ -d "$R/m19-data/media/0" ] && [ ! -L "$R/m19-data/media/0" ] || fail user0
+[ -d "$new/media" ] && [ ! -L "$new/media" ] && [ ! -e "$new/media/Android" ] && [ ! -L "$new/media/Android" ] || fail view-point
+$BB mkdir -m 0755 "$new/media/Android" || fail view-dir
+$BB mount -o bind "$R/m19-data/media/0" "$new/media/Android" || fail view-bind
+$BB mount -o remount,bind,ro "$new/media/Android" || fail view-read-only
+options=$($BB awk -v point="$new/media/Android" '$5 == point { o = $6 } END { print o }' "$R/proc/self/mountinfo") || fail mountinfo
+case "$options" in ro|ro,*) ;; *) fail "view-read-only-check $options";; esac
+$BB cp "$R/m19/m19-ce-prompt" "$new/run/m19/m19-ce-prompt" || fail prompt
+$BB chmod 755 "$new/run/m19/m19-ce-prompt" || fail prompt-mode
+$BB mount -o bind "$new/run/m19/ce" "$R/tee/m19-ce" || fail socket-bind
+LD_LIBRARY_PATH=/system/lib64:/vendor/lib64/hw $BB setsid $BB chroot "$R/tee" /m19/m19-ce broker /m19-ce/ce.sock \
+ </dev/null >"$R/tee/tmp/m19/ce-broker.log" 2>&1 &
+i=0
+while [ ! -S "$new/run/m19/ce/ce.sock" ]; do
+ [ "$i" -lt 100 ] || fail broker
+ $BB sleep 0.1
+ i=$((i+1))
+done
+printf 'M19 T9-ce broker listening, media read-only, view /media/Android\n' >&2
+exit 0

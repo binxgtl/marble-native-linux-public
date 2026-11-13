@@ -273,6 +273,34 @@ static int report_mode(char **argv)
         c.ce_android = ce[1];
         c.ce_entry = "Android";
     }
+    /* R8: the read-write verdict, T12-persist into a fake tree, T12-battery on a fake upower, T12-media on a fake view. */
+    static char r8[6][4200];
+    const char *r8_names[] = {"tree/var/lib/m19/persist", "boot_id", "test/upower", "battery", "proc-battery", "media-android"};
+    for (unsigned i = 0; i < 6; i++)
+        snprintf(r8[i], sizeof(r8[i]), "%s/%s", root, r8_names[i]);
+    if (getenv("M19_TEST_RW")) {
+        c.data_rw = 1;
+        c.data_dm = "m19-userdata";
+        c.data_part = "userdata";
+    }
+    if (getenv("M19_TEST_PERSIST")) {
+        c.persist_path = r8[0];
+        c.boot_id = r8[1];
+        c.persist_fs = strtoul(getenv("M19_TEST_PERSIST"), NULL, 16);
+    }
+    if (getenv("M19_TEST_BATTERY")) {
+        c.upower = r8[2];
+        c.upower_device = "/org/freedesktop/UPower/devices/battery_battery";
+        c.battery_unit = "upower.service";
+        c.battery_dir = r8[3];
+        c.battery_pm = "xfce4-power-man";
+        c.proc = r8[4];
+    }
+    if (getenv("M19_TEST_MEDIA")) {
+        c.media_view = r8[5];
+        c.media_walk = (unsigned)strtoul(getenv("M19_TEST_MEDIA"), NULL, 10);
+        c.media_depth = getenv("M19_TEST_MEDIA_DEPTH") ? (unsigned)strtoul(getenv("M19_TEST_MEDIA_DEPTH"), NULL, 10) : 6;
+    }
     return m19_report_main(&c);
 }
 

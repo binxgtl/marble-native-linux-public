@@ -24,6 +24,7 @@ import r4plan  # noqa: E402
 import r5plan  # noqa: E402
 import r6plan  # noqa: E402
 import r7plan  # noqa: E402
+import r8plan  # noqa: E402
 import rootfs  # noqa: E402
 
 ARGS = None
@@ -231,7 +232,7 @@ SYSTEMCTL = '''#!/bin/sh
 dir=$(dirname "$0")
 case "$1" in
  is-system-running) cat "$dir/state"; exit 0;;
- is-active) echo active; echo active; exit "${M19_ACTIVE_RC:-0}";;
+ is-active) if [ "$2" = "${M19_INACTIVE:-@@}" ]; then echo inactive; exit 3; fi; echo active; echo active; exit "${M19_ACTIVE_RC:-0}";;
  start)
   echo "start $2" >> "$dir/started"
   # R6b: the session's PulseAudio comes up when its unit starts; the unit's rc is judged on its own.
@@ -763,6 +764,278 @@ class CeReport(ReportBase):
         self.assertEqual((e['result_seen'], e['status'], e['ce_ok']), ('0', 'none', '0'))
 
 
+MOUNTINFO_RW = ('22 1 254:5 /ubuntu / rw,noatime - f2fs /dev/m19-dm rw,lazytime\n'
+                '23 22 0:5 / /dev rw,nosuid - tmpfs tmpfs rw,mode=755\n'
+                '24 22 0:22 / /proc rw - proc proc rw\n'
+                '25 22 0:30 / /run rw,nosuid,nodev - tmpfs tmpfs rw\n'
+                '27 22 254:5 /media /run/m19/android ro,nosuid - f2fs /dev/m19-dm rw,lazytime\n'
+                '28 22 254:5 /media/0 /media/Android ro,nosuid - f2fs /dev/m19-dm rw,lazytime\n')
+
+
+def block_stat(path, writes=0, sectors=0, discards=0, discarded=0):
+    values = ['5'] * 4 + ['0'] * 13
+    values[4], values[6], values[11], values[13] = str(writes), str(sectors), str(discards), str(discarded)
+    path.write_text(' '.join(values) + '\n')
+
+
+class RwReport(ReportBase):
+    """R8: /data read-write. Only the userdata partition, its dm device and its disk may be written; / is the f2fs root
+    read-write, and every other disk filesystem mount is read-only at the mount."""
+
+    def setUp(self):
+        super().setUp()
+        block = self.root / 'block'
+        (block / 'sda/sda33/uevent').write_text('MAJOR=8\nMINOR=33\nPARTNAME=userdata\n')
+        (block / 'sda/sda1/uevent').write_text('PARTNAME=ssd\n')
+        (block / 'sdb/sdb1/uevent').write_text('PARTNAME=metadata\n')
+        for name in ('sda', 'sda/sda33', 'dm-0'):
+            block_stat(block / name / 'stat', 9, 72)
+        block_stat(block / 'sda/sda1/stat')
+        for name in ('sda/sda33', 'dm-0'):
+            (block / name / 'ro').write_text('0\n')
+        (block / 'dm-0/dm').mkdir()
+        (block / 'dm-0/dm/name').write_text('m19-userdata\n')
+        (block / 'dm-1/dm').mkdir(parents=True)
+        (block / 'dm-1/dm/name').write_text('other\n')
+        block_stat(block / 'dm-1/stat')
+        (block / 'dm-1/ro').write_text('1\n')
+        (self.root / 'mountinfo').write_text(MOUNTINFO_RW)
+
+    def run_rw(self, env=None):
+        data, colour = self.run_report(env=dict({'M19_TEST_RW': '1'}, **(env or {})))
+        fields, log, steps = self.parse(data)
+        return log, self.verdict(log)
+
+    def test_writes_on_the_data_path_pass(self):
+        log, verdict = self.run_rw()
+        self.assertEqual((verdict['writes'], verdict['read_only'], verdict['mounts'], verdict['all_ok']), ('1', '1', '1', '1'))
+        for line in ('M19 R8 block sda data-disk writes=9 sectors=72 discards=0 discarded=0 ro=1', 'M19 R8 block sda33 data writes=9 sectors=72',
+                     'M19 R8 block dm-0 data writes=9', 'M19 R8 block dm-1 other writes=0', 'M19 R8 block sdb disk writes=0'):
+            self.assertIn(line, log)
+        self.assertNotIn('M19 R8 block sda1 ', log)
+        self.assertNotIn('M19 R8 data devices', log)
+
+    def test_r2s_rules_refuse_the_same_tree(self):
+        data, colour = self.run_report()
+        verdict = self.verdict(self.parse(data)[1])
+        self.assertEqual((verdict['writes'], verdict['read_only'], verdict['mounts'], verdict['all_ok']), ('0', '0', '0', '0'))
+
+    def test_each_write_flag_or_mount_outside_the_data_path_fails(self):
+        block = self.root / 'block'
+        cases = (('ssd written', lambda: block_stat(block / 'sda/sda1/stat', 1, 8), 'writes'),
+                 ('other disk written', lambda: block_stat(block / 'sdb/stat', 1, 8), 'writes'),
+                 ('other dm written', lambda: block_stat(block / 'dm-1/stat', 1, 8), 'writes'),
+                 ('data discard', lambda: block_stat(block / 'sda/sda33/stat', 9, 72, 1, 8), 'writes'),
+                 ('disk discard', lambda: block_stat(block / 'sda/stat', 9, 72, 1, 8), 'writes'),
+                 ('dm discard', lambda: block_stat(block / 'dm-0/stat', 9, 72, 0, 8), 'writes'),
+                 ('data dm read-only', lambda: (block / 'dm-0/ro').write_text('1\n'), 'read_only'),
+                 ('data partition read-only', lambda: (block / 'sda/sda33/ro').write_text('1\n'), 'read_only'),
+                 ('other partition writable', lambda: (block / 'sda/sda1/ro').write_text('0\n'), 'read_only'),
+                 ('other disk partition writable', lambda: (block / 'sdb/sdb1/ro').write_text('0\n'), 'read_only'),
+                 ('data disk writable', lambda: (block / 'sda/ro').write_text('0\n'), 'read_only'),
+                 ('other dm writable', lambda: (block / 'dm-1/ro').write_text('0\n'), 'read_only'),
+                 ('unreadable partition', lambda: (block / 'sda/sda1/stat').unlink(), 'writes'),
+                 ('root read-only', lambda: (self.root / 'mountinfo').write_text(MOUNTINFO_RW.replace('/ rw,noatime', '/ ro,noatime')), 'mounts'),
+                 ('root superblock read-only', lambda: (self.root / 'mountinfo').write_text(MOUNTINFO_RW.replace('/dev/m19-dm rw,lazytime\n23', '/dev/m19-dm ro,lazytime\n23')), 'mounts'),
+                 ('view writable', lambda: (self.root / 'mountinfo').write_text(MOUNTINFO_RW.replace('/media/Android ro,nosuid', '/media/Android rw,nosuid')), 'mounts'),
+                 ('other disk filesystem', lambda: (self.root / 'mountinfo').write_text(MOUNTINFO_RW + '29 22 8:2 / /mnt ro - ext4 /dev/sdb2 rw\n'), 'mounts'))
+        for name, change, key in cases:
+            with self.subTest(case=name):
+                self.setUp()
+                block = self.root / 'block'
+                change()
+                log, verdict = self.run_rw()
+                self.assertEqual((verdict[key], verdict['all_ok']), ('0', '0'), name)
+
+    def test_the_data_pair_must_be_found_once(self):
+        for name, change in (('no data dm', lambda: (self.root / 'block/dm-0/dm/name').write_text('other2\n')),
+                             ('two data partitions', lambda: (self.root / 'block/sda/sda1/uevent').write_text('PARTNAME=userdata\n'))):
+            with self.subTest(case=name):
+                self.setUp()
+                change()
+                log, verdict = self.run_rw()
+                self.assertEqual((verdict['writes'], verdict['read_only']), ('0', '0'))
+                self.assertIn('M19 R8 data devices partitions=', log)
+
+
+class PersistReport(ReportBase):
+    """R8 T12-persist: this boot's id into the tree, synced, read back; refused on another filesystem."""
+    BOOT = '0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0'
+
+    def setUp(self):
+        super().setUp()
+        (self.root / 'tree/var/lib').mkdir(parents=True)
+        (self.root / 'boot_id').write_text(self.BOOT + '\n')
+        self.fs = subprocess.check_output(['stat', '-f', '-c', '%t', str(self.root / 'tree/var/lib')]).decode().strip()
+
+    def persist(self, fs=None):
+        data, colour = self.run_report(env={'M19_TEST_PERSIST': fs or self.fs})
+        fields, log, steps = self.parse(data)
+        line = re.search(r'M19 R8 persist (.*)\n', log)
+        return log, dict(item.split('=', 1) for item in line.group(1).split()), steps
+
+    def test_the_id_is_written_synced_and_read_back(self):
+        log, p, steps = self.persist()
+        self.assertEqual(p, {'had': '0', 'on_disk': '1', 'written': '1', 'synced': '1', 'read_back': '1', 'id': self.BOOT, 'persist_ok': '1'})
+        self.assertEqual((self.root / 'tree/var/lib/m19/persist').read_text(), f'M19 R8 {self.BOOT}\n')
+        self.assertFalse((self.root / 'tree/var/lib/m19/persist.new').exists())
+        self.assertEqual((self.root / 'tree/var/lib/m19').stat().st_mode & 0o777, 0o755)
+        self.assertIn('M19STEP T12-persist OK 1 1 1 1', steps)
+        self.assertEqual(self.verdict(log)['all_ok'], '1')
+        (self.root / 'boot_id').write_text(self.BOOT.replace('0f1e', 'aaaa') + '\n')
+        log, p, steps = self.persist()
+        self.assertEqual((p['had'], p['persist_ok']), ('1', '1'))
+        self.assertEqual((self.root / 'tree/var/lib/m19/persist').read_text(), f'M19 R8 {self.BOOT.replace("0f1e", "aaaa")}\n')
+
+    def test_another_filesystem_a_bad_id_or_no_parent_fails_without_writing(self):
+        for name in ('fs', 'id', 'parent', 'linked-temporary'):
+            with self.subTest(case=name):
+                self.setUp()
+                fs = None
+                if name == 'fs':
+                    fs = 'f2f52010' if self.fs != 'f2f52010' else 'ef53'
+                elif name == 'id':
+                    (self.root / 'boot_id').write_text('not-a-uuid\n')
+                elif name == 'parent':
+                    shutil.rmtree(self.root / 'tree/var/lib')
+                else:
+                    (self.root / 'tree/var/lib/m19').mkdir()
+                    os.symlink(self.root / 'elsewhere', self.root / 'tree/var/lib/m19/persist.new')
+                log, p, steps = self.persist(fs)
+                self.assertEqual(p['persist_ok'], '0', name)
+                self.assertEqual(self.verdict(log)['all_ok'], '0')
+                self.assertFalse((self.root / 'tree/var/lib/m19/persist').exists(), name)
+                self.assertFalse((self.root / 'elsewhere').exists(), name)
+                if name == 'id':
+                    self.assertEqual(p['id'], 'none')
+
+
+UPOWER_OUT = ('  native-path:          battery\n  vendor:               unknown\n  power supply:         yes\n  battery\n    present:             yes\n'
+              '    rechargeable:        yes\n    state:               charging\n    warning-level:       none\n    energy:              0 Wh\n'
+              '    percentage:          63%\n    capacity:            71.58%\n')
+UPOWER = '#!/bin/sh\nd=$(dirname "$0")\necho "$*" > "$d/upower.args"\ncat "$d/upower.out"\nexit "${M19_UPOWER_RC:-0}"\n'
+
+
+class BatteryReport(ReportBase):
+    """R8 T12-battery: upower running, its battery at the kernel's percentage, a known state, the power manager running."""
+
+    def setUp(self):
+        super().setUp()
+        (self.test / 'upower').write_text(UPOWER)
+        (self.test / 'upower').chmod(0o755)
+        (self.test / 'upower.out').write_text(UPOWER_OUT)
+        (self.root / 'battery').mkdir()
+        (self.root / 'battery/capacity').write_text('63\n')
+        (self.root / 'battery/status').write_text('Charging\n')
+        (self.root / 'proc-battery/4242').mkdir(parents=True)
+        (self.root / 'proc-battery/4242/comm').write_text('xfce4-power-man\n')
+        (self.root / 'proc-battery/77').mkdir()
+        (self.root / 'proc-battery/77/comm').write_text('Xorg\n')
+
+    def battery(self, env=None):
+        data, colour = self.run_report(env=dict({'M19_TEST_BATTERY': '1'}, **(env or {})))
+        fields, log, steps = self.parse(data)
+        line = re.search(r'M19 R8 battery (.*)\n', log)
+        return log, dict(item.split('=', 1) for item in line.group(1).split()), steps
+
+    def test_the_panels_battery_passes(self):
+        log, b, steps = self.battery()
+        self.assertEqual(b, {'unit': '1', 'capacity': '63', 'status': 'Charging', 'upower': '63', 'state': 'charging', 'pm': '1', 'battery_ok': '1'})
+        self.assertEqual((self.test / 'upower.args').read_text(), '-i /org/freedesktop/UPower/devices/battery_battery\n')
+        self.assertIn('M19STEP T12-battery OK 63 63 charging 1', steps)
+        self.assertIn('is-active upower.service', log)
+        self.assertEqual(self.verdict(log)['all_ok'], '1')
+        # Two points apart still pass: upower polls; three do not.
+        (self.test / 'upower.out').write_text(UPOWER_OUT.replace('63%', '61%'))
+        self.assertEqual(self.battery()[1]['battery_ok'], '1')
+
+    def test_each_missing_piece_fails(self):
+        cases = (('inactive', {'M19_INACTIVE': 'upower.service'}, None, 'unit'),
+                 ('three points', {}, lambda: (self.test / 'upower.out').write_text(UPOWER_OUT.replace('63%', '60%')), None),
+                 ('unknown state', {}, lambda: (self.test / 'upower.out').write_text(UPOWER_OUT.replace('charging', 'unknown')), 'state'),
+                 ('no state', {}, lambda: (self.test / 'upower.out').write_text(UPOWER_OUT.replace('    state:               charging\n', '')), 'state'),
+                 ('no percent sign', {}, lambda: (self.test / 'upower.out').write_text(UPOWER_OUT.replace('63%', '63')), 'upower'),
+                 ('upower fails', {'M19_UPOWER_RC': '1'}, None, 'upower'),
+                 ('no power manager', {}, lambda: shutil.rmtree(self.root / 'proc-battery/4242'), 'pm'),
+                 ('no capacity', {}, lambda: (self.root / 'battery/capacity').unlink(), 'capacity'),
+                 ('bad capacity', {}, lambda: (self.root / 'battery/capacity').write_text('163\n'), 'capacity'))
+        for name, env, change, key in cases:
+            with self.subTest(case=name):
+                self.setUp()
+                if change:
+                    change()
+                log, b, steps = self.battery(env)
+                self.assertEqual(b['battery_ok'], '0', name)
+                self.assertEqual(self.verdict(log)['all_ok'], '0')
+                if key:
+                    self.assertIn(b[key], ('0', '-1', 'unknown', 'none'), name)
+
+
+class MediaReport(ReportBase):
+    """R8 T12-media, after T12-ce: the owner's storage read-only at the file manager's view, one image's bytes readable."""
+    JPEG = b'\xff\xd8\xff\xe0\x00\x10JFIF' + b'\x00' * 32
+    PNG = b'\x89PNG\r\n\x1a\n' + b'\x00' * 32
+
+    def setUp(self):
+        super().setUp()
+        for base in ('android0', 'media-android'):
+            for name in ('Android', 'DCIM', 'Private holiday photos'):
+                (self.root / base / name).mkdir(parents=True)
+        (self.root / 'media-android/DCIM/Camera').mkdir()
+        (self.root / 'media-android/DCIM/Camera/IMG_1.jpg').write_bytes(self.JPEG)
+        (self.root / 'media-android/DCIM/notes.txt').write_text('not an image\n')
+        (self.root / 'ce.result').write_text('M19_CE status=OK detail=0 version=3 timeout=0\n')
+        self.view('ro,nosuid')
+
+    def view(self, options):
+        (self.root / 'mountinfo').write_text(MOUNTINFO + f'40 22 254:0 /media/0 {self.root}/media-android {options} - f2fs /dev/m19-dm ro\n')
+
+    def media(self, walk='500', env=None):
+        data, colour = self.run_report(env=dict({'M19_TEST_CE': '300', 'M19_TEST_MEDIA': walk}, **(env or {})))
+        fields, log, steps = self.parse(data)
+        line = re.search(r'M19 R8 media (.*)\n', log)
+        return log, dict(item.split('=', 1) for item in line.group(1).split()), steps
+
+    def test_the_view_and_a_photo_pass_without_names(self):
+        log, m, steps = self.media()
+        self.assertEqual((m['mounted_ro'], m['entries'], m['same'], m['kind'], m['media_ok']), ('1', '3', '1', 'jpeg', '1'))
+        self.assertIn('M19STEP T12-media OK 1 3 jpeg', steps)
+        self.assertGreater(steps.index('M19STEP T12-media OK 1 3 jpeg'), steps.index('M19STEP T12-ce OK OK 1 3'))
+        self.assertEqual(self.verdict(log)['all_ok'], '1')
+        for word in ('IMG_1', 'Camera', 'holiday', 'notes'):
+            self.assertNotIn(word, log)
+        (self.root / 'media-android/DCIM/Camera/IMG_1.jpg').unlink()
+        (self.root / 'media-android/DCIM/Camera/shot.PNG').write_bytes(self.PNG)
+        self.assertEqual(self.media()[1]['kind'], 'png')
+
+    def test_each_missing_piece_fails(self):
+        camera = self.root / 'media-android/DCIM/Camera'
+        cases = (('writable view', lambda: self.view('rw,nosuid'), {}, '500'),
+                 ('no view mount', lambda: (self.root / 'mountinfo').write_text(MOUNTINFO), {}, '500'),
+                 ('other entries', lambda: (self.root / 'media-android/Music').mkdir(), {}, '500'),
+                 ('garbled jpeg', lambda: (camera / 'IMG_1.jpg').write_bytes(b'\x12' * 40), {}, '500'),
+                 ('garbled png', lambda: ((camera / 'IMG_1.jpg').unlink(), (camera / 'a.png').write_bytes(b'\x89PNG\r\n\x1a\x00' + b'\x00' * 8)), {}, '500'),
+                 ('no image', lambda: (camera / 'IMG_1.jpg').unlink(), {}, '500'),
+                 ('hidden image only', lambda: ((camera / 'IMG_1.jpg').unlink(), (camera / '.cached.jpg').write_bytes(self.JPEG)), {}, '500'),
+                 ('budget', None, {}, '1'),
+                 ('depth', None, {'M19_TEST_MEDIA_DEPTH': '2'}, '500'),
+                 ('pin rejected', lambda: (self.root / 'ce.result').write_text('M19_CE status=GK_REJECTED detail=-1 version=3 timeout=0\n'), {}, '500'))
+        for name, change, env, walk in cases:
+            with self.subTest(case=name):
+                self.setUp()
+                camera = self.root / 'media-android/DCIM/Camera'
+                if change:
+                    change()
+                log, m, steps = self.media(walk, env)
+                self.assertEqual(m['media_ok'], '0', name)
+                self.assertEqual(self.verdict(log)['all_ok'], '0')
+                if name == 'pin rejected':
+                    self.assertFalse([step for step in steps if 'T12-media' in step])
+                    self.assertEqual(m['kind'], 'none')
+        log, m, steps = self.media('500', {'M19_TEST_MEDIA_DEPTH': '3'})
+        self.assertEqual(m['media_ok'], '1')
+
+
 class WifiReport(ReportBase):
     """R6 T12-wifi: m19-wifi's result, NetworkManager's state, the default route, its gateway's echo; nothing named."""
 
@@ -1261,7 +1534,7 @@ class Static(unittest.TestCase):
         self.assertNotRegex(text, r'\breboot\(|RB_AUTOBOOT|LINUX_REBOOT')
 
     def test_no_reboot_and_no_block_write_anywhere_in_r2(self):
-        for name in ('handoff.c', 'report.c', 'wire.c', 'pid2.c', 't9-root', 'pid4.c', 'pid5.c', 'pid6.c', 'pid7.c', 't9-gpu', 'gpu-probe.c',
+        for name in ('handoff.c', 'report.c', 'wire.c', 'pid2.c', 't9-root', 'pid4.c', 'pid5.c', 'pid6.c', 'pid7.c', 'pid8.c', 't9-gpu', 'gpu-probe.c',
                      'present-probe.c'):
             text = (HERE / name).read_text()
             self.assertNotRegex(text, r'\b(reboot|poweroff|mkfs|fsck|blkdiscard|fstrim|setrw|wipe|sgdisk|parted)\b|\bof=/dev|O_WRONLY[^\n]*/dev/(sd|block|dm)', name)
@@ -1355,6 +1628,21 @@ class Static(unittest.TestCase):
             self.assertEqual(items[-1], 'NULL')
             self.assertEqual(tuple(items[:-1]), want, name)
         self.assertNotRegex(text, r'\breboot\(|RB_AUTOBOOT|LINUX_REBOOT')
+
+    def test_pid8_is_pid7_with_r8s_checks_and_nothing_else(self):
+        def body(name):
+            text = (HERE / name).read_text()
+            return text[text.index('*/\n') + 3:].splitlines()
+        changes = [line[0] + ' ' + line[1:] for line in difflib.unified_diff(body('pid7.c'), body('pid8.c'), lineterm='', n=0)
+                   if line[:1] in '+-' and line[:3] not in ('+++', '---')]
+        self.assertEqual(changes, [
+            "+     /* R8: /data read-write, the battery, this boot's id in the tree, and the file manager's view of the owner's storage. */",
+            '+     .data_rw = 1, .data_dm = "m19-userdata", .data_part = "userdata",',
+            '+     .persist_path = "/var/lib/m19/persist", .boot_id = "/proc/sys/kernel/random/boot_id", .persist_fs = 0xF2F52010UL,',
+            '+     .upower = "/usr/bin/upower", .upower_device = "/org/freedesktop/UPower/devices/battery_battery", .battery_unit = "upower.service",',
+            '+     .battery_dir = "/sys/class/power_supply/battery", .battery_pm = "xfce4-power-man",',
+            '+     .media_view = "/media/Android", .media_walk = 20000, .media_depth = 6,'])
+        self.assertEqual(len('xfce4-power-manager'[:15]), len('xfce4-power-man'))
 
     def test_pid7_is_pid6_with_ce_and_the_kept_island_and_nothing_else(self):
         def body(name):
@@ -1577,6 +1865,76 @@ class Plan4(unittest.TestCase):
         # R4e: nothing in the session touches xfwm4's settings; only the reporter runs the compositor script.
         self.assertNotIn('autostart', r4plan.SESSION)
         self.assertNotIn('gpu-compositor', r4plan.SESSION)
+
+
+class Plan8(unittest.TestCase):
+    """R8's plan: R7a's files at their places under the new root, none in the tree, with R8's target, report, session
+    home and upower drop-in, and the power manager no longer hidden."""
+
+    def setUp(self):
+        self.files, self.r7 = r8plan.render(), r7plan.render()
+
+    def test_every_r7_file_has_its_r8_place(self):
+        for name, text in r7plan.FILES.items():
+            if name in ('fstab', 'systemd/system/m19-r7.target', 'systemd/system/m19-r7-report.service'):
+                continue
+            where = r8plan.place(name)
+            want = text.replace('/etc/m19/', '/run/m19/etc/')
+            if name == 'systemd/system/marble-xfce.service':
+                want = want.replace(*r8plan.XFCE_ENV)
+            self.assertEqual(self.files[f'm19/r8/root/{where}'].decode(), want, name)
+        listed = self.files['m19/r8/files'].decode().split()
+        self.assertEqual(sorted(listed), sorted(name[len('m19/r8/root/'):] for name in self.files if name.startswith('m19/r8/root/')))
+        self.assertTrue(all(where.startswith(('run/systemd/system.control/', 'run/systemd/', 'run/sysctl.d/', 'run/NetworkManager/conf.d/', 'run/m19/etc/',
+                                              'etc/udev/rules.d/', 'etc/pulse/default.pa.d/')) for where in listed))
+        self.assertFalse(any('/etc/m19/' in data.decode() for name, data in self.files.items() if name.startswith('m19/r8/root/')))
+        self.assertIsNone(r8plan.place('fstab'))
+        with self.assertRaises(ValueError):
+            r8plan.place('passwd')
+
+    def test_everything_else_is_r7s(self):
+        self.assertFalse([name for name in self.files if name.startswith('m19/r2/')])
+        for name in ('masks', 'generators', 'nodes'):
+            self.assertEqual(self.files[f'm19/r8/{name}'], self.r7[f'm19/r2/{name}'])
+        same = {name for name in self.r7 if not name.startswith('m19/r2/') and name != 'm19/r3/hidden'}
+        self.assertTrue(same and all(self.files[name] == self.r7[name] for name in same))
+        self.assertEqual(self.files['m19/r8/default'], b'm19-r8.target\n')
+        hidden = self.files['m19/r3/hidden'].decode().split()
+        self.assertEqual(hidden, [name for name in self.r7['m19/r3/hidden'].decode().split() if name != 'xfce4-power-manager'])
+        self.assertIn('light-locker', hidden)
+
+    def test_ram_holds_m19s_state_and_the_network_profile(self):
+        lines = [line.split() for line in self.files['m19/r8/tmpfs'].decode().splitlines()]
+        self.assertEqual(lines[0], ['/run', '0755', '256m'])
+        points = {line[0]: line[1:] for line in lines}
+        self.assertEqual(points['/etc/NetworkManager/system-connections'], ['0700', '1m', 'empty'])
+        self.assertEqual(points['/etc/udev/rules.d'][2], 'copy')
+        self.assertEqual(points['/etc/pulse/default.pa.d'][2], 'copy')
+        for point in ('/var/log', '/var/lib/systemd', '/var/lib/NetworkManager', '/var/lib/upower', '/media', '/tmp'):
+            self.assertIn(point, points)
+        for point in ('/var/cache', '/var/spool', '/etc', '/root', '/var/lib'):
+            self.assertNotIn(point, points)
+        for where in self.files['m19/r8/files'].decode().split():
+            if where.startswith('etc/'):
+                self.assertIn('/' + where.rsplit('/', 1)[0], points, where)
+
+    def test_the_session_upower_and_target(self):
+        root = 'm19/r8/root/run/systemd/system.control/'
+        xfce = self.files[root + 'marble-xfce.service'].decode()
+        self.assertIn('Environment=DISPLAY=:0 HOME=/root XDG_RUNTIME_DIR=/run/m19/xdg XDG_SESSION_TYPE=x11 XDG_CONFIG_DIRS=/run/m19/xdg-config:/etc/xdg\n',
+                      xfce)
+        self.assertIn('ExecStart=/bin/sh /run/m19/etc/gpu-session\n', xfce)
+        for unit in ('marble-pulse.service', 'marble-ce.service'):
+            self.assertIn('HOME=/run/m19/session', self.files[root + unit].decode(), unit)
+        self.assertIn('done </run/m19/etc/gpu-$profile.env\n', self.files['m19/r8/root/run/m19/etc/gpu-session'].decode())
+        self.assertEqual(self.files[root + 'upower.service.d/m19.conf'].decode().splitlines()[0], '[Service]')
+        self.assertIn('\nPrivateUsers=no\n', self.files[root + 'upower.service.d/m19.conf'].decode())
+        target = self.files[root + 'm19-r8.target'].decode()
+        old = self.r7['m19/r2/etc/systemd/system/m19-r7.target'].decode()
+        self.assertEqual(target.replace('m19-r8-report.service', 'm19-r7-report.service').split('\n')[2:], old.split('\n')[2:])
+        self.assertIn('Description=M19 R8 evidence over USB\n', self.files[root + 'm19-r8-report.service'].decode())
+        for unit in ('poweroff.target', 'reboot.target', 'upower.service'):
+            self.assertEqual(unit in self.files['m19/r8/masks'].decode().split(), unit != 'upower.service', unit)
 
 
 class Plan7(unittest.TestCase):

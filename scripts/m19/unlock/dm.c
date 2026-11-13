@@ -1,4 +1,5 @@
-/* Device-mapper ioctls for the unlock client. Every table loads read-only. */
+/* Device-mapper ioctls for the unlock client. m19_dm_real_ops loads every table read-only. m19_dm_real_rw_ops (R8,
+ * docs/m19-r8.md) differs in one flag only: its table is read-write, for the /data that R8 mounts read-write. */
 #define _GNU_SOURCE
 #include <fcntl.h>
 #include <linux/dm-ioctl.h>
@@ -60,7 +61,7 @@ static int device_create(void *context, const char *name)
     return 0;
 }
 
-static int device_load(void *context, const char *name, uint64_t sectors, const char *target, const char *parameters)
+static int load(void *context, const char *name, uint64_t sectors, const char *target, const char *parameters, uint32_t flags)
 {
     static uint8_t buffer[BUFFER_BYTES];
     struct dm_ioctl *io = (struct dm_ioctl *)buffer;
@@ -70,7 +71,7 @@ static int device_load(void *context, const char *name, uint64_t sectors, const 
     if (fd < 0 || total > sizeof(buffer))
         return -1;
     memset(buffer, 0, sizeof(buffer));
-    prepare(io, total, name, DM_READONLY_FLAG);
+    prepare(io, total, name, flags);
     io->target_count = 1;
     spec->sector_start = 0;
     spec->length = sectors;
@@ -80,6 +81,16 @@ static int device_load(void *context, const char *name, uint64_t sectors, const 
     status = ioctl(fd, DM_TABLE_LOAD, io);
     m19_wipe(buffer, sizeof(buffer));
     return status;
+}
+
+static int device_load(void *context, const char *name, uint64_t sectors, const char *target, const char *parameters)
+{
+    return load(context, name, sectors, target, parameters, DM_READONLY_FLAG);
+}
+
+static int device_load_rw(void *context, const char *name, uint64_t sectors, const char *target, const char *parameters)
+{
+    return load(context, name, sectors, target, parameters, 0);
 }
 
 static int device_resume(void *context, const char *name)
@@ -103,3 +114,4 @@ static int device_remove(void *context, const char *name)
 }
 
 const struct m19_dm_ops m19_dm_real_ops = {device_sectors, device_create, device_load, device_resume, device_remove};
+const struct m19_dm_ops m19_dm_real_rw_ops = {device_sectors, device_create, device_load_rw, device_resume, device_remove};
