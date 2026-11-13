@@ -13,7 +13,8 @@
  *      owned through its socket pair, READY and idle, and the firmware name CNSS chose;
  *   6. one fs_ready write, from a child; then the cold-boot calibration to MISSION mode with the exact BDF and
  *      target, as M12's parser reads them from the kernel log;
- *   7. one interface with a wiphy below that PCI device.
+ *   7. one interface with a wiphy below that PCI device that nl80211 reports as a station (the driver also makes
+ *      p2p0 and wifi-aware0 there; M12 Run11 kept the station alone, R6c counted all three).
  * Then the kernel log closes for good (network names follow), wifi.ready appears, NetworkManager starts, and this
  * process stays the daemon's owner. Nothing is ever unloaded, killed or retried: a failure records its step and the
  * process holds what it has. */
@@ -28,6 +29,10 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <linux/genetlink.h>
+#include <linux/netlink.h>
+#include <linux/nl80211.h>
+#include <stdint.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdarg.h>
@@ -36,6 +41,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -68,7 +74,7 @@ static size_t carried;
 /* What the reporter reads. */
 static struct {
     char step[32], iface[32], bdf[32];
-    int rc, hwid, wifi_rc, pci, wlan_rc, owner, firmware, fs_ready, cbc, nm;
+    int rc, hwid, wifi_rc, pci, wlan_rc, owner, firmware, fs_ready, cbc, nm, ifaces, stations;
     unsigned long long began_ms, ready_ms;
 } st;
 
@@ -112,10 +118,11 @@ static void write_report(void)
     char text[1024];
     snprintf(text, sizeof(text),
              "step=%s\nrc=%d\nhwid=%d\nwifi_rc=%d\npci=%d\nbdf=%s\nwlan_rc=%d\nowner=%d\nfirmware=%d\nfs_ready=%d\ncbc=%d\n"
-             "cbc_bdf=%u\ncbc_capability=%u\ncbc_mission=%u\ncbc_done=%u\ncbc_requirement=%d\ncbc_fault=%d\niface=%s\nnm=%d\n"
-             "kmsg_records=%llu\nkmsg_gaps=%llu\nowner_records=%llu\nowner_poisoned=%d\nready_ms=%llu\n",
+             "cbc_bdf=%u\ncbc_capability=%u\ncbc_mission=%u\ncbc_done=%u\ncbc_requirement=%d\ncbc_fault=%d\niface=%s\nifaces=%d\n"
+             "stations=%d\nnm=%d\nkmsg_records=%llu\nkmsg_gaps=%llu\nowner_records=%llu\nowner_poisoned=%d\nready_ms=%llu\n",
              st.step, st.rc, st.hwid, st.wifi_rc, st.pci, st.bdf[0] ? st.bdf : "-", st.wlan_rc, st.owner, st.firmware, st.fs_ready,
-             st.cbc, cbc.bdf, cbc.capability, cbc.mission, cbc.done, (int)cbc.requirement, cbc.fault, st.iface[0] ? st.iface : "-", st.nm,
+             st.cbc, cbc.bdf, cbc.capability, cbc.mission, cbc.done, (int)cbc.requirement, cbc.fault, st.iface[0] ? st.iface : "-",
+             st.ifaces, st.stations, st.nm,
              kmsg_records, kmsg_gaps, owner_records, owner.poisoned, st.ready_ms);
     if (publish(C->report, text))
         say("report write failed errno=%d", errno);
@@ -356,7 +363,142 @@ static int below(const char *child_path, const char *parent)
     return !strncmp(child_path, parent, n) && (child_path[n] == '/' || !child_path[n]);
 }
 
-/* One interface whose device and wiphy both sit below the PCI device (or the CNSS platform device). */
+/* nl80211, as M12 Run11's nl80211_ready asks it: generic netlink, one request with one attribute, one reply. */
+#define M19_ALIGN4(x) (((size_t)(x) + 3u) & ~(size_t)3u)
+#define M19_NLMSG_HDR M19_ALIGN4(sizeof(struct nlmsghdr))
+#define M19_GENL_HDR M19_ALIGN4(sizeof(struct genlmsghdr))
+#define M19_NLA_HDR M19_ALIGN4(sizeof(struct nlattr))
+
+static uint32_t nl_seq;
+
+static int nl_socket(const void *request, size_t length, unsigned char *reply, size_t room)
+{
+    int fd = socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_GENERIC);
+    if (fd < 0)
+        return -errno;
+    struct sockaddr_nl local = {.nl_family = AF_NETLINK};
+    struct timeval wait = {.tv_sec = 2};
+    int rc;
+    if (bind(fd, (struct sockaddr *)&local, sizeof(local)) || setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &wait, sizeof(wait)))
+        rc = -errno;
+    else if (send(fd, request, length, 0) != (ssize_t)length)
+        rc = -EIO;
+    else {
+        ssize_t n = recv(fd, reply, room, 0);
+        rc = n < 0 ? -errno : (int)n;
+    }
+    close(fd);
+    return rc;
+}
+
+/* The reply's attributes when it answers this request with the wanted command; a kernel error as itself. */
+static int genl_ask(uint16_t family, uint8_t command, uint16_t type, const void *value, size_t size, uint8_t want,
+                    unsigned char *reply, size_t room, const unsigned char **attrs, size_t *attrs_len)
+{
+    uint32_t words[16];
+    unsigned char *request = (unsigned char *)words;
+    if (M19_NLMSG_HDR + M19_GENL_HDR + M19_NLA_HDR + M19_ALIGN4(size) > sizeof(words))
+        return -EINVAL;
+    memset(words, 0, sizeof(words));
+    struct nlmsghdr *n = (struct nlmsghdr *)request;
+    struct genlmsghdr *g = (struct genlmsghdr *)(request + M19_NLMSG_HDR);
+    struct nlattr *a = (struct nlattr *)(request + M19_NLMSG_HDR + M19_GENL_HDR);
+    a->nla_type = type;
+    a->nla_len = (uint16_t)(M19_NLA_HDR + size);
+    memcpy(request + M19_NLMSG_HDR + M19_GENL_HDR + M19_NLA_HDR, value, size);
+    n->nlmsg_len = (uint32_t)(M19_NLMSG_HDR + M19_GENL_HDR + M19_ALIGN4(a->nla_len));
+    n->nlmsg_type = family;
+    n->nlmsg_flags = NLM_F_REQUEST;
+    n->nlmsg_seq = ++nl_seq;
+    g->cmd = command;
+    g->version = 1;
+    int got = C->netlink ? C->netlink(request, n->nlmsg_len, reply, room) : nl_socket(request, n->nlmsg_len, reply, room);
+    if (got < 0)
+        return got;
+    const struct nlmsghdr *h = (const struct nlmsghdr *)reply;
+    if ((size_t)got < M19_NLMSG_HDR || h->nlmsg_len < M19_NLMSG_HDR || h->nlmsg_len > (size_t)got || h->nlmsg_seq != n->nlmsg_seq)
+        return -EPROTO;
+    if (h->nlmsg_type == NLMSG_ERROR) {
+        const struct nlmsgerr *e = (const struct nlmsgerr *)(reply + M19_NLMSG_HDR);
+        if (h->nlmsg_len < M19_NLMSG_HDR + sizeof(*e))
+            return -EPROTO;
+        return e->error < 0 ? e->error : -EPROTO;
+    }
+    if (h->nlmsg_type != family || h->nlmsg_len < M19_NLMSG_HDR + M19_GENL_HDR ||
+        ((const struct genlmsghdr *)(reply + M19_NLMSG_HDR))->cmd != want)
+        return -EPROTO;
+    *attrs = reply + M19_NLMSG_HDR + M19_GENL_HDR;
+    *attrs_len = h->nlmsg_len - M19_NLMSG_HDR - M19_GENL_HDR;
+    return 0;
+}
+
+/* The attribute of this type, exactly size bytes: 1 found, 0 absent, -EPROTO malformed, short or repeated. */
+static int nl_attr(const unsigned char *p, size_t length, uint16_t type, void *out, size_t size)
+{
+    int found = 0;
+    while (length >= M19_NLA_HDR) {
+        const struct nlattr *a = (const struct nlattr *)p;
+        if (a->nla_len < M19_NLA_HDR || a->nla_len > length)
+            return -EPROTO;
+        if ((a->nla_type & NLA_TYPE_MASK) == type) {
+            if (found || a->nla_len - M19_NLA_HDR != size)
+                return -EPROTO;
+            memcpy(out, p + M19_NLA_HDR, size);
+            found = 1;
+        }
+        size_t step = M19_ALIGN4(a->nla_len);
+        if (step >= length)
+            break;
+        p += step;
+        length -= step;
+    }
+    return found;
+}
+
+/* M12 Run11's nl80211_ready: 1 when nl80211 reports this interface index as a station on a real wiphy, 0 for any
+ * other type, negative when nl80211 cannot say. */
+static int nl80211_station(uint32_t index)
+{
+    static uint32_t words[16384];
+    unsigned char *reply = (unsigned char *)words;
+    const unsigned char *attrs;
+    size_t length;
+    static const char name[] = "nl80211";
+    int rc = genl_ask(GENL_ID_CTRL, CTRL_CMD_GETFAMILY, CTRL_ATTR_FAMILY_NAME, name, sizeof(name), CTRL_CMD_NEWFAMILY, reply,
+                      sizeof(words), &attrs, &length);
+    if (rc)
+        return rc;
+    uint16_t family = 0;
+    if (nl_attr(attrs, length, CTRL_ATTR_FAMILY_ID, &family, sizeof(family)) != 1 || family <= GENL_ID_CTRL)
+        return -EPROTO;
+    rc = genl_ask(family, NL80211_CMD_GET_INTERFACE, NL80211_ATTR_IFINDEX, &index, sizeof(index), NL80211_CMD_NEW_INTERFACE, reply,
+                  sizeof(words), &attrs, &length);
+    if (rc)
+        return rc;
+    uint32_t got = 0, type = 0, wiphy = 0;
+    if (nl_attr(attrs, length, NL80211_ATTR_IFINDEX, &got, sizeof(got)) != 1 || nl_attr(attrs, length, NL80211_ATTR_IFTYPE, &type, sizeof(type)) != 1 ||
+        nl_attr(attrs, length, NL80211_ATTR_WIPHY, &wiphy, sizeof(wiphy)) != 1 || got != index || wiphy == UINT32_MAX)
+        return -EPROTO;
+    return type == NL80211_IFTYPE_STATION;
+}
+
+/* The interface's index from sysfs (net/NAME/ifindex): above 0, or 0. */
+static uint32_t iface_index(const char *name)
+{
+    char path[PATH_MAX], text[32];
+    snprintf(path, sizeof(path), "%s/%s/ifindex", C->net, name);
+    if (read_text(path, text, sizeof(text)))
+        return 0;
+    char *end;
+    errno = 0;
+    unsigned long value = strtoul(text, &end, 10);
+    if (errno || end == text || (*end && *end != '\n') || !value || value > UINT32_MAX)
+        return 0;
+    return (uint32_t)value;
+}
+
+/* M12 Run11's find_if: the one interface whose device and wiphy both sit below the PCI device (or the CNSS platform
+ * device) and that nl80211 reports as a station. The others there (p2p0, wifi-aware0) are counted, never chosen. */
 static int find_iface(const char *bdf, char *iface, size_t room)
 {
     char pci_real[PATH_MAX], platform_real[PATH_MAX], path[PATH_MAX];
@@ -365,7 +507,7 @@ static int find_iface(const char *bdf, char *iface, size_t room)
     DIR *directory = opendir(C->net);
     if (!directory)
         return -ENODEV;
-    int found = 0;
+    int found = 0, ifaces = 0;
     struct dirent *entry;
     while ((entry = readdir(directory))) {
         if (entry->d_name[0] == '.' || strlen(entry->d_name) >= 16)
@@ -380,10 +522,16 @@ static int find_iface(const char *bdf, char *iface, size_t room)
         if (!((have_pci && below(device, pci_real) && below(phy, pci_real)) ||
               (have_platform && below(device, platform_real) && below(phy, platform_real))))
             continue;
+        ifaces++;
+        uint32_t index = iface_index(entry->d_name);
+        if (!index || nl80211_station(index) != 1)
+            continue;
         if (++found == 1)
             snprintf(iface, room, "%.15s", entry->d_name); /* below IFNAMSIZ, checked above */
     }
     closedir(directory);
+    st.ifaces = ifaces;
+    st.stations = found;
     return found == 1 ? 0 : found ? -EEXIST : -ENODEV;
 }
 

@@ -60,11 +60,24 @@ case "$phase" in
    wrong) echo "6,500,1,-;cnss: FW name is qca6490/amss.bin, FW fallback name is amss.bin" >> "$R/dev/kmsg";;
   esac
   echo "6,501,2,-;cnss: Target capability: chip_id: 0x12, chip_family: 0xb, board_id: 0xff, soc_id: 0x400c1211, otp_version: 0x440102" >> "$R/dev/kmsg"
-  if [ "${M19_FAKE_NET:-one}" != none ]; then
-   mkdir -p "$dev/net/wlan0" "$dev/ieee80211/phy0" "$R/sys/class/net/wlan0"
+  # The QCA6490's driver makes three interfaces below the device; nl80211 (the runner's fake) types each.
+  mk() {
+   mkdir -p "$dev/net/$1" "$R/sys/class/net/$1"
+   ln -s "$dev" "$R/sys/class/net/$1/device"
+   ln -s "$dev/ieee80211/phy0" "$R/sys/class/net/$1/phy80211"
+   echo "$2" > "$R/sys/class/net/$1/ifindex"
+   echo "$3" > "$R/sys/class/net/$1/m19-iftype"
+  }
+  net=${M19_FAKE_NET:-qca}
+  if [ "$net" != none ]; then
+   mkdir -p "$dev/ieee80211/phy0"
    ln -s "$dev" "$dev/ieee80211/phy0/device"
-   ln -s "$dev" "$R/sys/class/net/wlan0/device"
-   ln -s "$dev/ieee80211/phy0" "$R/sys/class/net/wlan0/phy80211"
+   case "$net" in
+    qca) mk wlan0 14 station; mk p2p0 15 p2p-device; mk wifi-aware0 16 nan;;
+    one) mk wlan0 14 station;;
+    two-stations) mk wlan0 14 station; mk wlan1 17 station; mk p2p0 15 p2p-device;;
+    no-station) mk p2p0 15 p2p-device; mk wifi-aware0 16 nan;;
+   esac
   fi;;
 esac
 exit 0
@@ -140,11 +153,12 @@ class WifiRunner(unittest.TestCase):
         self.assertEqual(self.result(), 'ready wlan0\n')
         rep = self.report()
         self.assertEqual({k: rep[k] for k in ('step', 'rc', 'hwid', 'wifi_rc', 'pci', 'bdf', 'wlan_rc', 'owner', 'firmware', 'fs_ready', 'cbc',
-                                              'cbc_bdf', 'cbc_capability', 'cbc_mission', 'cbc_requirement', 'cbc_fault', 'iface', 'nm',
-                                              'owner_poisoned')},
+                                              'cbc_bdf', 'cbc_capability', 'cbc_mission', 'cbc_requirement', 'cbc_fault', 'iface', 'ifaces',
+                                              'stations', 'nm', 'owner_poisoned')},
                          {'step': 'ready', 'rc': '0', 'hwid': '1', 'wifi_rc': '0', 'pci': '1', 'bdf': '0000:01:00.0', 'wlan_rc': '0', 'owner': '1',
                           'firmware': '1', 'fs_ready': '1', 'cbc': '1', 'cbc_bdf': '1', 'cbc_capability': '1', 'cbc_mission': '1',
-                          'cbc_requirement': '2', 'cbc_fault': '0', 'iface': 'wlan0', 'nm': '0', 'owner_poisoned': '0'})
+                          'cbc_requirement': '2', 'cbc_fault': '0', 'iface': 'wlan0', 'ifaces': '3', 'stations': '1', 'nm': '0',
+                          'owner_poisoned': '0'})
         modules = self.root / 'run/m19/wifi/modules'
         self.assertEqual(self.log('helper.log').splitlines(), [f'load {self.root}/run/m19/wifi/modules.list wifi {modules} {modules}',
                                                                 f'load {self.root}/run/m19/wifi/modules.list wlan {modules} {modules}'])
@@ -165,6 +179,19 @@ class WifiRunner(unittest.TestCase):
         rc, out = self.run_wifi(M19_FAKE_CNSSD='exit')
         self.assertEqual((rc, self.result()), (1, 'failed owner -71\n'), out)
         self.assertIn('daemon receipt rc=-32', out)
+
+    def test_only_the_nl80211_station_is_chosen(self):
+        # R6c: wlan0, p2p0 and wifi-aware0 below the device; M12 Run11 kept the one station.
+        cases = (({'M19_FAKE_NET': 'one'}, 'ready wlan0\n', '1', '1'), ({'M19_FAKE_NET': 'two-stations'}, 'failed iface -17\n', '3', '2'),
+                 ({'M19_FAKE_NET': 'no-station'}, 'failed iface -19\n', '2', '0'), ({'M19_FAKE_NL': 'nofamily'}, 'failed iface -19\n', '3', '0'),
+                 ({'M19_FAKE_NL': 'error'}, 'failed iface -19\n', '3', '0'), ({'M19_FAKE_NL': 'wrong-index'}, 'failed iface -19\n', '3', '0'),
+                 ({'M19_FAKE_NL': 'no-wiphy'}, 'failed iface -19\n', '3', '0'))
+        for env, want, ifaces, stations in cases:
+            with self.subTest(env=env):
+                self.setUp()
+                rc, out = self.run_wifi(M19_WIFI_IFACE_MS='300', **env)
+                self.assertEqual((self.result(), self.report()['ifaces'], self.report()['stations']), (want, ifaces, stations), out)
+                self.assertEqual(self.log('systemctl.log'), 'start --no-block NetworkManager.service\n' if want.startswith('ready') else '')
 
     def test_one_run_a_boot(self):
         (self.root / 'run/m19/wifi.started').write_text('')

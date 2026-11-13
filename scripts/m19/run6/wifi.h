@@ -4,6 +4,8 @@
 #ifndef M19_WIFI_H
 #define M19_WIFI_H
 
+#include <stddef.h>
+
 struct m19_wifi_config {
     /* inputs staged by T9-wifi */
     const char *stage;        /* /run/m19/wifi.stage: "staged" */
@@ -34,6 +36,9 @@ struct m19_wifi_config {
     unsigned load_ms, settle_ms, owner_ms, fs_ready_ms, cbc_ms, iface_ms, command_ms, pump_ms;
     /* 0 in production: supervise the daemon forever. Tests: return this many ms after the end. */
     unsigned return_after_ms;
+    /* nl80211, asked as M12 Run11 asked it: one generic netlink request, its reply into reply (bytes, or -errno).
+     * NULL in production: a NETLINK_GENERIC socket. Tests: a stand-in answering from the fake sysfs. */
+    int (*netlink)(const void *request, size_t length, unsigned char *reply, size_t room);
     int require_root; /* production 1 */
 };
 

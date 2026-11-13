@@ -127,18 +127,31 @@ LogLevelMax=warning
 WPA_DROPIN = '''[Service]
 LogLevelMax=warning
 '''
-NM_CONF = '''# M19 R6: Wi-Fi only, from the RAM /etc; nothing written to the tree.
+NM_CONF = '''# M19 R6: Wi-Fi only, from the RAM /etc; nothing written to the tree. R6d: wlan0 only, the station m19-wifi
+# chose; the driver's p2p0 and wifi-aware0 stay unmanaged.
 [main]
 plugins=keyfile
 
 [keyfile]
-unmanaged-devices=except:type:wifi
+unmanaged-devices=except:interface-name:wlan0
 
 [logging]
 level=WARN
 
 [connectivity]
 enabled=false
+'''
+
+# R6d: the QCA6490's interfaces keep the driver's names (wlan0, p2p0, wifi-aware0), as in M12. Ubuntu's predictable
+# names renamed p2p0 and then could not give the other two the same name (R6c). An empty NamePolicy and no Name leave
+# the kernel's name; the MAC address is never touched.
+WLAN_LINK = '''# M19 R6d: the QCA6490's interfaces keep the driver's names, as in M12.
+[Match]
+OriginalName=wlan* p2p* wifi-aware*
+
+[Link]
+NamePolicy=
+MACAddressPolicy=none
 '''
 
 # The kernel has no devtmpfs, so a device plugged in during the session has no node unless udev makes one. Only input
@@ -164,7 +177,8 @@ FILES.update({'systemd/system/m19-r6.target': TARGET,
               'systemd/system/wpa_supplicant.service.d/m19.conf': WPA_DROPIN,
               'NetworkManager/conf.d/m19.conf': NM_CONF,
               'pulse/default.pa.d/m19-sink.pa': PULSE_SINK,
-              'udev/rules.d/70-m19-usb-input.rules': USB_INPUT})
+              'udev/rules.d/70-m19-usb-input.rules': USB_INPUT,
+              'systemd/network/10-m19-wlan.link': WLAN_LINK})
 
 
 def render():

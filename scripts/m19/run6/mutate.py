@@ -57,6 +57,15 @@ MUTANTS = (
     ('wifi.c', '    char *start[] = {(char *)c->systemctl, "start", "--no-block", (char *)c->nm_unit, NULL};',
      '    char *start[] = {(char *)c->systemctl, "start", (char *)c->nm_unit, NULL};', WIFI),
     ('wifi.c', '    if (kmsg_fd < 0 || lseek(kmsg_fd, 0, SEEK_END) < 0)', '    if (kmsg_fd < 0)', WIFI),
+    # R6d: M12 Run11's station choice among the driver's three interfaces.
+    ('wifi.c', '        if (!index || nl80211_station(index) != 1)\n            continue;\n', '', WIFI),
+    ('wifi.c', '    return type == NL80211_IFTYPE_STATION;', '    return 1;', WIFI),
+    ('wifi.c', '|| got != index || wiphy == UINT32_MAX)', '|| wiphy == UINT32_MAX)', WIFI),
+    ('wifi.c', '|| got != index || wiphy == UINT32_MAX)', '|| got != index)', WIFI),
+    # Not mutated: the family id's own check (a request sent to a wrong family is refused by nl80211, fake or real, and
+    # ends as no station either way) and the kernel error's value (every error ends as no station).
+    ('wifi.c', '    return found == 1 ? 0 : found ? -EEXIST : -ENODEV;\n}\n\n/* M12\'s readiness',
+     '    return found >= 1 ? 0 : -ENODEV;\n}\n\n/* M12\'s readiness', WIFI),
     # R6c: the daemon's descriptor survives the exec, or m19-cnssd's admission finds no socket.
     ('wifi.c', '        if (close(pair[0]) || fcntl(pair[1], F_SETFD, 0))', '        if (close(pair[0]))', WIFI),
     # R6c: m19-cnssd's admission. Each check alone; the stand-in daemon runs the same function. Not mutated: parent <= 1

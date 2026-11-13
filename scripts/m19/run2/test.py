@@ -1477,7 +1477,7 @@ class Plan6(unittest.TestCase):
             'systemd/system/m19-r6.target', 'systemd/system/m19-r6-report.service', 'systemd/system/marble-sink.service',
             'systemd/system/marble-wifi.service', 'systemd/system/marble-pulse.service', 'systemd/system/NetworkManager.service.d/m19.conf',
             'systemd/system/wpa_supplicant.service.d/m19.conf', 'NetworkManager/conf.d/m19.conf', 'pulse/default.pa.d/m19-sink.pa',
-            'udev/rules.d/70-m19-usb-input.rules'})
+            'udev/rules.d/70-m19-usb-input.rules', 'systemd/network/10-m19-wlan.link'})
         self.assertEqual(self.files['m19/r2/default'], b'm19-r6.target\n')
         self.assertEqual(self.files['m19/r6/udev-masks'], self.r5['m19/r5/udev-masks'])
         self.assertNotIn('m19/r5/udev-masks', self.files)
@@ -1512,8 +1512,13 @@ class Plan6(unittest.TestCase):
                          '[Unit]\nConditionPathExists=/run/m19/wifi.ready\n\n[Service]\nLogLevelMax=warning\n')
         self.assertEqual(etc['systemd/system/wpa_supplicant.service.d/m19.conf'], '[Service]\nLogLevelMax=warning\n')
         conf = etc['NetworkManager/conf.d/m19.conf']
-        for line in ('plugins=keyfile', 'unmanaged-devices=except:type:wifi', 'level=WARN', 'enabled=false'):
+        for line in ('plugins=keyfile', 'unmanaged-devices=except:interface-name:wlan0', 'level=WARN', 'enabled=false'):
             self.assertIn(line + '\n', conf)
+        # R6d: the driver's names stay; udev's predictable names gave two of the three the same name (R6c).
+        link = etc['systemd/network/10-m19-wlan.link']
+        self.assertIn('[Match]\nOriginalName=wlan* p2p* wifi-aware*\n', link)
+        self.assertIn('[Link]\nNamePolicy=\nMACAddressPolicy=none\n', link)
+        self.assertNotRegex(link, r'(?m)^Name=')
         wifi = etc['systemd/system/marble-wifi.service']
         for line in ('ExecStart=/run/m19/wifi/m19-wifi', 'Restart=no', 'KillMode=none', 'SendSIGKILL=no', 'ConditionPathExists=/run/m19/wifi.stage'):
             self.assertIn(line + '\n', wifi)
