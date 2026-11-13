@@ -1,14 +1,14 @@
-/* M19 R6 tests: a stand-in for m12-cnssd on its owner socket, and for the kernel's CNSS log lines after fs_ready.
- *   argv[1]: the inherited SOCK_SEQPACKET descriptor, as m12-cnssd takes it.
+/* M19 R6 tests: a stand-in for m19-cnssd on its owner socket, and for the kernel's CNSS log lines after fs_ready.
+ * It admits its owner with m19-cnssd's own admission (cnssd-main.c), for the test's user: the parent that created the
+ * pair, never init (R6a and R6b's stand-ins checked less than the daemon did).
+ *   argv[1]: the inherited SOCK_SEQPACKET descriptor, as m19-cnssd takes it.
  *   M19_FAKE_CNSSD: ready (default), poison (POISON in place of READY), silent (never READY), exit (at once), bad (a malformed
  *                   record), late-poison (READY, then POISON once fs_ready was written).
  *   M19_FAKE_CBC:   good (default), wrong-bdf, caldb (CalDB: 1, a seed would be needed), none (no lines).
  *   M19_FAKE_FS_READY, M19_FAKE_KMSG: the files standing in for /sys/kernel/cnss/fs_ready and /dev/kmsg.
- *   M19_FAKE_POISON_ON: a path; once it exists, a POISON record (a daemon fault after the bring-up).
- *   M19_FAKE_PARENT: the test's init (its subreaper). Like m12-cnssd (getppid() != 1: return 2), the stand-in returns 2
- *                    at once under any other parent, as R6a's daemon did under m19-wifi. */
-#define _GNU_SOURCE
-#include "../../m12/next/cnssd.h"
+ *   M19_FAKE_POISON_ON: a path; once it exists, a POISON record (a daemon fault after the bring-up). */
+#define M19_CNSSD_NO_MAIN
+#include "cnssd-main.c"
 
 #include <poll.h>
 #include <stdio.h>
@@ -61,10 +61,10 @@ static int fs_ready_written(void)
 
 int main(int argc, char **argv)
 {
-    const char *init = getenv("M19_FAKE_PARENT");
-    if (!init || getppid() != (pid_t)atol(init) || argc != 2)
+    struct linux_io l = {.qrtr = -1, .supervisor = -1, .seed_fd = -1, .origin_fd = -1};
+    if (argc != 2 || m19_cnssd_admit(argc, argv, getppid(), geteuid(), getuid(), &l))
         return 2;
-    fd = atoi(argv[1]);
+    fd = l.supervisor;
     const char *mode = getenv("M19_FAKE_CNSSD") ? getenv("M19_FAKE_CNSSD") : "ready";
     const char *cbc = getenv("M19_FAKE_CBC") ? getenv("M19_FAKE_CBC") : "good";
     if (!strcmp(mode, "exit"))

@@ -8,8 +8,9 @@
  *   3. the seven CNSS modules through the checked loader (m19-audio load LIST wifi), then M12's 20 s settle and a
  *      unique PCI 17cb:1103 bound to cnss_pci;
  *   4. the six WLAN modules (m19-audio load LIST wlan);
- *   5. the RAM-only CNSS daemon (M12 Run9 to Run11's m12-cnssd, byte for byte), a child of init as M12 ran it and
- *      under this owner through its socket, READY and idle, and the firmware name CNSS chose;
+ *   5. the RAM-only CNSS daemon, m19-cnssd (cnssd-main.c: M12 Run9 to Run11's daemon sources, unchanged, with an
+ *      entry that admits its parent as its owner; M12's admits only PID 1, R6a and R6b), this process's child and
+ *      owned through its socket pair, READY and idle, and the firmware name CNSS chose;
  *   6. one fs_ready write, from a child; then the cold-boot calibration to MISSION mode with the exact BDF and
  *      target, as M12's parser reads them from the kernel log;
  *   7. one interface with a wiphy below that PCI device.
@@ -30,7 +31,6 @@
 #include <poll.h>
 #include <signal.h>
 #include <stdarg.h>
-#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -44,14 +44,14 @@ struct m19_wifi_config m19_wifi_config_default(void)
 {
     struct m19_wifi_config c = {
         .stage = "/run/m19/wifi.stage", .helper = "/run/m19/wifi/m19-audio", .list = "/run/m19/wifi/modules.list",
-        .modules = "/run/m19/wifi/modules", .cnssd = "/run/m19/wifi/m12-cnssd", .systemctl = "/usr/bin/systemctl",
+        .modules = "/run/m19/wifi/modules", .cnssd = "/run/m19/wifi/m19-cnssd", .systemctl = "/usr/bin/systemctl",
         .nm_unit = "NetworkManager.service", .started = "/run/m19/wifi.started", .result = "/run/m19/wifi.result",
         .report = "/run/m19/wifi.report", .ready = "/run/m19/wifi.ready", .cmdline = "/proc/cmdline", .proc_modules = "/proc/modules",
         .hwid = "/sys/module/hwid/parameters", .fw_path = "/sys/module/firmware_class/parameters/path", .fw_want = "/run/m19/firmware",
         .pci = "/sys/bus/pci/devices", .platform = "/sys/bus/platform/devices/b0000000.qcom,cnss-qca6490", .mhi = "/sys/bus/mhi/devices",
         .net = "/sys/class/net", .fs_ready = "/sys/kernel/cnss/fs_ready", .kmsg = "/dev/kmsg",
         .load_ms = 180000, .settle_ms = 20000, .owner_ms = 20000, .fs_ready_ms = 10000, .cbc_ms = 180000, .iface_ms = 25000,
-        .command_ms = 30000, .pump_ms = 10, .init_pid = 1, .adopt_ms = 2000, .middle_hold_ms = 0, .return_after_ms = 0, .require_root = 1,
+        .command_ms = 30000, .pump_ms = 10, .return_after_ms = 0, .require_root = 1,
     };
     return c;
 }
@@ -407,81 +407,31 @@ static int stack_ready(const char *bdf, char *iface, size_t room)
     return find_iface(bdf, iface, room);
 }
 
-/* The daemon's own process: wait, bounded, until init adopted it (m12-cnssd returns 2 at once under any other
- * parent; R6a's daemon did, under this process), then exec with its end of the pair as its argument. */
-static void exec_daemon(int end)
-{
-    char fd[16];
-    snprintf(fd, sizeof(fd), "%d", end);
-    if (fcntl(end, F_SETFD, 0))
-        _exit(126);
-    unsigned long long end_ms = now_ms() + C->adopt_ms;
-    while (getppid() != (pid_t)C->init_pid) {
-        if (now_ms() >= end_ms)
-            _exit(124);
-        (void)poll(NULL, 0, 1);
-    }
-    execl(C->cnssd, "m12-cnssd", fd, (char *)NULL);
-    _exit(127);
-}
-
-/* The daemon, a child of init as in M12 and under this process as its owner through a private SOCK_SEQPACKET pair.
- * An intermediate child forks it, reports its pid and exits, so init adopts it; systemd (PID 1) reaps it if it ever
- * exits, and it stays in this service's cgroup, which nothing stops (KillMode=none). */
+/* The daemon, this process's child and owned by it through a private SOCK_SEQPACKET pair that this process creates
+ * (m19-cnssd admits exactly that: SO_PEERCRED of its end is its parent), its end as the daemon's argument. */
 static int launch_owner(void)
 {
-    int pair[2], told[2];
+    int pair[2];
     if (socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, pair))
         return -errno;
-    if (pipe2(told, O_CLOEXEC)) {
+    pid_t pid = fork();
+    if (pid < 0) {
         int error = errno;
         close(pair[0]);
         close(pair[1]);
         return -error;
     }
-    pid_t middle = fork();
-    if (middle < 0) {
-        int error = errno;
-        close(pair[0]);
-        close(pair[1]);
-        close(told[0]);
-        close(told[1]);
-        return -error;
-    }
-    if (!middle) {
-        close(pair[0]);
-        close(told[0]);
-        pid_t pid = fork();
-        if (pid < 0)
-            _exit(125);
-        if (!pid) {
-            close(told[1]);
-            exec_daemon(pair[1]);
-        }
-        int32_t value = (int32_t)pid;
-        int sent = write(told[1], &value, sizeof(value)) == (ssize_t)sizeof(value);
-        if (C->middle_hold_ms)
-            (void)poll(NULL, 0, (int)C->middle_hold_ms);
-        _exit(sent ? 0 : 125);
+    if (!pid) {
+        char fd[16];
+        snprintf(fd, sizeof(fd), "%d", pair[1]);
+        if (close(pair[0]) || fcntl(pair[1], F_SETFD, 0))
+            _exit(126);
+        execl(C->cnssd, "m19-cnssd", fd, (char *)NULL);
+        _exit(127);
     }
     close(pair[1]);
-    close(told[1]);
-    int status = 0;
-    pid_t got;
-    while ((got = waitpid(middle, &status, 0)) < 0 && errno == EINTR)
-        ;
-    int32_t value = 0;
-    ssize_t n;
-    while ((n = read(told[0], &value, sizeof(value))) < 0 && errno == EINTR)
-        ;
-    close(told[0]);
-    if (got != middle || !WIFEXITED(status) || WEXITSTATUS(status) || n != (ssize_t)sizeof(value) || value <= 0) {
-        say("daemon launch: intermediate status=%d read=%zd", status, n);
-        close(pair[0]);
-        return -ECHILD;
-    }
     owner.fd = pair[0];
-    owner.child = (pid_t)value;
+    owner.child = pid;
     unsigned long long end = now_ms() + C->owner_ms;
     while (now_ms() < end && !owner_ready && !owner_fault) {
         pump();

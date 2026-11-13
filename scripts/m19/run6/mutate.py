@@ -19,6 +19,7 @@ WIFI = ('WifiRunner',)
 STAGE = ('WifiStage',)
 SOUND = ('SoundPrep',)
 SINK = ('Sink',)
+DAEMON = ('Daemon', 'WifiRunner')
 
 M11_FLAGS = ('-std=c11', '-O1', '-w', '-DM11_ANCHOR_NATIVE', '-DM11_CUSTODIAN_NATIVE', '-DM11_ANCHOR_NATIVE_ION', f'-I{OWN}', f'-I{REPAIR}',
              f'-I{NATIVE}')
@@ -56,13 +57,18 @@ MUTANTS = (
     ('wifi.c', '    char *start[] = {(char *)c->systemctl, "start", "--no-block", (char *)c->nm_unit, NULL};',
      '    char *start[] = {(char *)c->systemctl, "start", (char *)c->nm_unit, NULL};', WIFI),
     ('wifi.c', '    if (kmsg_fd < 0 || lseek(kmsg_fd, 0, SEEK_END) < 0)', '    if (kmsg_fd < 0)', WIFI),
-    # R6b: m12-cnssd as init's child (R6a's daemon returned 2 under m19-wifi). Not mutated: the intermediate's status
-    # check, which only a failing fork or write in the intermediate reaches, and no fixture makes either fail.
-    ('wifi.c', '    while (getppid() != (pid_t)C->init_pid) {', '    while (0) {', WIFI),
-    ('wifi.c', '        pid_t pid = fork();\n        if (pid < 0)\n            _exit(125);', '        pid_t pid = 0;\n        if (pid < 0)\n            _exit(125);', WIFI),
-    ('wifi.c', '        if (now_ms() >= end_ms)\n            _exit(124);\n', '', WIFI),
-    ('wifi.c', '    owner.child = (pid_t)value;', '    owner.child = middle;', WIFI),
-    ('wifi.c', '.init_pid = 1, .adopt_ms = 2000, .middle_hold_ms = 0,', '.init_pid = 0, .adopt_ms = 2000, .middle_hold_ms = 0,', WIFI),
+    # R6c: the daemon's descriptor survives the exec, or m19-cnssd's admission finds no socket.
+    ('wifi.c', '        if (close(pair[0]) || fcntl(pair[1], F_SETFD, 0))', '        if (close(pair[0]))', WIFI),
+    # R6c: m19-cnssd's admission. Each check alone; the stand-in daemon runs the same function.
+    ('cnssd-main.c', '    if (parent <= 1 || euid != owner_uid || (argc != 2 && argc != 7))', '    if (euid != owner_uid || (argc != 2 && argc != 7))', DAEMON),
+    ('cnssd-main.c', '    if (parent <= 1 || euid != owner_uid || (argc != 2 && argc != 7))', '    if (parent <= 1 || (argc != 2 && argc != 7))', DAEMON),
+    ('cnssd-main.c', '    if (parent <= 1 || euid != owner_uid || (argc != 2 && argc != 7))', '    if (parent <= 1 || euid != owner_uid)', DAEMON),
+    ('cnssd-main.c', '|| len != sizeof(cred) || cred.pid != parent ||', '|| len != sizeof(cred) ||', DAEMON),
+    ('cnssd-main.c', '        cred.uid != owner_uid || getsockopt', '        getsockopt', DAEMON),
+    ('cnssd-main.c', '|| type != SOCK_SEQPACKET)', ')', DAEMON),
+    ('cnssd-main.c', '    if (number(argv[1], &l->supervisor))\n        return 2;\n', '    l->supervisor = atoi(argv[1]);\n', DAEMON),
+    ('cnssd-main.c', '            digest(argv[6], l->origin))\n            return 2;', '            0)\n            return 2;', DAEMON),
+    ('cnssd-main.c', 'if (m19_cnssd_admit(argc, argv, getppid(), geteuid(), 0, &l))', 'if (m19_cnssd_admit(argc, argv, getppid(), geteuid(), geteuid(), &l))', DAEMON),
     # The stream: never louder than the chord, the amplifier with the sound, the stop.
     ('stream.c', '        if (o > limit) o = limit;\n', '', SINK),
     ('stream.c', '        int32_t o = (int32_t)(((int64_t)v * gain_q15) / 32768);', '        int32_t o = v;', SINK),
@@ -132,6 +138,15 @@ def build_wifi(src_dir, m12, out):
         raise Broken(f'wifi build failed:\n{built.stderr.decode("utf-8", "replace")}')
 
 
+def build_daemon(src_dir, cnssd, admit):
+    """The stand-in daemon and the admission tests, both over cnssd-main.c's admission."""
+    for source, out in (('test-cnssd.c', cnssd), ('test-cnssd-main.c', admit)):
+        built = subprocess.run(['gcc', '-std=c11', '-O1', '-w', source, '-lcrypto', '-o', str(out)], cwd=src_dir, capture_output=True,
+                               timeout=180)
+        if built.returncode:
+            raise Broken(f'{source} build failed:\n{built.stderr.decode("utf-8", "replace")}')
+
+
 def build_sink(src_dir, m11, out):
     built = subprocess.run(['gcc', *M11_FLAGS, '-I.', 'stream.c', 'sink.c', 'test-sink.c', *m11, '-o', str(out)], cwd=src_dir,
                            capture_output=True, timeout=180)
@@ -159,14 +174,18 @@ def run(number, name, old, new, classes, base, m11, m12):
     with tempfile.TemporaryDirectory() as directory:
         target = tree(directory)
         (target / name).write_text(source.replace(old, new), encoding='utf-8', newline='\n')
-        wifi, sink = base['wifi'], base['sink']
+        wifi, sink, cnssd, admit = base['wifi'], base['sink'], base['cnssd'], base['admit']
+        if name == 'cnssd-main.c':
+            cnssd, admit = target / 'test-cnssd', target / 'test-cnssd-main'
+            build_daemon(target, cnssd, admit)
         if name == 'wifi.c':
             wifi = target / 'test-wifi'
             build_wifi(target, m12, wifi)
         if name in ('stream.c', 'sink.c'):
             sink = target / 'test-sink'
             build_sink(target, m11, sink)
-        cmd = [sys.executable, 'test.py', '--failfast', '--wifi', str(wifi), '--cnssd', str(base['cnssd']), '--sink', str(sink), *classes]
+        cmd = [sys.executable, 'test.py', '--failfast', '--wifi', str(wifi), '--cnssd', str(cnssd), '--admit', str(admit), '--sink', str(sink),
+               *classes]
         try:
             result = subprocess.run(cmd, cwd=target, stdin=subprocess.DEVNULL, capture_output=True, timeout=300, start_new_session=True)
             return result.returncode != 0
@@ -180,15 +199,14 @@ def main():
         (work / 'obj').mkdir()
         m11, m12 = precompile(work / 'obj')
         source = tree(work / 'base')
-        base = {'wifi': work / 'test-wifi', 'sink': work / 'test-sink', 'cnssd': work / 'test-cnssd'}
+        base = {'wifi': work / 'test-wifi', 'sink': work / 'test-sink', 'cnssd': work / 'test-cnssd', 'admit': work / 'test-cnssd-main'}
         build_wifi(source, m12, base['wifi'])
         build_sink(source, m11, base['sink'])
-        built = subprocess.run(['gcc', '-std=c11', '-O1', '-w', 'test-cnssd.c', '-o', str(base['cnssd'])], cwd=source, capture_output=True)
-        if built.returncode:
-            raise Broken(built.stderr.decode('utf-8', 'replace'))
+        build_daemon(source, base['cnssd'], base['admit'])
         # The base must pass, or no mutant result means anything.
-        for classes in (WIFI + STAGE + SOUND, SINK):
-            check = subprocess.run([sys.executable, 'test.py', '--wifi', str(base['wifi']), '--cnssd', str(base['cnssd']), '--sink', str(base['sink']),
+        for classes in (('Daemon',) + WIFI + STAGE + SOUND, SINK):
+            check = subprocess.run([sys.executable, 'test.py', '--wifi', str(base['wifi']), '--cnssd', str(base['cnssd']), '--admit', str(base['admit']),
+                                    '--sink', str(base['sink']),
                                     *classes], cwd=source, stdin=subprocess.DEVNULL, capture_output=True, timeout=600, start_new_session=True)
             if check.returncode:
                 print(check.stdout.decode('utf-8', 'replace') + check.stderr.decode('utf-8', 'replace'))

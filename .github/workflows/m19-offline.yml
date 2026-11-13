@@ -46,7 +46,7 @@ jobs:
       - name: Vulkan and Present headers, lavapipe and Xvfb for the GPU and Present probes (no device)
         run: |
           set -euo pipefail
-          pkgs=(libvulkan-dev mesa-vulkan-drivers libxcb-present-dev libxcb-dri3-dev xvfb)
+          pkgs=(libvulkan-dev mesa-vulkan-drivers libxcb-present-dev libxcb-dri3-dev xvfb libssl-dev)
           if [ "${RUNNER_ARCH}" = "ARM64" ]; then
             pkgs+=(liblzma-dev)
           fi
@@ -207,6 +207,8 @@ jobs:
             artifacts/m19/**/m19-wifi-b
             artifacts/m19/**/m19-sink-a
             artifacts/m19/**/m19-sink-b
+            artifacts/m19/**/m19-cnssd-a
+            artifacts/m19/**/m19-cnssd-b
             artifacts/m19/**/m19-audio-a
             artifacts/m19/**/m19-audio-b
             artifacts/m19/**/m19-speaker-a
@@ -264,6 +266,15 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+      - name: OpenSSL headers for m19-cnssd's admission mutants, when the runner lacks them (no device)
+        if: matrix.suite == 'run6'
+        run: |
+          set -euo pipefail
+          if [ ! -f /usr/include/openssl/sha.h ]; then
+            sudo timeout --kill-after=5 120 apt-get update
+            sudo DEBIAN_FRONTEND=noninteractive timeout --kill-after=5 300 apt-get install -y --no-install-recommends libssl-dev
+          fi
+          test -f /usr/include/openssl/sha.h
       - name: Runner APT cache key for probe mutants (no device)
         if: matrix.needs_probes
         id: apt-key
@@ -283,7 +294,7 @@ jobs:
         if: matrix.needs_probes
         run: |
           set -euo pipefail
-          pkgs=(libvulkan-dev mesa-vulkan-drivers libxcb-present-dev libxcb-dri3-dev xvfb)
+          pkgs=(libvulkan-dev mesa-vulkan-drivers libxcb-present-dev libxcb-dri3-dev xvfb libssl-dev)
           mkdir -p /tmp/m19-apt-cache
           sudo rm -rf /tmp/m19-apt-archives
           sudo install -d -m 0755 /tmp/m19-apt-archives

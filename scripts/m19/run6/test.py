@@ -2,7 +2,6 @@
 """R6 tests (docs/m19-r6.md): m19-wifi on a fake kernel and a stand-in CNSS daemon, T9-wifi and T9-sound on synthetic
 trees, and m19-sink over R5b's Run31 fixtures. No phone, no module, no firmware and no network."""
 import argparse
-import ctypes
 import hashlib
 import os
 import re
@@ -73,37 +72,26 @@ exit 0
 SYSTEMCTL = '#!/bin/sh\necho "$*" >> "$M19_TEST/systemctl.log"\nexit "${M19_SYSTEMCTL_RC:-0}"\n'
 
 
-def become_init():
-    """This process adopts orphans (PR_SET_CHILD_SUBREAPER), as PID 1 does on the phone: m19-wifi's daemon must end up
-    its child, and the stand-in, like m12-cnssd, refuses any other parent."""
-    libc = ctypes.CDLL(None, use_errno=True)
-    if libc.prctl(36, 1, 0, 0, 0) != 0:
-        raise OSError(ctypes.get_errno(), 'PR_SET_CHILD_SUBREAPER')
+class Daemon(unittest.TestCase):
+    """m19-cnssd's admission: M12's daemon for an owner that is its parent, never init (R6a, R6b)."""
 
+    def test_the_owner_is_the_parent_that_made_the_pair(self):
+        result = subprocess.run([ARGS.admit], capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout, 'm19-cnssd admission: 16 cases PASS\n')
 
-def reap_adopted(seconds=5.0):
-    """Every adopted child, once it exited: the daemon leaves when its owner's socket closes. A daemon still running
-    after that fails the test."""
-    reaped, end = [], time.monotonic() + seconds
-    while True:
-        try:
-            pid, _ = os.waitpid(-1, os.WNOHANG)
-        except ChildProcessError:
-            return reaped
-        if pid:
-            reaped.append(pid)
-        elif time.monotonic() >= end:
-            raise AssertionError('an adopted daemon outlived its owner')
-        else:
-            time.sleep(0.02)
+    def test_the_entry_keeps_m12s_daemon_and_main(self):
+        text = (HERE / 'cnssd-main.c').read_text()
+        self.assertIn('#define M12_CNSSD_NO_MAIN\n#include "../../m12/next/cnssd-linux.c"\n', text)
+        # After admission, M12's main line for line.
+        m12 = (HERE.parents[1] / 'm12/next/cnssd-linux.c').read_text()
+        tail = m12[m12.index('    (void)signal(SIGTERM,SIG_IGN);'):m12.index('#endif', m12.index('int main('))]
+        self.assertIn(tail, text)
+        self.assertIn('if (m19_cnssd_admit(argc, argv, getppid(), geteuid(), 0, &l))\n        return 2;', text)
 
 
 class WifiRunner(unittest.TestCase):
     """m19-wifi: M12's order, its fail-closed stops, NetworkManager only after readiness, the daemon kept."""
-
-    @classmethod
-    def setUpClass(cls):
-        become_init()
 
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
@@ -117,7 +105,7 @@ class WifiRunner(unittest.TestCase):
         (r / 'run/m19/wifi/modules.list').write_text('')
         (r / 'run/m19/wifi/m19-audio').write_text(WIFI_HELPER)
         (r / 'run/m19/wifi/m19-audio').chmod(0o755)
-        shutil.copy(ARGS.cnssd, r / 'run/m19/wifi/m12-cnssd')
+        shutil.copy(ARGS.cnssd, r / 'run/m19/wifi/m19-cnssd')
         (r / 'usr/bin/systemctl').write_text(SYSTEMCTL)
         (r / 'usr/bin/systemctl').chmod(0o755)
         (r / 'proc/cmdline').write_text(CMDLINE)
@@ -132,12 +120,8 @@ class WifiRunner(unittest.TestCase):
     def run_wifi(self, **env):
         environment = {**os.environ, 'ASAN_OPTIONS': 'detect_leaks=0', 'M19_WIFI_ROOT': str(self.root), 'M19_TEST': str(self.test),
                        'M19_FAKE_KMSG': str(self.root / 'dev/kmsg'), 'M19_FAKE_FS_READY': str(self.root / 'sys/kernel/cnss/fs_ready'),
-                       'M19_WIFI_RETURN_MS': '200', 'M19_WIFI_OWNER_MS': '1500', 'M19_WIFI_CBC_MS': '1500',
-                       # This test is init. The intermediate child lingers, so a daemon that execs before init adopted it
-                       # meets the stand-in's parent check, as R6a's met m12-cnssd's.
-                       'M19_WIFI_INIT_PID': str(os.getpid()), 'M19_FAKE_PARENT': str(os.getpid()), 'M19_WIFI_MIDDLE_MS': '150', **env}
+                       'M19_WIFI_RETURN_MS': '200', 'M19_WIFI_OWNER_MS': '1500', 'M19_WIFI_CBC_MS': '1500', **env}
         result = subprocess.run([ARGS.wifi], capture_output=True, text=True, env=environment, timeout=60, start_new_session=True)
-        self.adopted = reap_adopted()
         return result.returncode, result.stdout + result.stderr
 
     def result(self):
@@ -171,27 +155,13 @@ class WifiRunner(unittest.TestCase):
         self.assertIn('M19 wifi: kernel cnss: FW name is qca6490/amss20.bin', out)
         self.assertIn('M19 wifi: hwid project expected=15 observed=15', out)
 
-    def test_the_daemon_is_inits_child(self):
-        for middle in ('150', '0'):
-            with self.subTest(middle=middle):
-                self.setUp()
-                rc, out = self.run_wifi(M19_WIFI_MIDDLE_MS=middle)
-                self.assertEqual((rc, self.result()), (0, 'ready wlan0\n'), out)
-                daemon = int(re.search(r'daemon pid=(\d+) ', out).group(1))
-                # Adopted by this test's init and reaped here, never by m19-wifi.
-                self.assertEqual(self.adopted, [daemon])
-
-    def test_a_daemon_init_never_adopts_fails_closed(self):
-        rc, out = self.run_wifi(M19_WIFI_INIT_PID='1', M19_WIFI_ADOPT_MS='300')
-        self.assertEqual((rc, self.result()), (1, 'failed owner -71\n'), out)
-        self.assertEqual(len(self.adopted), 1)
-        self.assertEqual((self.root / 'sys/kernel/cnss/fs_ready').read_text(), '')
-        self.assertEqual(self.log('systemctl.log'), '')
-        self.assertFalse((self.root / 'run/m19/wifi.ready').exists())
-
-    def test_a_daemon_under_any_other_parent_refuses(self):
-        # R6a: the stand-in, like m12-cnssd, returns 2 under a parent that is not init.
-        rc, out = self.run_wifi(M19_FAKE_PARENT='1')
+    def test_the_daemon_is_admitted_by_its_own_check(self):
+        # The stand-in runs m19-cnssd's admission: this runner, its parent, made the pair. A daemon that refuses its
+        # owner (as M12's did, R6a and R6b) is the end of the socket at once.
+        rc, out = self.run_wifi()
+        self.assertEqual((rc, self.result()), (0, 'ready wlan0\n'), out)
+        self.assertRegex(out, r'daemon pid=\d+ ready=1 idle=1 rc=0')
+        rc, out = self.run_wifi(M19_FAKE_CNSSD='exit')
         self.assertEqual((rc, self.result()), (1, 'failed owner -71\n'), out)
         self.assertIn('daemon receipt rc=-32', out)
 
@@ -264,8 +234,9 @@ class WifiRunner(unittest.TestCase):
         text = (HERE / 'wifi.c').read_text()
         self.assertNotRegex(text, r'\b(kill|delete_module|rmmod|reboot|SIGKILL|unlink|O_TRUNC[^\n]*fs_ready)\b')
         self.assertEqual(re.findall(r'write\(fd, "1", 1\)', text), ['write(fd, "1", 1)'])
-        # Production: the daemon's parent is PID 1 itself, within 2 s, and no intermediate lingers.
-        self.assertIn('.init_pid = 1, .adopt_ms = 2000, .middle_hold_ms = 0,', text)
+        # The daemon is m19-cnssd, this process's own child.
+        self.assertIn('.cnssd = "/run/m19/wifi/m19-cnssd",', text)
+        self.assertEqual(re.findall(r'execl\(C->cnssd, "([^"]+)"', text), ['m19-cnssd'])
 
 
 FAKE_BB = r'''#!/bin/sh
@@ -344,8 +315,8 @@ class WifiStage(unittest.TestCase):
         (plan / 'modules.list').write_text(''.join(rows))
         (plan / 'WCNSS_qcom_cfg.ini').write_text('gEnableIdleScan=0\n')
         (plan / 'WCNSS_qcom_cfg.ini.sha256').write_text(sha(b'gEnableIdleScan=0\n') + '  WCNSS_qcom_cfg.ini\n')
-        (plan / 'm12-cnssd').write_bytes(b'cnssd')
-        (plan / 'm12-cnssd.sha256').write_text(sha(b'cnssd') + '  m12-cnssd\n')
+        (plan / 'm19-cnssd').write_bytes(b'cnssd')
+        (plan / 'm19-cnssd.sha256').write_text(sha(b'cnssd') + '  m19-cnssd\n')
         (plan / 'm19-wifi').write_bytes(b'runner')
         (plan / 'private.nmconnection').write_text('[wifi]\nssid=1;2;\n')
         (plan / 'private.nmconnection').chmod(0o644)  # whatever its mode, the copy is root's alone
@@ -379,7 +350,7 @@ class WifiStage(unittest.TestCase):
         self.assertEqual((new / 'run/m19/firmware/wlan/qca_cld/qca6490/WCNSS_qcom_cfg.ini').read_text(), 'gEnableIdleScan=0\n')
         modules = sorted(p.name for p in (new / 'run/m19/wifi/modules').iterdir())
         self.assertEqual(modules, sorted(self.BOOT + ('qca_cld3_qca6490.ko',)))
-        for name in ('m19-audio', 'm12-cnssd', 'm19-wifi'):
+        for name in ('m19-audio', 'm19-cnssd', 'm19-wifi'):
             self.assertEqual((new / 'run/m19/wifi' / name).stat().st_mode & 0o777, 0o755)
         profile = new / 'etc/NetworkManager/system-connections/m19-wifi.nmconnection'
         self.assertEqual((profile.read_text(), profile.stat().st_mode & 0o777), ('[wifi]\nssid=1;2;\n', 0o600))
@@ -407,7 +378,7 @@ class WifiStage(unittest.TestCase):
         self.assertIn(' vendor_dlkm_b 1 m19-wifi-dlkm', self.log('helper.log'))
 
     def test_every_fault_skips_and_cleans_up(self):
-        cases = (('audio', 'skipped audio-stage\n'), ('path', 'skipped firmware-path\n'), ('input', 'skipped input m12-cnssd\n'),
+        cases = (('audio', 'skipped audio-stage\n'), ('path', 'skipped firmware-path\n'), ('input', 'skipped input m19-cnssd\n'),
                  ('slot', 'skipped slot []\n'), ('modem', 'skipped modem-missing\n'), ('writable', 'skipped modem-writable\n'),
                  ('mount', 'skipped modem-mount\n'), ('missing-fw', 'skipped firmware missing fw007.bin\n'),
                  ('count', 'skipped firmware count 221\n'), ('hash', 'skipped firmware-hash\n'), ('ini', 'skipped ini-hash\n'),
@@ -423,7 +394,7 @@ class WifiStage(unittest.TestCase):
                 elif change == 'path':
                     (self.root / 'sys/module/firmware_class/parameters/path').write_text('/m6/modem/image\n')
                 elif change == 'input':
-                    (plan / 'm12-cnssd').unlink()
+                    (plan / 'm19-cnssd').unlink()
                 elif change == 'slot':
                     (self.root / 'proc/bootconfig').write_text('androidboot.other = "x"\n')
                 elif change == 'modem':
@@ -451,7 +422,7 @@ class WifiStage(unittest.TestCase):
                 elif change == 'check':
                     env['M19_CHECK_RC'] = '2'
                 else:
-                    (plan / 'm12-cnssd').write_bytes(b'other')
+                    (plan / 'm19-cnssd').write_bytes(b'other')
                 rc, err = self.run_stage(**env)
                 self.assertEqual((rc, self.stage()), (0, want), err)
                 new = self.root / 'newroot'
@@ -607,6 +578,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--wifi', help='test-wifi, the runner built with M19_WIFI_TEST')
     parser.add_argument('--cnssd', help='test-cnssd, the stand-in daemon')
+    parser.add_argument('--admit', help='test-cnssd-main, m19-cnssd\'s admission tests')
     parser.add_argument('--sink', help='test-sink')
     parser.add_argument('--no-root-sink', action='store_true')
     ARGS, rest = parser.parse_known_args()

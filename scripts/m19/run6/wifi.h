@@ -10,7 +10,7 @@ struct m19_wifi_config {
     const char *helper;       /* /run/m19/wifi/m19-audio */
     const char *list;         /* /run/m19/wifi/modules.list */
     const char *modules;      /* /run/m19/wifi/modules */
-    const char *cnssd;        /* /run/m19/wifi/m12-cnssd */
+    const char *cnssd;        /* /run/m19/wifi/m19-cnssd */
     const char *systemctl;    /* /usr/bin/systemctl */
     const char *nm_unit;      /* NetworkManager.service */
     /* outputs */
@@ -32,11 +32,6 @@ struct m19_wifi_config {
     const char *kmsg;         /* /dev/kmsg */
     /* time, in ms */
     unsigned load_ms, settle_ms, owner_ms, fs_ready_ms, cbc_ms, iface_ms, command_ms, pump_ms;
-    /* m12-cnssd runs only as init's child (getppid() == 1, M12 ran it under its own PID 1): an intermediate child
-     * forks it and exits, and it execs once init adopted it, within adopt_ms. Production: init_pid 1, adopt_ms 2000,
-     * middle_hold_ms 0. Tests: their own subreaper as init, and a held intermediate so an exec before adoption shows. */
-    int init_pid;
-    unsigned adopt_ms, middle_hold_ms;
     /* 0 in production: supervise the daemon forever. Tests: return this many ms after the end. */
     unsigned return_after_ms;
     int require_root; /* production 1 */

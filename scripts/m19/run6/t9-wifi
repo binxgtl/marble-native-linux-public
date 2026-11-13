@@ -7,7 +7,7 @@
 #   3. the 13 modules: qca_cld3_qca6490.ko from vendor_dlkm$slot (mapped read-only from super's LP metadata,
 #      mounted read-only, copied, unmounted, unmapped) and 12 from this ramdisk's vendor modules; the list checked
 #      whole by the loader;
-#   4. the loader, M12 Run9 to Run11's m12-cnssd (byte for byte) and m19-wifi in /run/m19;
+#   4. the loader, m19-cnssd (M12 Run9 to Run11's daemon sources with an owner-is-parent entry) and m19-wifi in /run/m19;
 #   5. the network: the operator's single WPA2 profile (local only, never in Git or CI) as a 0600 NetworkManager
 #      keyfile in the RAM /etc.
 # The firmware loader already reads /run/m19/firmware (T9-gpu). The stop is graded, as the audio stage's: any
@@ -64,7 +64,7 @@ skip() {
 [ -f "$R/run/m19/audio.result" ] && [ "$(read_value "$R/run/m19/audio.result")" = ready ] || skip audio-stage
 [ "$(read_value "$R/sys/module/firmware_class/parameters/path")" = /run/m19/firmware ] || skip firmware-path
 safe_dir "$firmware" || skip firmware-directory
-for name in modules.list firmware.sha256 WCNSS_qcom_cfg.ini WCNSS_qcom_cfg.ini.sha256 m12-cnssd m12-cnssd.sha256 m19-wifi private.nmconnection; do
+for name in modules.list firmware.sha256 WCNSS_qcom_cfg.ini WCNSS_qcom_cfg.ini.sha256 m19-cnssd m19-cnssd.sha256 m19-wifi private.nmconnection; do
  [ -f "$plan/$name" ] && [ ! -L "$plan/$name" ] && [ -s "$plan/$name" ] || skip "input $name"
 done
 slot=$($BB sed -n 's/^androidboot\.slot_suffix = "\(_[ab]\)"$/\1/p' "$R/proc/bootconfig" 2>/dev/null || :)
@@ -154,12 +154,12 @@ $BB cp "$plan/modules.list" "$dest/modules.list" || skip list-copy
 "$HELPER" check "$dest/modules.list" "$dest/modules" "$dest/modules" || skip module-check
 
 # 4. The loader, the daemon and the runner.
-want=$($BB awk 'NR == 1 { print $1 }' "$plan/m12-cnssd.sha256") || skip cnssd-sha
+want=$($BB awk 'NR == 1 { print $1 }' "$plan/m19-cnssd.sha256") || skip cnssd-sha
 hex64 "$want" || skip cnssd-sha
-got=$($BB sha256sum "$plan/m12-cnssd") || skip cnssd-hash
+got=$($BB sha256sum "$plan/m19-cnssd") || skip cnssd-hash
 [ "${got%% *}" = "$want" ] || skip "cnssd hash ${got%% *}"
-$BB cp "$HELPER" "$dest/m19-audio" && $BB cp "$plan/m12-cnssd" "$dest/m12-cnssd" && $BB cp "$plan/m19-wifi" "$dest/m19-wifi" || skip binaries
-$BB chmod 755 "$dest/m19-audio" "$dest/m12-cnssd" "$dest/m19-wifi" || skip binary-mode
+$BB cp "$HELPER" "$dest/m19-audio" && $BB cp "$plan/m19-cnssd" "$dest/m19-cnssd" && $BB cp "$plan/m19-wifi" "$dest/m19-wifi" || skip binaries
+$BB chmod 755 "$dest/m19-audio" "$dest/m19-cnssd" "$dest/m19-wifi" || skip binary-mode
 
 # 5. The operator's network, readable by root alone, in the RAM /etc.
 connections=$new/etc/NetworkManager/system-connections
