@@ -46,8 +46,20 @@ int m19_stat_is_kthread(const char *line)
     return -1;
 }
 
+/* R7: a process whose root (the /proc entry's root link, followed) is the kept directory. */
+static int kept(const struct m19_handoff *h, long pid, const struct stat *keep)
+{
+    char path[512];
+    struct stat st;
+    snprintf(path, sizeof(path), "%s/%ld/root", h->proc, pid);
+    return !stat(path, &st) && st.st_dev == keep->st_dev && st.st_ino == keep->st_ino;
+}
+
 int m19_sweep(const struct m19_handoff *h, int kill_them)
 {
+    struct stat keep;
+    /* If the island's root cannot be read, nothing is spared: the island goes, and T12-ce will say so. */
+    int keeping = h->keep_root && !stat(h->keep_root, &keep);
     DIR *directory = opendir(h->proc);
     if (!directory)
         return -1;
@@ -77,6 +89,8 @@ int m19_sweep(const struct m19_handoff *h, int kill_them)
         }
         line[n] = 0;
         if (m19_stat_is_kthread(line) == 1)
+            continue;
+        if (keeping && kept(h, pid, &keep))
             continue;
         count++;
         if (kill_them)
@@ -140,7 +154,7 @@ int m19_handoff(int tty, const struct m19_handoff *h, int *moved)
     note(h, "handoff survivors=%d", left);
     if (left)
         return fail(tty, h, "survivors", left);
-    if (umount2(h->android, MNT_DETACH))
+    if (!h->keep_root && umount2(h->android, MNT_DETACH))
         return fail(tty, h, "android-detach", errno);
     struct stat parent, root;
     char path[512];

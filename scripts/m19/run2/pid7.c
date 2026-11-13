@@ -1,0 +1,162 @@
+/* M19 R7 PID 1 (docs/m19-r7.md). R6d's, with CE unlock:
+ *  - T7-de, after T6-read: /data read-only inside the TEE island, the DE system and user 0 keys added, Keystore2's
+ *    database copied into the island's RAM, as TWRP does before any PIN;
+ *  - T9-ce, after T9-wifi: /data/media read-only at the session's /run/m19/android, the keypad, and the CE broker in
+ *    the island, its socket in the session's /run/m19/ce;
+ *  - the hand-off spares the island (every process whose root is /tee) and leaves /tee mounted;
+ *  - the reporter's T12-ce, last: the keypad takes the owner's PIN once, and Android's own names judge the result.
+ * A hold before the USB link paints RED. Only a full PASS hands over; nothing restarts the phone. */
+#define _GNU_SOURCE
+#include <poll.h>
+#include <signal.h>
+#include <stdio.h>
+#include <string.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+#include "r2.h"
+
+static const struct m19_step steps[] = {
+    {"T3-audio", "/m19/t3-audio", 120000, M19_STEP_REQUIRED},
+    {"T0-extract", "/m19/t0-extract", 120000, M19_STEP_REQUIRED},
+    {"T1-services", "/m19/t1-start", 150000, M19_STEP_REQUIRED},
+    {"T2-unlock", "/m19/t2-unlock", 90000, M19_STEP_REQUIRED | M19_STEP_OWNED},
+    {"T5-mount", "/m19/t5-mount", 30000, M19_STEP_REQUIRED},
+    {"T6-read", "/m19/t6-read", 30000, M19_STEP_REQUIRED},
+    {"T7-de", "/m19/t7-de", 120000, M19_STEP_REQUIRED},
+    {"T9-root", "/m19/t9-root", 120000, M19_STEP_REQUIRED},
+    {"T9-desktop", "/m19/t9-desktop", 60000, M19_STEP_REQUIRED},
+    {"T9-gpu", "/m19/t9-gpu", 90000, M19_STEP_REQUIRED},
+    {"T9-sound", "/m19/t9-sound", 30000, M19_STEP_REQUIRED},
+    {"T9-wifi", "/m19/t9-wifi", 240000, M19_STEP_REQUIRED},
+    {"T9-ce", "/m19/t9-ce", 30000, M19_STEP_REQUIRED},
+    {"T8-writes", "/m19/t8-writes", 30000, M19_STEP_REQUIRED | M19_STEP_ALWAYS},
+};
+
+static struct m19_run run = {
+    .bootstrap = "/m19/bootstrap-audio", .adsp = "/m19/adsp", .connector = "/sbin/m15-connector", .display = "/sbin/m16-display",
+    .tty = "/dev/ttyGS0", .kmsg = "/dev/kmsg", .boot_log = "/run/m19/bootstrap.log", .logcat = "/tee/tmp/m19/logcat.txt",
+    .steps = steps, .step_count = sizeof(steps) / sizeof(steps[0]),
+    .bootstrap_ms = 180000, .display_ms = 20000, .blue_ms = 3000, .final_ms = 600000, .poll_ms = 5, .pace_ms = 20,
+    .link_ms = 420000, .log_ms = 300000, .beat_ms = 5000,
+};
+
+/* The session's two profiles (r4plan.DRI3_ENV and COPY_ENV). The checks use dri3, the profile a glamor X
+ * server gives every program: freedreno on KGSL for GL, Turnip for Vulkan, both presenting through DRI3.
+ * copy, R4a's path, is run once for comparison. */
+#define M19_VK_ICD "VK_DRIVER_FILES=/usr/share/vulkan/icd.d/freedreno_icd.aarch64.json"
+static const char *const dri3_env[] = {"MESA_LOADER_DRIVER_OVERRIDE=kgsl", "FD_FORCE_KGSL=1", "FD_KGSL_ENABLE_DMABUF=1", M19_VK_ICD, NULL};
+static const char *const copy_env[] = {M19_VK_ICD, "MESA_VK_WSI_DEBUG=sw", "MESA_LOADER_DRIVER_OVERRIDE=zink", "LIBGL_KOPPER_DRI2=1", NULL};
+
+/* R4i: the ways glxgears' frames can reach the X server. dri3 is the session's own and showed black in R4h; noubwc
+ * and linear keep it but without UBWC compression, then without tiling as well; zink renders through Turnip and
+ * presents through Vulkan's DRI3 swapchain, as vkcube does; copy is R4a's path through the CPU; soft is Mesa's
+ * software GL, drawn with plain X requests, the control. */
+#define M19_DRI3 "MESA_LOADER_DRIVER_OVERRIDE=kgsl", "FD_FORCE_KGSL=1", "FD_KGSL_ENABLE_DMABUF=1", M19_VK_ICD
+static const char *const noubwc_env[] = {M19_DRI3, "FD_MESA_DEBUG=noubwc", NULL};
+static const char *const linear_env[] = {M19_DRI3, "FD_MESA_DEBUG=noubwc,notile", NULL};
+static const char *const zink_env[] = {M19_VK_ICD, "MESA_LOADER_DRIVER_OVERRIDE=zink", NULL};
+static const char *const soft_env[] = {"LIBGL_ALWAYS_SOFTWARE=1", NULL};
+/* R4k: dri3 and zink again, with glxgears finishing its GPU work before every swap (glfinish.c). If they show,
+ * the X server copied frames the GPU had not drawn yet. */
+#define M19_FINISH "LD_PRELOAD=/run/m19/m19-glfinish.so"
+static const char *const finish_env[] = {M19_DRI3, M19_FINISH, NULL};
+static const char *const zinkfinish_env[] = {M19_VK_ICD, "MESA_LOADER_DRIVER_OVERRIDE=zink", M19_FINISH, NULL};
+static const struct m19_show shows[] = {{"dri3", dri3_env}, {"noubwc", noubwc_env}, {"linear", linear_env}, {"zink", zink_env}, {"copy", copy_env},
+                                        {"soft", soft_env}, {"finish", finish_env}, {"zinkfinish", zinkfinish_env}};
+
+/* R6: the session's PulseAudio (R6b: marble-pulse.service, which the reporter starts), for root. */
+static const char *const pulse_env[] = {"HOME=/run/m19/session", "XDG_RUNTIME_DIR=/run/m19/xdg", "PULSE_SERVER=unix:/run/m19/xdg/pulse/native",
+                                        NULL};
+
+static const struct m19_report report = {
+    .tty = "/dev/ttyGS0", .kmsg = "/dev/kmsg", .proc1_exe = "/proc/1/exe", .block = "/sys/block", .mountinfo = "/proc/self/mountinfo",
+    .systemctl = "/usr/bin/systemctl", .journalctl = "/usr/bin/journalctl", .analyze = "/usr/bin/systemd-analyze",
+    .display = "/run/m19/m16-display", .expected_init = "/usr/lib/systemd/systemd",
+    .settle_ms = 240000, .poll_ms = 1000, .beat_ms = 5000, .pace_ms = 20, .log_ms = 300000, .command_ms = 30000, .final_ms = 600000,
+    .tty_wait_ms = 30000,
+    .desktop = 1, .x_wait_ms = 120000, .session_wait_ms = 120000, .touch_ms = 60000, .want_hz = 120.0,
+    .xdpyinfo = "/usr/bin/xdpyinfo", .xrandr = "/usr/bin/xrandr", .xinput = "/usr/bin/xinput", .ps = "/usr/bin/ps", .proc = "/proc",
+    .interrupts = "/proc/interrupts", .card = "/dev/dri/card0", .touch_name = "goodix_ts",
+    .xorg_logs = {"/var/log/Xorg.0.log", "/var/log/Xorg.cpu.log"},
+    .guard_unit = "m19-r3-guard.service", .guard_marker = "/run/m19/guard-tripped",
+    .battery_temp = "/sys/class/power_supply/battery/temp", .thermal = "/sys/class/thermal",
+    .gpu = 1, .gpu_ms = 30000, .gears_ms = 11000, .cube_frames = 300, .kgsl_node = "/dev/kgsl-3d0",
+    .kgsl_model = "/sys/class/kgsl/kgsl-3d0/gpu_model", .gpu_probe = "/run/m19/m19-gpu-probe", .vulkaninfo = "/usr/bin/vulkaninfo",
+    .vkcube = "/usr/bin/vkcube", .glxinfo = "/usr/bin/glxinfo", .glxgears = "/usr/bin/glxgears", .eglinfo = "/usr/bin/eglinfo",
+    .vk_env = dri3_env, .gl_env = dri3_env, .egl_env = dri3_env, .glamor = 1, .xorg_unit = "marble-xorg.service",
+    .gpu_profile = "/run/m19/gpu-profile", .glmark2 = "/usr/bin/glmark2", .copy_env = copy_env,
+    /* R6: the turned screen adds a composite a frame; the windowed copy's rate is recorded, not judged. */
+    .present_probe = "/run/m19/m19-present-probe", .present_frames = 120, .judge_copy = 0, .judge_dri3 = 1, .shell = "/bin/sh", .shows = shows,
+    .show_count = sizeof(shows) / sizeof(shows[0]), .show_seconds = 3, .dmabuf_heap = "/dev/dma_heap/system", .dmabuf_env = dri3_env,
+    .audio = 1, .speaker_ms = 30000, .asound_cards = "/proc/asound/cards", .asound_pcm = "/proc/asound/pcm",
+    .sound_class = "/sys/class/sound", .snd_dev = "/dev/snd", .audio_card = "ukee-mtp-snd-card",
+    .speaker_clean = {"/dev/m11-snd", "/dev/m11-heap", "/dev/aud_pasthru_adsp", "/dev/msm_audio_ion", "/dev/msm_audio_ion_cma"},
+    .sink_unit = "marble-sink.service", .sink_report = "/run/m19/sink.report", .sink_status = "/run/m19/sink.status",
+    .pactl = "/usr/bin/pactl", .pacat = "/usr/bin/pacat", .sink_name = "marble_speaker", .tone_path = "/run/m19/sink-tone.raw",
+    .pulse_env = pulse_env, .sink_ms = 60000, .tone_ms = 15000, .idle_wait_ms = 12000,
+    .pulse_unit = "marble-pulse.service", .held_dir = "/dev/m11-snd", .held_uid = 0,
+    .wifi = 1, .wifi_ms = 240000, .wifi_result = "/run/m19/wifi.result", .wifi_report = "/run/m19/wifi.report", .nmcli = "/usr/bin/nmcli",
+    .getent = "/usr/bin/getent", .route = "/proc/net/route", .nm_profile = "/etc/NetworkManager/system-connections/m19-wifi.nmconnection",
+    .dns_name = "connectivity-check.ubuntu.com",
+    .rotation = "right",
+    /* R7: the owner has five minutes for the PIN; the keypad records the broker's answer, Android's names judge it. */
+    .ce = 1, .ce_ms = 300000, .ce_unit = "marble-ce.service", .ce_result = "/run/m19/ce.result", .ce_android = "/run/m19/android/0",
+    .ce_entry = "Android",
+};
+/* R4h: no compositor views. R4e to R4g measured them; R4d's compositor would only black out the panel again. */
+
+/* Battery 42.0 C, any thermal zone 80 C, CPU 90 % busy for a minute, or fifteen minutes in all. */
+static const struct m19_guard guard = {
+    .battery_temp = "/sys/class/power_supply/battery/temp", .thermal = "/sys/class/thermal", .stat = "/proc/stat", .kmsg = "/dev/kmsg",
+    .systemctl = "/usr/bin/systemctl", .display = "/run/m19/m16-display", .marker = "/run/m19/guard-tripped",
+    .units = {"marble-xfce.service", "marble-xorg.service", "marble-xorg-fallback.service"},
+    .period_ms = 2000, .note_ms = 30000, .busy_limit = 90, .busy_ms = 60000, .session_ms = 900000, .run_ms = 0, .command_ms = 30000,
+    .final_ms = 600000, .battery_limit = 420, .zone_limit = 80000,
+};
+
+static void hold(void)
+{
+    /* PID 1 must never exit, and nothing here restarts the phone. Long-press ends the run. */
+    for (;;) {
+        while (waitpid(-1, NULL, WNOHANG) > 0) {
+        }
+        (void)poll(NULL, 0, 100);
+    }
+}
+
+int main(int argc, char **argv)
+{
+    if (argc == 2 && !strcmp(argv[1], "report"))
+        return getpid() == 1 ? 64 : m19_report_main(&report);
+    if (argc == 2 && !strcmp(argv[1], "guard"))
+        return getpid() == 1 ? 64 : m19_guard_main(&guard);
+    if (getpid() != 1 || argc != 1)
+        return 64;
+    signal(SIGPIPE, SIG_IGN);
+    signal(SIGCHLD, SIG_DFL);
+    enum m19_run_end end = m19_run_main(&run);
+    if (end == M19_END_BOOTSTRAP) {
+        /* The bootstrap or the audio stage held, before the ADSP and the USB link. Nothing touched the TEE. */
+        char *argv_red[] = {"/sbin/m16-display", "00ff0000", "600000", NULL};
+        if (fork() == 0) {
+            execv(argv_red[0], argv_red);
+            _exit(127);
+        }
+    }
+    if (end == M19_END_PASS) {
+        /* R7: the TEE island stays, for the CE broker and the services it calls. */
+        struct m19_handoff handoff = {.proc = "/proc", .kmsg = "/dev/kmsg", .android = "/tee", .newroot = "/newroot",
+                                      .init = "/usr/lib/systemd/systemd", .keep_root = "/tee", .self = getpid(), .settle_ms = 10000,
+                                      .poll_ms = 20, .pace_ms = 20, .signal = kill};
+        int moved = 0;
+        (void)m19_handoff(run.tty_fd, &handoff, &moved);
+        /* Only a failed hand-off returns. The sweep stopped the GREEN painter, so YELLOW can take the panel. */
+        char *argv_display[] = {moved ? "/run/m19/m16-display" : "/sbin/m16-display", "00ffff00", "600000", NULL};
+        if (fork() == 0) {
+            execv(argv_display[0], argv_display);
+            _exit(127);
+        }
+    }
+    hold();
+}

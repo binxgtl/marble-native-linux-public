@@ -1,0 +1,22 @@
+#!/bin/busybox sh
+# T7-de (docs/m19-r7.md): /data inside the TEE island, read-only; the DE system and user 0 keys added to it, as TWRP
+# does before any PIN; Keystore2's database copied into the island's RAM. m19-ce prints one status line of codes
+# and counts; no key, name or path of Android's appears.
+set -eu
+R=${M19_ROOT:-}
+BB=${M19_BB:-/bin/busybox}
+fail() { printf 'M19 T7 failed: %s\n' "$*" >&2 || :; exit 1; }
+[ -d "$R/m19-data/ubuntu" ] || fail data
+$BB mkdir -p "$R/tee/data" || fail data-dir
+$BB mount -o bind "$R/m19-data" "$R/tee/data" || fail data-bind
+$BB mount -o remount,bind,ro "$R/tee/data" || fail data-read-only
+options=$($BB awk -v point="$R/tee/data" '$5 == point { o = $6 } END { print o }' "$R/proc/self/mountinfo") || fail mountinfo
+case "$options" in ro|ro,*) ;; *) fail "data-read-only-check $options";; esac
+$BB cp "$R/m19/m19-ce" "$R/tee/m19/m19-ce" || fail client-copy
+$BB chmod 755 "$R/tee/m19/m19-ce" || fail client-mode
+line=$(LD_LIBRARY_PATH=/system/lib64:/vendor/lib64/hw $BB chroot "$R/tee" /m19/m19-ce de) || :
+printf 'M19 %s\n' "$line" >&2
+case "$line" in
+ "M19_CE_DE status=OK keys=2 "*" db=OK") exit 0;;
+ *) exit 1;;
+esac

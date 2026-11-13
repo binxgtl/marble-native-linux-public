@@ -23,6 +23,7 @@ import r3plan  # noqa: E402
 import r4plan  # noqa: E402
 import r5plan  # noqa: E402
 import r6plan  # noqa: E402
+import r7plan  # noqa: E402
 import rootfs  # noqa: E402
 
 ARGS = None
@@ -97,6 +98,24 @@ class Sweep(unittest.TestCase):
         self.assertIn('count 3', out)
         self.assertEqual(sorted(re.findall(r'signal (\d+) 9', out)), ['300', '301', '303'])
 
+    def test_the_island_is_spared_when_kept(self):
+        with tempfile.TemporaryDirectory() as directory:
+            proc = fake_proc(directory, {300: ('init', 0), 301: ('keystore2', 0), 302: ('m16-display', 0), 303: ('sh', 0)})
+            island, elsewhere = Path(directory) / 'tee', Path(directory) / 'other'
+            island.mkdir()
+            elsewhere.mkdir()
+            os.symlink(island, proc / '300' / 'root')
+            os.symlink(island, proc / '301' / 'root')
+            os.symlink(elsewhere, proc / '302' / 'root')
+            env = dict(os.environ, M19_KEEP_ROOT=str(island))
+            done = subprocess.run([ARGS.driver, 'sweep', str(proc), '99999', '1'], capture_output=True, text=True, timeout=10, env=env)
+            self.assertIn('count 2', done.stdout)
+            self.assertEqual(sorted(re.findall(r'signal (\d+) 9', done.stdout)), ['302', '303'])
+            # A kept root that cannot be read spares nothing.
+            env['M19_KEEP_ROOT'] = str(Path(directory) / 'missing')
+            done = subprocess.run([ARGS.driver, 'sweep', str(proc), '99999', '0'], capture_output=True, text=True, timeout=10, env=env)
+            self.assertIn('count 4', done.stdout)
+
     def test_counting_alone_signals_nothing(self):
         out = self.run_sweep({300: ('init', 0)}, 0)
         self.assertIn('count 1', out)
@@ -152,6 +171,23 @@ class Handoff(unittest.TestCase):
         self.assertEqual([call for call in calls if call.startswith('argv')], ['argv /usr/lib/systemd/systemd'])
         self.assertIn('envp PATH=/usr/sbin:/usr/bin:/sbin:/bin', calls)
         self.assertNotIn('signal 2 9', calls)
+
+    def test_a_kept_island_is_neither_killed_nor_detached(self):
+        island = self.root / 'tee'
+        island.mkdir()
+        os.symlink(island, self.proc / '300' / 'root')
+        wire = Wire()
+        record = self.root / 'record'
+        env = dict(os.environ, ASAN_OPTIONS='detect_leaks=0', M19_KEEP_ROOT=str(island))
+        subprocess.run([ARGS.driver, 'handoff', str(self.proc), str(self.newroot), str(island), str(self.root / 'kmsg'), wire.path, str(record)],
+                       capture_output=True, text=True, timeout=30, env=env)
+        lines = [line for line in wire.close().decode().splitlines() if line.startswith('M19STEP')]
+        calls = record.read_text().splitlines()
+        self.assertEqual(lines, ['M19STEP T10-handoff START', 'M19STEP T10-handoff OK 0 0'])
+        actions = [call.split()[0] for call in calls if not call.startswith(('argv', 'envp'))]
+        self.assertEqual(actions, ['signal', 'chdir', 'mount', 'chroot', 'chdir', 'execve', 'exec-done'])
+        self.assertIn('signal 301 9', calls)
+        self.assertNotIn('signal 300 9', calls)
 
     def test_survivors_stop_before_any_mount(self):
         rc, lines, calls = self.run_handoff('survivor')
@@ -668,6 +704,65 @@ cat "$d/nm-devices"
 GETENT = '#!/bin/sh\nexit "${M19_DNS_RC:-0}"\n'
 
 
+class CeReport(ReportBase):
+    """R7 T12-ce: the keypad's recorded broker status and Android's own names in /data/media/0; no name printed."""
+
+    def setUp(self):
+        super().setUp()
+        self.android = self.root / 'android0'
+        self.android.mkdir()
+        for name in ('Android', 'DCIM', 'Private holiday photos'):
+            (self.android / name).mkdir()
+        (self.root / 'ce.result').write_text('M19_CE status=OK detail=0 version=3 timeout=0\n')
+
+    def ce(self, wait_ms='600'):
+        data, colour = self.run_report(env={'M19_TEST_CE': wait_ms})
+        fields, log, steps = self.parse(data)
+        line = re.search(r'M19 R7 ce (.*)\n', log)
+        return log, dict(item.split('=', 1) for item in line.group(1).split()) if line else None, steps
+
+    def test_unlocked_storage_passes_without_names(self):
+        log, e, steps = self.ce()
+        self.assertEqual((e['status'], e['entry_seen'], e['entries'], e['ce_ok']), ('OK', '1', '3', '1'))
+        self.assertEqual(self.verdict(log)['all_ok'], '1')
+        self.assertIn('start marble-ce.service', (self.test / 'started').read_text())
+        self.assertIn('M19STEP T12-ce OK OK 1 3', steps)
+        self.assertNotIn('holiday', log)
+        self.assertNotIn('DCIM', log)
+
+    def test_each_missing_piece_fails(self):
+        for change in ('rejected', 'cancelled', 'garbled', 'no-result', 'encrypted-names', 'no-storage'):
+            with self.subTest(change=change):
+                self.setUp()
+                if change == 'rejected':
+                    (self.root / 'ce.result').write_text('M19_CE status=GK_REJECTED detail=-1 version=3 timeout=0\n')
+                elif change == 'cancelled':
+                    (self.root / 'ce.result').write_text('M19_CE status=CANCELLED\n')
+                elif change == 'garbled':
+                    (self.root / 'ce.result').write_text('status=OK\n')
+                elif change == 'no-result':
+                    (self.root / 'ce.result').unlink()
+                elif change == 'encrypted-names':
+                    (self.android / 'Android').rmdir()
+                    (self.android / 'AAAAAAAAAAAAAAAAAAAAAA').mkdir()
+                else:
+                    shutil.rmtree(self.android)
+                log, e, steps = self.ce(wait_ms='300')
+                self.assertEqual(e['ce_ok'], '0', change)
+                self.assertEqual(self.verdict(log)['all_ok'], '0')
+                if change in ('encrypted-names', 'no-storage'):
+                    self.assertEqual(e['status'], 'OK')
+                if change == 'no-storage':
+                    self.assertEqual(e['entries'], '-1')
+
+    def test_a_missing_result_is_waited_for(self):
+        (self.root / 'ce.result').unlink()
+        start = time.monotonic()
+        log, e, steps = self.ce(wait_ms='800')
+        self.assertGreaterEqual(time.monotonic() - start, 0.8)
+        self.assertEqual((e['result_seen'], e['status'], e['ce_ok']), ('0', 'none', '0'))
+
+
 class WifiReport(ReportBase):
     """R6 T12-wifi: m19-wifi's result, NetworkManager's state, the default route, its gateway's echo; nothing named."""
 
@@ -1166,7 +1261,8 @@ class Static(unittest.TestCase):
         self.assertNotRegex(text, r'\breboot\(|RB_AUTOBOOT|LINUX_REBOOT')
 
     def test_no_reboot_and_no_block_write_anywhere_in_r2(self):
-        for name in ('handoff.c', 'report.c', 'wire.c', 'pid2.c', 't9-root', 'pid4.c', 'pid5.c', 'pid6.c', 't9-gpu', 'gpu-probe.c', 'present-probe.c'):
+        for name in ('handoff.c', 'report.c', 'wire.c', 'pid2.c', 't9-root', 'pid4.c', 'pid5.c', 'pid6.c', 'pid7.c', 't9-gpu', 'gpu-probe.c',
+                     'present-probe.c'):
             text = (HERE / name).read_text()
             self.assertNotRegex(text, r'\b(reboot|poweroff|mkfs|fsck|blkdiscard|fstrim|setrw|wipe|sgdisk|parted)\b|\bof=/dev|O_WRONLY[^\n]*/dev/(sd|block|dm)', name)
         text = (HERE / 't9-root').read_text()
@@ -1259,6 +1355,30 @@ class Static(unittest.TestCase):
             self.assertEqual(items[-1], 'NULL')
             self.assertEqual(tuple(items[:-1]), want, name)
         self.assertNotRegex(text, r'\breboot\(|RB_AUTOBOOT|LINUX_REBOOT')
+
+    def test_pid7_is_pid6_with_ce_and_the_kept_island_and_nothing_else(self):
+        def body(name):
+            text = (HERE / name).read_text()
+            return text[text.index('*/\n') + 3:].splitlines()
+        changes = [line[0] + ' ' + line[1:] for line in difflib.unified_diff(body('pid6.c'), body('pid7.c'), lineterm='', n=0)
+                   if line[:1] in '+-' and line[:3] not in ('+++', '---')]
+        self.assertEqual(changes, [
+            '+     {"T7-de", "/m19/t7-de", 120000, M19_STEP_REQUIRED},',
+            '+     {"T9-ce", "/m19/t9-ce", 30000, M19_STEP_REQUIRED},',
+            "+     /* R7: the owner has five minutes for the PIN; the keypad records the broker's answer, Android's names judge it. */",
+            '+     .ce = 1, .ce_ms = 300000, .ce_unit = "marble-ce.service", .ce_result = "/run/m19/ce.result", .ce_android = "/run/m19/android/0",',
+            '+     .ce_entry = "Android",',
+            '-         struct m19_handoff handoff = {.proc = "/proc", .kmsg = "/dev/kmsg", .android = "/tee", .newroot = "/newroot",',
+            '-                                       .init = "/usr/lib/systemd/systemd", .self = getpid(), .settle_ms = 10000, .poll_ms = 20,',
+            '-                                       .pace_ms = 20, .signal = kill};',
+            '+         /* R7: the TEE island stays, for the CE broker and the services it calls. */',
+            '+         struct m19_handoff handoff = {.proc = "/proc", .kmsg = "/dev/kmsg", .android = "/tee", .newroot = "/newroot",',
+            '+                                       .init = "/usr/lib/systemd/systemd", .keep_root = "/tee", .self = getpid(), .settle_ms = 10000,',
+            '+                                       .poll_ms = 20, .pace_ms = 20, .signal = kill};'])
+        names = re.findall(r'\{"(T\d+-[a-z]+)", "/m19/(t\d-[a-z]+)"', (HERE / 'pid7.c').read_text())
+        self.assertEqual([name for name, _ in names], ['T3-audio', 'T0-extract', 'T1-services', 'T2-unlock', 'T5-mount', 'T6-read', 'T7-de',
+                                                       'T9-root', 'T9-desktop', 'T9-gpu', 'T9-sound', 'T9-wifi', 'T9-ce', 'T8-writes'])
+        self.assertLessEqual(len(names), int(re.search(r'#define M19_STEPS_MAX (\d+)', (HERE.parent / 'run1/r1.h').read_text()).group(1)))
 
     def test_pid6_is_pid5_with_wifi_the_sink_and_landscape_and_nothing_else(self):
         def body(name):
@@ -1459,6 +1579,35 @@ class Plan4(unittest.TestCase):
         # R4e: nothing in the session touches xfwm4's settings; only the reporter runs the compositor script.
         self.assertNotIn('autostart', r4plan.SESSION)
         self.assertNotIn('gpu-compositor', r4plan.SESSION)
+
+
+class Plan7(unittest.TestCase):
+    """R7's plan: R6d's, with its own target and report, and the keypad unit the reporter starts once."""
+
+    def setUp(self):
+        self.files, self.r6 = r7plan.render(), r6plan.render()
+
+    def test_everything_else_is_r6s(self):
+        changed = {name for name in set(self.files) | set(self.r6) if self.files.get(name) != self.r6.get(name)}
+        self.assertEqual(changed, {'m19/r2/default', 'm19/r2/files', 'm19/r2/etc/systemd/system/m19-r6.target',
+                                   'm19/r2/etc/systemd/system/m19-r6-report.service', 'm19/r2/etc/systemd/system/m19-r7.target',
+                                   'm19/r2/etc/systemd/system/m19-r7-report.service', 'm19/r2/etc/systemd/system/marble-ce.service'})
+        self.assertEqual(self.files['m19/r2/default'], b'm19-r7.target\n')
+        listed = self.files['m19/r2/files'].decode().split()
+        self.assertEqual(sorted(listed), sorted(name[len('m19/r2/etc/'):] for name in self.files if name.startswith('m19/r2/etc/')))
+        target = self.files['m19/r2/etc/systemd/system/m19-r7.target'].decode()
+        old = self.r6['m19/r2/etc/systemd/system/m19-r6.target'].decode()
+        self.assertEqual(target.replace('m19-r7-report.service', 'm19-r6-report.service').split('\n')[2:], old.split('\n')[2:])
+
+    def test_the_keypad_runs_only_when_the_reporter_starts_it(self):
+        unit = self.files['m19/r2/etc/systemd/system/marble-ce.service'].decode()
+        self.assertNotIn('marble-ce', self.files['m19/r2/etc/systemd/system/m19-r7.target'].decode())
+        self.assertNotIn('[Install]', unit)
+        self.assertIn('ConditionPathExists=/run/m19/ce/ce.sock\n', unit)
+        self.assertIn('ExecStart=/run/m19/m19-ce-prompt /run/m19/ce/ce.sock /run/m19/ce.result\n', unit)
+        self.assertIn('Restart=no\n', unit)
+        self.assertIn('LimitCORE=0\n', unit)
+        self.assertIn('StandardOutput=null\n', unit)
 
 
 class Plan6(unittest.TestCase):

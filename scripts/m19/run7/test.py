@@ -2,6 +2,7 @@
 """m19-ce-prompt in a real X server (Xvfb), tapped through XTEST, against a fake broker socket. No PIN of the
 owner's: the fake broker accepts one synthetic code."""
 import argparse
+import re
 import os
 import shutil
 import socket
@@ -94,6 +95,38 @@ class Prompt(unittest.TestCase):
         code, messages, result = self.session('4829U', broker=False)
         self.assertEqual(result, 'M19_CE status=NO_BROKER\n')
         self.assertEqual(code, 1)
+
+
+HERE = Path(__file__).resolve().parent
+
+
+class Steps(unittest.TestCase):
+    """T7-de and T9-ce as text: they need root and the phone, so their shape is what CI can hold them to."""
+
+    def test_every_mount_is_a_read_only_bind(self):
+        for name in ('t7-de', 't9-ce'):
+            text = (HERE / name).read_text()
+            self.assertTrue(text.startswith('#!/bin/busybox sh\nset -eu\n') or text.startswith('#!/bin/busybox sh\n#'), name)
+            mounts = [line.strip() for line in text.splitlines() if ' mount ' in f' {line.strip()} ' and not line.strip().startswith('#')]
+            self.assertTrue(mounts, name)
+            for line in mounts:
+                self.assertRegex(line, r'^\$BB mount -o (bind|remount,bind,ro) ', name)
+            self.assertNotRegex(text, r'\brw\b|mknod|blockdev|dd |of=|rm -|umount|reboot|/data/misc/vold/user_keys/ce|setprop', name)
+            self.assertIn('ro|ro,*) ;;', text, name)
+
+    def test_t7_runs_the_de_step_only(self):
+        text = (HERE / 't7-de').read_text()
+        self.assertEqual(re.findall(r'/m19/m19-ce \w+', text), ['/m19/m19-ce de'])
+        self.assertIn('"M19_CE_DE status=OK keys=2 "*" db=OK") exit 0;;', text)
+
+    def test_t9_starts_the_broker_in_the_island_and_shows_media_read_only(self):
+        text = (HERE / 't9-ce').read_text()
+        self.assertEqual(re.findall(r'/m19/m19-ce \w+[^\n\\]*', text), ['/m19/m19-ce broker /m19-ce/ce.sock '])
+        self.assertIn('$BB setsid $BB chroot "$R/tee" /m19/m19-ce broker', text)
+        self.assertIn('$BB mount -o bind "$R/m19-data/media" "$new/run/m19/android"', text)
+        self.assertIn('$BB mount -o remount,bind,ro "$new/run/m19/android"', text)
+        self.assertIn('$BB mkdir -m 0700 "$dir"', text)
+        self.assertNotIn('/data/media/0', text)
 
 
 def main():

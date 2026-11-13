@@ -20,6 +20,10 @@ struct m19_handoff {
     const char *android; /* "/tee": the Android chroot, detached once nothing runs in it */
     const char *newroot; /* "/newroot", built by T9 */
     const char *init;    /* "/usr/lib/systemd/systemd", inside the new root */
+    /* R7: when set (to android), the TEE island outlives the hand-off. Processes whose root is this directory are
+     * neither signalled nor counted, and it is not detached: a lazy unmount would cut its submounts away from the
+     * services inside it. NULL keeps R2 to R6's behaviour. */
+    const char *keep_root;
     pid_t self;          /* never signalled, besides PID 1 */
     unsigned settle_ms, poll_ms, pace_ms;
     int (*signal)(pid_t, int); /* kill(2) in production */
@@ -107,6 +111,11 @@ struct m19_report {
     const char *wifi_result, *wifi_report, *nmcli, *getent, *route, *nm_profile, *dns_name;
     /* R6, when rotation is set: xrandr's first connected output must be turned so, the screen wider than tall. */
     const char *rotation;
+    /* R7, when ce is set: T12-ce starts ce_unit (the keypad) once and waits up to ce_ms for the keypad to record the
+     * broker's status in ce_result. Judged by that status and by Android's own storage: in ce_android the entry
+     * ce_entry has its real name only once the CE key is added. Counts only; no entry name is printed. */
+    unsigned ce, ce_ms;
+    const char *ce_unit, *ce_result, *ce_android, *ce_entry;
 };
 
 /* R3's guard, a service of its own beside the desktop. It stops the desktop units and paints YELLOW

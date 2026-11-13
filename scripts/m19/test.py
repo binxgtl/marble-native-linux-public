@@ -417,6 +417,20 @@ class Plan(unittest.TestCase):
         with self.assertRaisesRegex(fbe.Stop, 'RC_SERVICE'):
             plan.check_rc(plan.init_rc() + '    start adb_shell\n')
 
+    def test_r7_rc_adds_the_gatekeeper_hal_only(self):
+        r6, r7 = plan.init_rc().splitlines(), plan.init_rc(ce=True).splitlines()
+        added = [line for line in r7 if line not in r6]
+        self.assertEqual(added, ['    start gatekeeper-1-0'])
+        self.assertEqual([line for line in r6 if line not in r7], [])
+        self.assertLess(r7.index('    start keystore2'), r7.index('    start gatekeeper-1-0'))
+        self.assertNotIn('critical', '\n'.join(r7))
+        with self.assertRaisesRegex(fbe.Stop, 'RC_SERVICE'):
+            plan.check_rc('\n'.join(r7))
+        for line in ('    start gatekeeperd', '    start vold'):
+            with self.subTest(line=line), self.assertRaises(fbe.Stop):
+                plan.check_rc('\n'.join(r7) + '\n' + line + '\n', ce=True)
+        self.assertIn('system/bin/gatekeeperd', plan.FORBIDDEN_BINARIES)
+
     def test_preflight_passes_on_good_state(self):
         names = set(plan.TEE_MODULES)
         self.assertEqual(plan.blocking(plan.preflight(good_survey(), good_audit(), names)), [])

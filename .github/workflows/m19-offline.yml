@@ -202,6 +202,7 @@ jobs:
             artifacts/m19/**/m19-unlock-a
             artifacts/m19/**/m19-ce-a
             artifacts/m19/**/m19-ce-prompt-a
+            artifacts/m19/**/m19-ce-prompt-b
             artifacts/m19/**/m19-probe-a
             artifacts/m19/**/m19-probe-b
             artifacts/m19/**/pid1-a
@@ -216,6 +217,8 @@ jobs:
             artifacts/m19/**/pid5-b
             artifacts/m19/**/pid6-a
             artifacts/m19/**/pid6-b
+            artifacts/m19/**/pid7-a
+            artifacts/m19/**/pid7-b
             artifacts/m19/**/m19-wifi-a
             artifacts/m19/**/m19-wifi-b
             artifacts/m19/**/m19-sink-a

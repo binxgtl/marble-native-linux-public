@@ -1870,6 +1870,76 @@ static void wifi_phase(const struct m19_report *c, int tty, struct wifi *w)
                         w->route, w->ping);
 }
 
+/* R7: T12-ce. The keypad (ce_unit) takes the owner's PIN once and hands it to the broker in the TEE island; the keypad
+ * records the broker's one status line in ce_result. Judged by that status and by Android's own storage: ce_entry has
+ * its real name in ce_android only once the CE key is in. Counts only: no entry name is printed. */
+struct ce {
+    int unit_rc, result_seen, status_ok, entry_seen, entries, ce_ok;
+    long waited_ms;
+    char status[32];
+};
+
+static void ce_status(const char *text, char *status, size_t room)
+{
+    static const char head[] = "M19_CE status=";
+    status[0] = 0;
+    if (strncmp(text, head, sizeof(head) - 1))
+        return;
+    const char *word = text + sizeof(head) - 1;
+    size_t length = strcspn(word, " \n");
+    for (size_t i = 0; i < length; i++)
+        if (!((word[i] >= 'A' && word[i] <= 'Z') || word[i] == '_'))
+            return;
+    if (length && length < room) {
+        memcpy(status, word, length);
+        status[length] = 0;
+    }
+}
+
+static void ce_phase(const struct m19_report *c, int tty, struct ce *e)
+{
+    memset(e, 0, sizeof(*e));
+    e->unit_rc = -1;
+    e->entries = -1;
+    (void)m19_wire_line(tty, c->pace_ms, M19_DEVICE_STEP " T12-ce START");
+    char *start_argv[] = {(char *)c->systemctl, "start", (char *)c->ce_unit, NULL};
+    e->unit_rc = section(start_argv, SECTION_CAP / 16, c->command_ms);
+    static char text[512];
+    unsigned long long began = m19_now_ms(), deadline = began + c->ce_ms, beat = began + c->beat_ms;
+    for (;;) {
+        if (file_text(c->ce_result, text, sizeof(text)) > 0) {
+            e->result_seen = 1;
+            break;
+        }
+        unsigned long long now = m19_now_ms();
+        if (e->unit_rc != 0 || now >= deadline)
+            break;
+        if (c->beat_ms && now >= beat) {
+            (void)m19_wire_line(tty, c->pace_ms, M19_DEVICE_BEAT " T12-ce %llu wait", (now - began) / 1000);
+            beat = now + c->beat_ms;
+        }
+        (void)poll(NULL, 0, 200);
+    }
+    e->waited_ms = (long)(m19_now_ms() - began);
+    if (e->result_seen)
+        ce_status(text, e->status, sizeof(e->status));
+    e->status_ok = !strcmp(e->status, "OK");
+    DIR *directory = opendir(c->ce_android);
+    if (directory) {
+        e->entries = 0;
+        for (struct dirent *entry; (entry = readdir(directory));) {
+            if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, ".."))
+                continue;
+            e->entries++;
+            e->entry_seen |= !strcmp(entry->d_name, c->ce_entry);
+        }
+        closedir(directory);
+    }
+    e->ce_ok = e->status_ok && e->entry_seen;
+    (void)m19_wire_line(tty, c->pace_ms, M19_DEVICE_STEP " T12-ce %s %s %d %d", e->ce_ok ? "OK" : "FAIL", e->status[0] ? e->status : "none",
+                        e->entry_seen, e->entries);
+}
+
 struct sink {
     int unit_rc, report_seen, streaming, chord_ok, holder_alive, holder_fds, private_clean, held_empty, pulse_unit_rc, pulse_sink,
         pulse_default, tone_rc;
@@ -2196,6 +2266,11 @@ int m19_report_main(const struct m19_report *c)
         wifi_phase(c, tty, &w);
     if (c->audio && c->sink_unit && (!c->desktop || d.x_ok))
         sink_phase(c, tty, &k);
+    /* R7: the owner's PIN, last, once everything else is judged. */
+    struct ce e;
+    memset(&e, 0, sizeof(e));
+    if (c->ce && (!c->desktop || d.x_ok))
+        ce_phase(c, tty, &e);
 
     char exe[256];
     ssize_t n = readlink(c->proc1_exe, exe, sizeof(exe) - 1);
@@ -2353,8 +2428,14 @@ int m19_report_main(const struct m19_report *c)
         addf("M19 wifi report\n");
         (void)add_file(c->wifi_report, SECTION_CAP / 8);
     }
+    int ce_ok = 1;
+    if (c->ce) {
+        ce_ok = e.ce_ok;
+        addf("M19 R7 ce unit_rc=%d result_seen=%d status=%s entry_seen=%d entries=%d waited_ms=%ld ce_ok=%d\n", e.unit_rc, e.result_seen,
+             e.status[0] ? e.status : "none", e.entry_seen, e.entries, e.waited_ms, e.ce_ok);
+    }
     int all_ok = init_ok && state_ok && targets_ok && writes_ok && ro_ok && mounts_ok && !write_warning && desktop_ok && gpu_ok && audio_ok &&
-                 wifi_ok;
+                 wifi_ok && ce_ok;
     addf("M19 R2 verdict init=%d state=%s targets=%d writes=%d read_only=%d mounts=%d write_warning=%d all_ok=%d\n", init_ok, state, targets_ok,
          writes_ok, ro_ok, mounts_ok, write_warning, all_ok);
 

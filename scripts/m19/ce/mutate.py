@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
-"""Mutants of the R7 CE core: every one must fail test.py. Defence-in-depth checks that a later check always
-catches as well (link refusals before O_NOFOLLOW opens, bounds a corrupted length fails anyway) are not listed."""
+"""Mutants of the R7 CE core, broker and Keystore2 binding: every one must fail test.py. Defence-in-depth checks that a
+later check always catches as well (link refusals before O_NOFOLLOW opens, bounds a corrupted length fails anyway) are
+not listed, nor the broker's early wipe before its reply, which the wipe on every return covers too. gk.cpp's layouts
+are checked by test.py against a fake built with real libc++; its static_asserts pin the sizes."""
 import argparse
+import os
 import shutil
 import subprocess
 import sys
@@ -69,6 +72,23 @@ MUTANTS = (
     ('fscrypt.c', 'memcpy(arg + 0x4c, &flags, 4);', ''),
     ('fscrypt.c', 'memcpy(arg + 0x28, &size, 4);', 'memcpy(arg + 0x2c, &size, 4);'),
     ('fscrypt.c', 'uint32_t type = KEY_SPEC_TYPE_IDENTIFIER,', 'uint32_t type = 1,'),
+    # The broker: one message, from uid 0, of the right shape, before any attempt.
+    ('broker.c', 'cred.uid != peer_uid', '0'),
+    ('broker.c', 'got > M19_CE_MESSAGE_MAX || ', ''),
+    ('broker.c', ' || memcmp(secret.message, PREFIX, sizeof(PREFIX) - 1)', ''),
+    ('broker.c', 'chmod(path, 0600)', 'chmod(path, 0666)'),
+    # Keystore2: TWRP's descriptor, parameters, order and forced flag, and the auth token's fields.
+    ('ks.cpp', 'key.nspace = M19_CE_KEYSTORE_NAMESPACE;', 'key.nspace = M19_CE_KEYSTORE_NAMESPACE - 1;'),
+    ('ks.cpp', 'key.domain = ks2::Domain::SELINUX;', 'key.domain = ks2::Domain::APP;'),
+    ('ks.cpp', 'parameters, true, &operation);', 'parameters, false, &operation);'),
+    ('ks.cpp', 'constexpr int32_t kMacBits = 128;', 'constexpr int32_t kMacBits = 96;'),
+    ('ks.cpp', 'hat.timestamp.milliSeconds = token->timestamp_ms;', 'hat.timestamp.milliSeconds = 0;'),
+    ('ks.cpp', 'hat.authenticatorId = token->authenticator_id;', 'hat.authenticatorId = token->user_id;'),
+    ('ks.cpp', '!plain || plain->empty() || plain->size() > capacity', '!plain || plain->empty()'),
+    ('ks.cpp', 'status = operation.iOperation->finish(input, std::nullopt, &plain);', 'status = operation.iOperation->finish(input, input, &plain);'),
+    ('ks.cpp', '        parameters.push_back(parameter<Kind::paddingMode>(km::Tag::PADDING, km::PaddingMode::NONE));\n', ''),
+    ('ks.cpp', 'context->authorization = auth::IKeystoreAuthorization::fromBinder(authorization);\n        if (!context->service || !context->authorization)',
+     'context->authorization = auth::IKeystoreAuthorization::fromBinder(authorization);\n        if (!context->service)'),
 )
 
 
@@ -89,12 +109,22 @@ def main():
                 if path.suffix in ('.c', '.h', '.py'):
                     shutil.copy(path, root / 'ce')
             (root / 'ce' / name).write_text(source.replace(old, new, 1), encoding='utf-8')
-            build = subprocess.run(['gcc', '-std=c11', '-O1', '-w', '-DM19_CE_TEST', 'ce/ce.c', 'ce/crypto.c', 'ce/fscrypt.c', 'ce/test-ce.c',
-                                    'unlock/core.c', 'unlock/hash.c', '-ldl', '-o', 'test-ce'], cwd=root, capture_output=True, timeout=120)
-            if build.returncode:
-                sys.exit(f'mutant {number} does not compile: {build.stderr.decode()[-400:]}')
-            result = subprocess.run([sys.executable, 'ce/test.py', '--binary', str(root / 'test-ce'), '--libcrypto', arguments.libcrypto],
-                                    cwd=root, capture_output=True, timeout=600)
+            builds = (['gcc', '-std=c11', '-O1', '-w', '-DM19_CE_TEST', 'ce/ce.c', 'ce/crypto.c', 'ce/fscrypt.c', 'ce/test-ce.c',
+                       'unlock/core.c', 'unlock/hash.c', '-ldl', '-o', 'test-ce'],
+                      ['gcc', '-std=c11', '-O1', '-w', 'ce/broker.c', 'ce/test-broker.c', 'ce/ce.c', 'unlock/core.c', 'unlock/hash.c',
+                       '-o', 'test-broker'],
+                      ['gcc', '-std=c11', '-O1', '-w', '-c', 'unlock/core.c', '-o', 'core.o'],
+                      ['gcc', '-std=c11', '-O1', '-w', '-c', 'unlock/hash.c', '-o', 'hash.o'],
+                      ['g++', '-std=c++17', '-O1', '-w', '-DM19_KS_TEST', '-Ice', 'ce/ks.cpp', 'ce/test-ks.cpp', 'core.o', 'hash.o', '-ldl',
+                       '-o', 'test-ks'])
+            for command in builds:
+                build = subprocess.run(command, cwd=root, capture_output=True, timeout=120)
+                if build.returncode:
+                    sys.exit(f'mutant {number} does not compile: {build.stderr.decode()[-400:]}')
+            env = dict(os.environ, M19_CE_KS='1', M19_CE_BROKER='1')
+            result = subprocess.run([sys.executable, 'ce/test.py', '--binary', str(root / 'test-ce'), '--libcrypto', arguments.libcrypto,
+                                     '--ks-binary', str(root / 'test-ks'), '--broker-binary', str(root / 'test-broker')],
+                                    cwd=root, capture_output=True, timeout=600, env=env)
         if not result.returncode:
             survivors.append(number)
             print(f'SURVIVED {number}: {name}: {old[:70]!r}')

@@ -66,15 +66,17 @@ int m19_ce_broker_serve(int listener, int timeout_ms, uid_t peer_uid, m19_ce_att
         snprintf(line, line_size, "M19_CE status=NO_CONNECTION");
         goto out;
     }
+    struct timeval limit = {.tv_sec = 30};
+    (void)setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &limit, sizeof(limit));
+    /* The one message is read before anything is answered, so closing never leaves it unread (a reset to the peer). */
+    ssize_t got = recv(client, secret.message, M19_CE_MESSAGE_MAX + 1, MSG_TRUNC);
     struct ucred cred;
     socklen_t cred_size = sizeof(cred);
     if (getsockopt(client, SOL_SOCKET, SO_PEERCRED, &cred, &cred_size) || cred_size != sizeof(cred) || cred.uid != peer_uid) {
+        m19_wipe(&secret, sizeof(secret));
         (void)reply(client, line, line_size, "PEER", NULL);
         goto out;
     }
-    struct timeval limit = {.tv_sec = 30};
-    (void)setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &limit, sizeof(limit));
-    ssize_t got = recv(client, secret.message, M19_CE_MESSAGE_MAX + 1, MSG_TRUNC);
     if (got <= (ssize_t)(sizeof(PREFIX) - 1) || got > M19_CE_MESSAGE_MAX || memcmp(secret.message, PREFIX, sizeof(PREFIX) - 1)) {
         (void)reply(client, line, line_size, "MESSAGE", NULL);
         goto out;

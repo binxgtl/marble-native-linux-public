@@ -141,6 +141,8 @@ static int fake_signal(pid_t pid, int number)
         char path[4200];
         snprintf(path, sizeof(path), "%s/%d/stat", proc_dir, (int)pid);
         unlink(path);
+        snprintf(path, sizeof(path), "%s/%d/root", proc_dir, (int)pid);
+        unlink(path);
         snprintf(path, sizeof(path), "%s/%d", proc_dir, (int)pid);
         rmdir(path);
     }
@@ -159,7 +161,7 @@ static int sweep_mode(char **argv)
 {
     snprintf(proc_dir, sizeof(proc_dir), "%s", argv[2]);
     record_fd = 1;
-    struct m19_handoff h = {.proc = proc_dir, .self = (pid_t)atoi(argv[3]), .signal = fake_signal};
+    struct m19_handoff h = {.proc = proc_dir, .keep_root = getenv("M19_KEEP_ROOT"), .self = (pid_t)atoi(argv[3]), .signal = fake_signal};
     int count = m19_sweep(&h, atoi(argv[4]));
     printf("count %d\n", count);
     return 0;
@@ -175,6 +177,7 @@ static int handoff_mode(char **argv)
     if (record_fd < 0 || tty < 0)
         return 2;
     struct m19_handoff h = {.proc = proc_dir, .kmsg = argv[5], .android = argv[4], .newroot = newroot_dir, .init = "/usr/lib/systemd/systemd",
+                            .keep_root = getenv("M19_KEEP_ROOT"),
                             .self = getpid(), .settle_ms = 300, .poll_ms = 5, .pace_ms = 1, .signal = fake_signal};
     int moved = -1;
     int rc = m19_handoff(tty, &h, &moved);
@@ -257,6 +260,18 @@ static int report_mode(char **argv)
         c.route = wifi[4];
         c.nm_profile = wifi[5];
         c.dns_name = "example.invalid";
+    }
+    /* R7: T12-ce on a keypad result written by the test, and a fake /data/media/0. */
+    static char ce[2][4200];
+    snprintf(ce[0], sizeof(ce[0]), "%s/ce.result", root);
+    snprintf(ce[1], sizeof(ce[1]), "%s/android0", root);
+    if (getenv("M19_TEST_CE")) {
+        c.ce = 1;
+        c.ce_ms = (unsigned)strtoul(getenv("M19_TEST_CE"), NULL, 10);
+        c.ce_unit = "marble-ce.service";
+        c.ce_result = ce[0];
+        c.ce_android = ce[1];
+        c.ce_entry = "Android";
     }
     return m19_report_main(&c);
 }
