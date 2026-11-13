@@ -154,6 +154,11 @@ jobs:
         run: bash scripts/m19/run6/test.sh artifacts/m19/${{ runner.arch }}/run6
         env:
           M19_MUTANTS: '0'
+      - name: R7 CE core against an independent model, normal and ASan/UBSan (no device, PIN or key)
+        timeout-minutes: 6
+        run: bash scripts/m19/ce/test.sh artifacts/m19/${{ runner.arch }}/ce
+        env:
+          M19_MUTANTS: '0'
       - name: M11 Run12's PD mapper, from its pinned linux-msm sources, static and built twice (ARM64, no device)
         if: runner.arch == 'ARM64'
         run: |
@@ -260,6 +265,10 @@ jobs:
             needs_probes: false
           - suite: run6
             script: scripts/m19/run6/mutate.py
+            args: ''
+            needs_probes: false
+          - suite: ce
+            script: scripts/m19/ce/mutate.py
             args: ''
             needs_probes: false
     runs-on: ubuntu-24.04
