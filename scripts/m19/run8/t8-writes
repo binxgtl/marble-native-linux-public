@@ -8,9 +8,10 @@ R=${M19_ROOT:-}
 BB=${M19_BB:-/bin/busybox}
 fail=0
 counts() {
+ label=$2
  set -- $($BB cat "$1/stat")
  writes=$5 sectors=$7 discards=${12:-0} discarded=${14:-0}
- printf 'M19 T8 %s writes=%s sectors=%s discards=%s discarded=%s\n' "$2" "$writes" "$sectors" "$discards" "$discarded" >&2
+ printf 'M19 T8 %s writes=%s sectors=%s discards=%s discarded=%s\n' "$label" "$writes" "$sectors" "$discards" "$discarded" >&2
 }
 zero() { [ "$writes" = 0 ] && [ "$sectors" = 0 ] && [ "$discards" = 0 ] && [ "$discarded" = 0 ] || fail=1; }
 nodiscard() { [ "$discards" = 0 ] && [ "$discarded" = 0 ] || fail=1; }

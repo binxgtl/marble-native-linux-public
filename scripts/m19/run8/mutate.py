@@ -40,7 +40,14 @@ MUTANTS = (
                 'fail "etc generator $name"\n', ''),
     ('t9-root', '[ -f "$control/$default_unit" ] && [ ! -L "$control/$default_unit" ] || fail "default target missing $default_unit"\n', ''),
     ('t9-root', 'control=$new/run/systemd/system.control', 'control=$new/etc/systemd/system'),
-    ('t9-root', '[ "${hash%% *}" = "$ROOTFS_PROBE_SHA256" ] || fail probe-hash', ':'),
+    ('t9-root', "$BB grep -q 'libsystemd-shared-255\\.so' \"$probe\" || fail probe-major", ':'),
+    ('t9-root', '[ -f "$probe" ] && [ ! -L "$probe" ] && [ -x "$probe" ] || fail probe-read', '[ -f "$probe" ] || fail probe-read'),
+    ('t9-root', '[ "${hash%% *}" != "$ROOTFS_PROBE_SHA256" ] || systemd=pinned', ':'),
+    # T6-read: systemd 255, pinned or updated.
+    ('t6-read', "$BB grep -q 'libsystemd-shared-255\\.so' \"$probe\" || fail probe-major", ':'),
+    ('t6-read', '[ -f "$probe" ] && [ ! -L "$probe" ] && [ -x "$probe" ] || fail probe-read', '[ -e "$probe" ] || fail probe-read'),
+    ('t6-read', '[ "${hash%% *}" != "$ROOTFS_PROBE_SHA256" ] || state=pinned', ':'),
+    ('t6-read', '$BB grep -qx "VERSION_ID=\\"$ROOTFS_VERSION\\"" "$release" || fail os-release', ':'),
     ('t9-root', " case \"$kind\" in ''|empty|copy) ;; *) fail \"tmpfs kind $point\";; esac\n", ''),
     ('t9-root', '[ "$($BB blockdev --getro "$node")" = 1 ] || fail "read-only check $name"', ':'),
     # T9-desktop: /root as the home, the hidden entries in RAM.

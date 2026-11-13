@@ -11,7 +11,10 @@
 - upower runs: its unit asks for PrivateUsers=, and this kernel has no user namespaces (R7a: upowerd exited 217/USER,
   and the panel's battery and xfce4-power-manager waited on it).
 - xfce4-power-manager is no longer hidden. Xorg still runs with -dpms, so it cannot blank the panel.
-- XFCE's home is /root, kept. PulseAudio and the keypad keep R7a's RAM home.
+- XFCE's home is /root, kept. PulseAudio and the keypad keep R7a's RAM home. Log Out starts the desktop again.
+- Shut Down and Restart both return to Android: poweroff.target is reboot.target under its own name, and the reboot
+  path is unmasked. systemd stops the session, remounts / read-only, so f2fs writes its checkpoint, and restarts the
+  phone, which then boots Android as after a long-press.
 Everything else is R7a's.
 """
 import sys
@@ -29,6 +32,21 @@ TMPFS = (('/run', '0755', '256m', ''), ('/tmp', '1777', '512m', ''), ('/var/tmp'
          ('/var/lib/systemd', '0755', '64m', ''), ('/var/lib/NetworkManager', '0755', '16m', ''), ('/var/lib/upower', '0755', '16m', ''),
          ('/media', '0755', '1m', ''), ('/etc/NetworkManager/system-connections', '0700', '1m', 'empty'),
          ('/etc/udev/rules.d', '0755', '16m', 'copy'), ('/etc/pulse/default.pa.d', '0755', '1m', 'copy'))
+
+# R8: Shut Down and Restart reboot into Android. Halt, kexec and ctrl-alt-del stay masked, and so does
+# systemd-poweroff.service, which nothing reaches now.
+POWER_UNMASKED = ('poweroff.target', 'reboot.target', 'systemd-reboot.service')
+SHUTDOWN_PATH = ('shutdown.target', 'umount.target', 'final.target', 'systemd-reboot.service', 'reboot.target')
+POWEROFF = '''[Unit]
+Description=M19 R8: Shut Down returns to Android, as a reboot
+Documentation=man:systemd.special(7)
+DefaultDependencies=no
+Requires=systemd-reboot.service
+After=systemd-reboot.service
+AllowIsolate=yes
+JobTimeoutSec=30min
+JobTimeoutAction=reboot-force
+'''
 
 UPOWER = '''[Service]
 # M19 R8: this kernel has no user namespaces. With PrivateUsers=yes upowerd exited 217/USER (R7a).
@@ -72,11 +90,12 @@ def files():
         if where is None:
             continue
         if name == 'systemd/system/marble-xfce.service':
-            text = r4plan._swap(text, *XFCE_ENV)
+            text = r4plan._swap(r4plan._swap(text, *XFCE_ENV), 'Restart=on-failure\n', 'Restart=always\n')
         out[where] = text.replace('/etc/m19/', '/run/m19/etc/')
     out['run/systemd/system.control/m19-r8.target'] = TARGET
     out['run/systemd/system.control/m19-r8-report.service'] = REPORT
     out['run/systemd/system.control/upower.service.d/m19.conf'] = UPOWER
+    out['run/systemd/system.control/poweroff.target'] = POWEROFF
     return out
 
 
@@ -89,7 +108,9 @@ def render():
     assert {point for point, _, _, kind in TMPFS if kind} <= {'/' + where.rsplit('/', 1)[0] for where in placed if where.startswith('etc/')} | {
         '/etc/NetworkManager/system-connections'}
     out = {name: data for name, data in r7.items() if not name.startswith('m19/r2/')}
-    out['m19/r8/masks'] = r7['m19/r2/masks']
+    masks = r7['m19/r2/masks'].decode().split()
+    assert set(POWER_UNMASKED) <= set(masks) and not set(SHUTDOWN_PATH) - set(POWER_UNMASKED) & set(masks)
+    out['m19/r8/masks'] = ''.join(f'{unit}\n' for unit in masks if unit not in POWER_UNMASKED).encode()
     out['m19/r8/generators'] = r7['m19/r2/generators']
     out['m19/r8/nodes'] = r7['m19/r2/nodes']
     out['m19/r8/tmpfs'] = ''.join(f'{point} {mode} {size}{" " + kind if kind else ""}\n' for point, mode, size, kind in TMPFS).encode()

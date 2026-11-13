@@ -1881,7 +1881,7 @@ class Plan8(unittest.TestCase):
             where = r8plan.place(name)
             want = text.replace('/etc/m19/', '/run/m19/etc/')
             if name == 'systemd/system/marble-xfce.service':
-                want = want.replace(*r8plan.XFCE_ENV)
+                want = want.replace(*r8plan.XFCE_ENV).replace('Restart=on-failure\n', 'Restart=always\n')
             self.assertEqual(self.files[f'm19/r8/root/{where}'].decode(), want, name)
         listed = self.files['m19/r8/files'].decode().split()
         self.assertEqual(sorted(listed), sorted(name[len('m19/r8/root/'):] for name in self.files if name.startswith('m19/r8/root/')))
@@ -1894,8 +1894,11 @@ class Plan8(unittest.TestCase):
 
     def test_everything_else_is_r7s(self):
         self.assertFalse([name for name in self.files if name.startswith('m19/r2/')])
-        for name in ('masks', 'generators', 'nodes'):
+        for name in ('generators', 'nodes'):
             self.assertEqual(self.files[f'm19/r8/{name}'], self.r7[f'm19/r2/{name}'])
+        r7_masks, masks = self.r7['m19/r2/masks'].decode().split(), self.files['m19/r8/masks'].decode().split()
+        self.assertEqual(masks, [unit for unit in r7_masks if unit not in ('poweroff.target', 'reboot.target', 'systemd-reboot.service')])
+        self.assertEqual(len(masks), len(r7_masks) - 3)
         same = {name for name in self.r7 if not name.startswith('m19/r2/') and name != 'm19/r3/hidden'}
         self.assertTrue(same and all(self.files[name] == self.r7[name] for name in same))
         self.assertEqual(self.files['m19/r8/default'], b'm19-r8.target\n')
@@ -1933,8 +1936,17 @@ class Plan8(unittest.TestCase):
         old = self.r7['m19/r2/etc/systemd/system/m19-r7.target'].decode()
         self.assertEqual(target.replace('m19-r8-report.service', 'm19-r7-report.service').split('\n')[2:], old.split('\n')[2:])
         self.assertIn('Description=M19 R8 evidence over USB\n', self.files[root + 'm19-r8-report.service'].decode())
-        for unit in ('poweroff.target', 'reboot.target', 'upower.service'):
-            self.assertEqual(unit in self.files['m19/r8/masks'].decode().split(), unit != 'upower.service', unit)
+        masks = self.files['m19/r8/masks'].decode().split()
+        for unit in ('halt.target', 'kexec.target', 'ctrl-alt-del.target', 'systemd-poweroff.service', 'systemd-halt.service'):
+            self.assertIn(unit, masks)
+        for unit in ('poweroff.target', 'reboot.target', 'systemd-reboot.service', 'shutdown.target', 'umount.target', 'final.target',
+                     'upower.service'):
+            self.assertNotIn(unit, masks)
+        # Shut Down is a reboot under poweroff.target's name, so both buttons return to Android.
+        poweroff = self.files[root + 'poweroff.target'].decode()
+        self.assertIn('Requires=systemd-reboot.service\nAfter=systemd-reboot.service\n', poweroff)
+        self.assertNotIn('poweroff.service', poweroff)
+        self.assertIn('Restart=always\n', xfce)
 
 
 class Plan7(unittest.TestCase):

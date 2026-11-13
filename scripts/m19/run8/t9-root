@@ -9,6 +9,7 @@
 #    RAM.
 #  - The tree's machine-id must be present and SELinux's config absent, so systemd neither commits an ID nor applies
 #    first-boot presets to the writable /etc.
+#  - The tree's systemd may be updated within Ubuntu 24.04's systemd 255; another major stops here.
 # Every block device is set read-only first, except the userdata partition and the dm device T2 made from it. The new
 # /dev holds a short list of character nodes and no block node at all.
 set -eu
@@ -178,14 +179,18 @@ $BB cp "$R/sbin/m19-pid1" "$new/run/m19/m19-report" || fail reporter
 $BB cp "$R/sbin/m16-display" "$new/run/m19/m16-display" || fail display
 $BB chmod 755 "$new/run/m19/m19-report" "$new/run/m19/m16-display" || fail run-modes
 
-# 8. The init that PID 1 will exec is the one T6 hashed, seen through the new root: an upgraded systemd stops here.
-hash=$($BB sha256sum "$new/$ROOTFS_PROBE") || fail probe-read
-[ "${hash%% *}" = "$ROOTFS_PROBE_SHA256" ] || fail probe-hash
+# 8. The init that PID 1 will exec, seen through the new root: Ubuntu 24.04's systemd 255, as T6 found it.
+probe=$new/$ROOTFS_PROBE
+[ -f "$probe" ] && [ ! -L "$probe" ] && [ -x "$probe" ] || fail probe-read
+$BB grep -q 'libsystemd-shared-255\.so' "$probe" || fail probe-major
+hash=$($BB sha256sum "$probe") || fail probe-read
+systemd=updated
+[ "${hash%% *}" != "$ROOTFS_PROBE_SHA256" ] || systemd=pinned
 for tool in usr/bin/systemctl usr/bin/journalctl usr/bin/systemd-analyze; do
  [ -x "$new/$tool" ] || fail "missing $tool"
 done
-printf 'M19 T9 new root: read-write blocks-read-only=%s writable=%s machine-id=present fstab-lines=%s selinux-config=absent default-was=%s\n' \
- "$blocks" "$writable" "$fstab" "$default" >&2
+printf 'M19 T9 new root: read-write blocks-read-only=%s writable=%s machine-id=present fstab-lines=%s selinux-config=absent default-was=%s systemd=%s\n' \
+ "$blocks" "$writable" "$fstab" "$default" "$systemd" >&2
 printf 'M19 T9 masks=%s generators=%s files=%s tmpfs=%s copied=%s nodes=%s\n' "$masks" "$generators" "$files" "$tmpfs" "$copied" "$nodes" >&2
 wants=$($BB ls "$new/etc/systemd/system/multi-user.target.wants" 2>/dev/null | $BB tr '\n' ' ' || :)
 printf 'M19 T9 multi-user wants: %s\n' "$wants" >&2

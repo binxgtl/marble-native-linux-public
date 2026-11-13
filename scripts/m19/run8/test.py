@@ -38,6 +38,7 @@ case "$command" in
 esac
 '''
 OK_LINE = 'M19_UNLOCK status=OK detail=0 upgraded=0 table=rw dev=254:5'
+PROBE = b'\x7fELF systemd, NEEDED libsystemd-shared-255.so libsystemd-core-255.so, bytes'
 
 
 class Fixture(unittest.TestCase):
@@ -173,6 +174,55 @@ class Mount(Fixture):
         self.assertFails('mount', M19_FAIL_MOUNT='f2fs')
 
 
+class Read(Fixture):
+    """T6-read: os-release, and Ubuntu 24.04's systemd 255 as PID 1's init, pinned or updated."""
+    script = 't6-read'
+
+    def setUp(self):
+        super().setUp()
+        tree = self.root / 'm19-data/ubuntu'
+        (tree / 'etc').mkdir(parents=True)
+        (tree / 'usr/lib/systemd').mkdir(parents=True)
+        (tree / 'etc/os-release').write_text('NAME="Ubuntu"\nVERSION_ID="24.04"\n')
+        self.init = tree / 'usr/lib/systemd/systemd'
+        self.init.write_bytes(PROBE)
+        self.init.chmod(0o755)
+        pins = (HERE.parent / 'run1/pins').read_text()
+        pins = re.sub(r'ROOTFS_PROBE_SHA256=.*', 'ROOTFS_PROBE_SHA256=' + hashlib.sha256(PROBE).hexdigest(), pins)
+        (self.root / 'm19/pins').write_text(pins)
+
+    def test_pinned_and_updated_systemd_255_pass(self):
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f'M19 T6 rootfs 24.04, systemd 255 pinned sha256={hashlib.sha256(PROBE).hexdigest()}\n', result.stderr)
+        self.init.write_bytes(PROBE + b' patched')
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('systemd 255 updated', result.stderr)
+
+    def test_anything_else_stops(self):
+        for change, reason in (('major', 'probe-major'), ('mode', 'probe-read'), ('link', 'probe-read'), ('missing', 'probe-read'),
+                               ('release', 'os-release')):
+            with self.subTest(change=change):
+                self.setUp()
+                if change == 'major':
+                    self.init.write_bytes(PROBE.replace(b'-255.so', b'-256.so'))
+                elif change == 'mode':
+                    self.init.chmod(0o644)
+                elif change == 'link':
+                    self.init.unlink()
+                    (self.init.parent / 'systemd.real').write_bytes(PROBE)
+                    (self.init.parent / 'systemd.real').chmod(0o755)
+                    os.symlink('systemd.real', self.init)
+                elif change == 'missing':
+                    self.init.unlink()
+                else:
+                    (self.root / 'm19-data/ubuntu/etc/os-release').write_text('VERSION_ID="24.10"\n')
+                result = self.run_script()
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(f'M19 T6 failed: {reason}\n', result.stderr)
+
+
 class Writes(Fixture):
     """T8-writes: writes only on the userdata partition, its disk and its dm device; no discard anywhere."""
     script = 't8-writes'
@@ -222,7 +272,7 @@ class Root(Fixture):
     def setUp(self):
         super().setUp()
         tree = self.root / 'm19-data/ubuntu'
-        probe = b'systemd bytes'
+        probe = PROBE
         pins = (HERE.parent / 'run1/pins').read_text()
         pins = re.sub(r'ROOTFS_PROBE_SHA256=.*', 'ROOTFS_PROBE_SHA256=' + hashlib.sha256(probe).hexdigest(), pins)
         (self.root / 'm19/pins').write_text(pins)
@@ -236,6 +286,7 @@ class Root(Fixture):
                      'etc/NetworkManager/system-connections', 'etc/udev/rules.d', 'etc/pulse/default.pa.d', 'etc/systemd/journald.conf.d'):
             (tree / name).mkdir(parents=True, exist_ok=True)
         (tree / 'usr/lib/systemd/systemd').write_bytes(probe)
+        (tree / 'usr/lib/systemd/systemd').chmod(0o755)
         for tool in ('systemctl', 'journalctl', 'systemd-analyze'):
             (tree / 'usr/bin' / tool).write_text('#!/bin/sh\n')
             (tree / 'usr/bin' / tool).chmod(0o755)
@@ -281,7 +332,7 @@ class Root(Fixture):
             self.assertIn(f'mount -t tmpfs -o mode={fields[1]},nosuid,nodev,size={fields[2]} tmpfs {self.new}{fields[0]}\n', log)
         self.assertLess(log.index(f'tmpfs {self.new}/run\n'), log.index(f'tmpfs {self.new}/tmp\n'))
         self.assertIn('M19 T9 new root: read-write blocks-read-only=5 writable=2 machine-id=present fstab-lines=1 selinux-config=absent '
-                      'default-was=/lib/systemd/system/graphical.target\n', result.stderr)
+                      'default-was=/lib/systemd/system/graphical.target systemd=pinned\n', result.stderr)
         files = (self.root / 'm19/r8/files').read_text().split()
         self.assertIn(f'M19 T9 masks={len((self.root / "m19/r8/masks").read_text().split())} '
                       f'generators={len((self.root / "m19/r8/generators").read_text().split())} files={len(files)} tmpfs={len(points)} copied=2 ',
@@ -398,9 +449,19 @@ class Root(Fixture):
         os.symlink(self.root / 'elsewhere', tree / 'etc/udev/rules.d')
         self.assertFails('mount point /etc/udev/rules.d')
 
-    def test_an_upgraded_systemd_stops(self):
-        (self.root / 'm19-data/ubuntu/usr/lib/systemd/systemd').write_bytes(b'newer systemd')
-        self.assertFails('probe-hash')
+    def test_an_updated_systemd_255_boots_and_another_major_stops(self):
+        init = self.root / 'm19-data/ubuntu/usr/lib/systemd/systemd'
+        init.write_bytes(PROBE.replace(b'bytes', b'newer bytes'))
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(' systemd=updated\n', result.stderr)
+        for data, mode, reason in ((b'\x7fELF libsystemd-shared-256.so', 0o755, 'probe-major'), (PROBE, 0o644, 'probe-read')):
+            with self.subTest(reason=reason):
+                self.setUp()
+                init = self.root / 'm19-data/ubuntu/usr/lib/systemd/systemd'
+                init.write_bytes(data)
+                init.chmod(mode)
+                self.assertFails(reason)
 
     def test_an_existing_new_root_stops(self):
         self.new.mkdir()
@@ -526,7 +587,7 @@ class SystemdPaths(unittest.TestCase):
         os.symlink('/dev/null', control / 'display-manager.service')
         (control / 'm19-r8.target').write_text('[Unit]\nDescription=M19 R8\n')
         os.symlink('m19-r8.target', control / 'default.target')
-        (control / 'marble-xfce.service').write_text('[Service]\nExecStart=/bin/true\n')
+        (control / 'marble-xfce.service').write_text('[Service]\nExecStart=/bin/true\n[Install]\nWantedBy=multi-user.target\n')
 
     def systemctl(self, *args):
         return subprocess.run(['systemctl', f'--root={self.root}', *args], capture_output=True, text=True, timeout=60)
@@ -535,7 +596,9 @@ class SystemdPaths(unittest.TestCase):
         state = self.systemctl('is-enabled', 'display-manager.service').stdout.strip()
         self.assertTrue(state.startswith('masked'), state)
         self.assertEqual(self.systemctl('get-default').stdout.strip(), 'm19-r8.target')
-        self.assertIn('ExecStart=/bin/true', self.systemctl('cat', 'marble-xfce.service').stdout)
+        # The tree's file has no [Install] (static); only M19's, in control, has one (disabled): control's is the one read.
+        self.assertEqual(self.systemctl('is-enabled', 'marble-xfce.service').stdout.strip(), 'disabled')
+        self.assertEqual(self.systemctl('is-enabled', 'm19-r8.target').stdout.strip(), 'static')
         self.assertEqual(os.readlink(self.root / 'etc/systemd/system/display-manager.service'), '/usr/lib/systemd/system/lightdm.service')
 
     def test_the_search_path_puts_control_before_etc(self):
@@ -547,7 +610,7 @@ class Static(unittest.TestCase):
     """What only run8's steps say, and what they must not."""
 
     def test_each_step_starts_as_busybox_and_is_executable(self):
-        for name in ('t2-unlock', 't5-mount', 't8-writes', 't9-root', 't9-desktop', 't9-ce'):
+        for name in ('t2-unlock', 't5-mount', 't6-read', 't8-writes', 't9-root', 't9-desktop', 't9-ce'):
             data = (HERE / name).read_bytes()
             self.assertTrue(data.startswith(b'#!/bin/busybox sh\n') and b'\r' not in data, name)
             self.assertTrue(os.access(HERE / name, os.X_OK), name)

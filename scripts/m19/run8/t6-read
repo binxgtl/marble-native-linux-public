@@ -1,0 +1,43 @@
+#!/bin/busybox sh
+# T6 for R8 (docs/m19-r8.md): R1's, with the tree read-write. The f2fs mount and os-release prove the key; the init
+# PID 1 will run must be Ubuntu 24.04's systemd 255 (it links libsystemd-shared-255.so), updated or not. Another major
+# stops here. Its hash is recorded: pinned is the one every run before R8 booted.
+set -eu
+R=${M19_ROOT:-}
+BB=${M19_BB:-/bin/busybox}
+fail() { printf 'M19 T6 failed: %s\n' "$*" >&2 || :; exit 1; }
+# Production runs with an empty R, the real root. A test root must be absolute and not a link.
+case "$R" in ''|/*) ;; *) fail root;; esac
+[ -z "$R" ] || [ ! -L "$R" ] || fail root
+. "$R/m19/pins"
+safe_dir() { [ ! -L "$1" ] && [ -d "$1" ]; }
+safe_dir "$R/m19-data" || fail rootfs-parent
+root=$R/m19-data/ubuntu
+safe_dir "$root" || fail rootfs
+safe_dir "$root/etc" || fail os-release-parent
+release=$root/etc/os-release
+if [ -L "$release" ]; then
+    # Only Ubuntu's link to usr/lib/os-release is accepted, relative or absolute.
+    # Resolve it by substitution under this root; never canonicalize an untrusted link.
+    link=$($BB readlink "$release") || fail os-release-link
+    case "$link" in
+     ../usr/lib/os-release|/usr/lib/os-release) ;;
+     *) fail os-release-link;;
+    esac
+    safe_dir "$root/usr" && safe_dir "$root/usr/lib" || fail os-release-parent
+    release=$root/usr/lib/os-release
+    [ ! -L "$release" ] && [ -f "$release" ] || fail os-release-target
+elif [ -f "$release" ]; then
+    :
+else
+    fail os-release
+fi
+$BB grep -qx "VERSION_ID=\"$ROOTFS_VERSION\"" "$release" || fail os-release
+probe=$root/$ROOTFS_PROBE
+[ -f "$probe" ] && [ ! -L "$probe" ] && [ -x "$probe" ] || fail probe-read
+$BB grep -q 'libsystemd-shared-255\.so' "$probe" || fail probe-major
+hash=$($BB sha256sum "$probe") || fail probe-read
+state=updated
+[ "${hash%% *}" != "$ROOTFS_PROBE_SHA256" ] || state=pinned
+printf 'M19 T6 rootfs %s, systemd 255 %s sha256=%s\n' "$ROOTFS_VERSION" "$state" "${hash%% *}" >&2
+exit 0

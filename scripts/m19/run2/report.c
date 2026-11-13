@@ -2185,9 +2185,9 @@ static void battery_phase(const struct m19_report *c, int tty, struct battery *b
         line_value(text, "state:", b->state, sizeof(b->state));
     }
     b->pm_running = pid_of(c, c->battery_pm) > 0;
-    int close = b->capacity >= 0 && b->upower_pct >= 0 && abs(b->capacity - b->upower_pct) <= 2;
+    int near = b->capacity >= 0 && b->upower_pct >= 0 && abs(b->capacity - b->upower_pct) <= 2;
     int known = b->state[0] && strcmp(b->state, "unknown");
-    b->battery_ok = b->unit_active && close && known && b->pm_running;
+    b->battery_ok = b->unit_active && near && known && b->pm_running;
     (void)m19_wire_line(tty, c->pace_ms, M19_DEVICE_STEP " T12-battery %s %d %d %s %d", b->battery_ok ? "OK" : "FAIL", b->capacity, b->upower_pct,
                         token(b->state), b->pm_running);
 }
@@ -2207,7 +2207,7 @@ static void persist_phase(const struct m19_report *c, int tty, struct persist *p
     if (!read_small(c->boot_id, text, sizeof(text))) {
         text[strcspn(text, "\n")] = 0;
         if (strlen(text) == 36 && strspn(text, "0123456789abcdef-") == 36)
-            snprintf(p->id, sizeof(p->id), "%s", text);
+            memcpy(p->id, text, 37);
     }
     snprintf(directory, sizeof(directory), "%s", c->persist_path);
     char *slash = strrchr(directory, '/');
