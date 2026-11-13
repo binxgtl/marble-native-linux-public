@@ -1,5 +1,6 @@
 /* xclick <keys>: taps the keypad of a running m19-ce-prompt through XTEST, as a touchscreen's emulated
  * pointer would. Waits for the prompt's window first. Test only, never staged. */
+#define _DEFAULT_SOURCE
 #include <X11/Xlib.h>
 #include <X11/extensions/XTest.h>
 #include <stdio.h>
