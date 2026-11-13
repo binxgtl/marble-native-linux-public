@@ -24,5 +24,9 @@ cmp "$out/m19-ce-prompt-a" "$out/m19-ce-prompt-b"
 strip "$out/m19-ce-prompt-a" "$out/m19-ce-prompt-b"
 cmp "$out/m19-ce-prompt-a" "$out/m19-ce-prompt-b"
 needed=$(readelf -d "$out/m19-ce-prompt-a" | awk '/NEEDED/ { print $NF }' | tr -d '[]' | LC_ALL=C sort | tr '\n' ' ')
-[ "$needed" = 'libX11.so.6 libc.so.6 ' ] || { echo "m19-ce-prompt needs: $needed" >&2; exit 1; }
+# On aarch64 glibc also names its own loader, which the tree has as every program's interpreter.
+case "$needed" in
+ 'libX11.so.6 libc.so.6 '|'ld-linux-aarch64.so.1 libX11.so.6 libc.so.6 ') ;;
+ *) echo "m19-ce-prompt needs: $needed" >&2; exit 1;;
+esac
 sha256sum "$out/m19-ce-prompt-a" | tee "$out/prompt-binary.txt"
