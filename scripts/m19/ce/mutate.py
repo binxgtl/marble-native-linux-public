@@ -106,7 +106,7 @@ def main():
             (root / 'ce').mkdir()
             shutil.copytree(UNLOCK, root / 'unlock', ignore=shutil.ignore_patterns('__pycache__'))
             for path in HERE.iterdir():
-                if path.suffix in ('.c', '.h', '.py'):
+                if path.suffix in ('.c', '.h', '.cpp', '.py', '.json'):
                     shutil.copy(path, root / 'ce')
             (root / 'ce' / name).write_text(source.replace(old, new, 1), encoding='utf-8')
             builds = (['gcc', '-std=c11', '-O1', '-w', '-DM19_CE_TEST', 'ce/ce.c', 'ce/crypto.c', 'ce/fscrypt.c', 'ce/test-ce.c',

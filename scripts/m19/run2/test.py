@@ -111,10 +111,10 @@ class Sweep(unittest.TestCase):
             done = subprocess.run([ARGS.driver, 'sweep', str(proc), '99999', '1'], capture_output=True, text=True, timeout=10, env=env)
             self.assertIn('count 2', done.stdout)
             self.assertEqual(sorted(re.findall(r'signal (\d+) 9', done.stdout)), ['302', '303'])
-            # A kept root that cannot be read spares nothing.
+            # A kept root that cannot be read spares nothing: the island's two now count.
             env['M19_KEEP_ROOT'] = str(Path(directory) / 'missing')
             done = subprocess.run([ARGS.driver, 'sweep', str(proc), '99999', '0'], capture_output=True, text=True, timeout=10, env=env)
-            self.assertIn('count 4', done.stdout)
+            self.assertIn('count 2', done.stdout)
 
     def test_counting_alone_signals_nothing(self):
         out = self.run_sweep({300: ('init', 0)}, 0)
@@ -1368,11 +1368,9 @@ class Static(unittest.TestCase):
             "+     /* R7: the owner has five minutes for the PIN; the keypad records the broker's answer, Android's names judge it. */",
             '+     .ce = 1, .ce_ms = 300000, .ce_unit = "marble-ce.service", .ce_result = "/run/m19/ce.result", .ce_android = "/run/m19/android/0",',
             '+     .ce_entry = "Android",',
-            '-         struct m19_handoff handoff = {.proc = "/proc", .kmsg = "/dev/kmsg", .android = "/tee", .newroot = "/newroot",',
+            '+         /* R7: the TEE island stays, for the CE broker and the services it calls. */',
             '-                                       .init = "/usr/lib/systemd/systemd", .self = getpid(), .settle_ms = 10000, .poll_ms = 20,',
             '-                                       .pace_ms = 20, .signal = kill};',
-            '+         /* R7: the TEE island stays, for the CE broker and the services it calls. */',
-            '+         struct m19_handoff handoff = {.proc = "/proc", .kmsg = "/dev/kmsg", .android = "/tee", .newroot = "/newroot",',
             '+                                       .init = "/usr/lib/systemd/systemd", .keep_root = "/tee", .self = getpid(), .settle_ms = 10000,',
             '+                                       .poll_ms = 20, .pace_ms = 20, .signal = kill};'])
         names = re.findall(r'\{"(T\d+-[a-z]+)", "/m19/(t\d-[a-z]+)"', (HERE / 'pid7.c').read_text())
