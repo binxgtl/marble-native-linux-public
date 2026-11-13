@@ -59,8 +59,9 @@ MUTANTS = (
     ('wifi.c', '    if (kmsg_fd < 0 || lseek(kmsg_fd, 0, SEEK_END) < 0)', '    if (kmsg_fd < 0)', WIFI),
     # R6c: the daemon's descriptor survives the exec, or m19-cnssd's admission finds no socket.
     ('wifi.c', '        if (close(pair[0]) || fcntl(pair[1], F_SETFD, 0))', '        if (close(pair[0]))', WIFI),
-    # R6c: m19-cnssd's admission. Each check alone; the stand-in daemon runs the same function.
-    ('cnssd-main.c', '    if (parent <= 1 || euid != owner_uid || (argc != 2 && argc != 7))', '    if (euid != owner_uid || (argc != 2 && argc != 7))', DAEMON),
+    # R6c: m19-cnssd's admission. Each check alone; the stand-in daemon runs the same function. Not mutated: parent <= 1
+    # alone. No test can make init the pair's creator, so cred.pid == parent already refuses a parent of 1 in every
+    # fixture; the check stays for a pair init itself made.
     ('cnssd-main.c', '    if (parent <= 1 || euid != owner_uid || (argc != 2 && argc != 7))', '    if (parent <= 1 || (argc != 2 && argc != 7))', DAEMON),
     ('cnssd-main.c', '    if (parent <= 1 || euid != owner_uid || (argc != 2 && argc != 7))', '    if (parent <= 1 || euid != owner_uid)', DAEMON),
     ('cnssd-main.c', '|| len != sizeof(cred) || cred.pid != parent ||', '|| len != sizeof(cred) ||', DAEMON),
