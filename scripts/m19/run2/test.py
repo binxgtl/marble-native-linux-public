@@ -648,8 +648,8 @@ class SinkReport(Audio):
 
     def test_pulseaudio_starts_only_once_the_sink_streams_and_its_unit_is_judged(self):
         fields, log, k, _ = self.sink({'M19_PULSE_RC': '1'})
-        # The server came up, the tone played; the unit's failure alone fails the step.
-        self.assertEqual((k['pulse_unit_rc'], k['pulse_sink'], k['tone_loud'], k['sink_ok']), ('1', '1', '1', '0'), log)
+        # The server came up, the tone played; the unit's failure alone fails the step (its wait status: exit 1 is 256).
+        self.assertEqual((k['pulse_unit_rc'], k['pulse_sink'], k['tone_loud'], k['sink_ok']), ('256', '1', '1', '0'), log)
         for report in ({'state': 'failed'}, {'streaming': '0'}):
             with self.subTest(report=report):
                 self.setUp()
