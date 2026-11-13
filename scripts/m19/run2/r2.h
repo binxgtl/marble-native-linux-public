@@ -94,6 +94,12 @@ struct m19_report {
     const char *sink_unit, *sink_report, *sink_status, *pactl, *pacat, *sink_name, *tone_path;
     const char *const *pulse_env;
     unsigned sink_ms, tone_ms, idle_wait_ms;
+    /* R6b: PulseAudio is the reporter's to start (pulse_unit), once the sink streams: the tree's autostart entry is
+     * for systemd user sessions, which this root session lacks (R6a). While the sink streams, Run31's private
+     * directory (held_dir, one of speaker_clean) stays, empty and 0700, owned by held_uid; every other path must be
+     * absent. */
+    const char *pulse_unit, *held_dir;
+    unsigned held_uid;
     /* R6, when wifi is set: T12-wifi waits up to wifi_ms for m19-wifi's result and NetworkManager's connection, then
      * checks the default route and pings its gateway. DNS is recorded, not judged. The report is sent with the
      * profile's SSID, MAC and IPv4 addresses blanked. */

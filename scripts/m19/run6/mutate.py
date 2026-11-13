@@ -56,6 +56,13 @@ MUTANTS = (
     ('wifi.c', '    char *start[] = {(char *)c->systemctl, "start", "--no-block", (char *)c->nm_unit, NULL};',
      '    char *start[] = {(char *)c->systemctl, "start", (char *)c->nm_unit, NULL};', WIFI),
     ('wifi.c', '    if (kmsg_fd < 0 || lseek(kmsg_fd, 0, SEEK_END) < 0)', '    if (kmsg_fd < 0)', WIFI),
+    # R6b: m12-cnssd as init's child (R6a's daemon returned 2 under m19-wifi). Not mutated: the intermediate's status
+    # check, which only a failing fork or write in the intermediate reaches, and no fixture makes either fail.
+    ('wifi.c', '    while (getppid() != (pid_t)C->init_pid) {', '    while (0) {', WIFI),
+    ('wifi.c', '        pid_t pid = fork();\n        if (pid < 0)\n            _exit(125);', '        pid_t pid = 0;\n        if (pid < 0)\n            _exit(125);', WIFI),
+    ('wifi.c', '        if (now_ms() >= end_ms)\n            _exit(124);\n', '', WIFI),
+    ('wifi.c', '    owner.child = (pid_t)value;', '    owner.child = middle;', WIFI),
+    ('wifi.c', '.init_pid = 1, .adopt_ms = 2000, .middle_hold_ms = 0,', '.init_pid = 0, .adopt_ms = 2000, .middle_hold_ms = 0,', WIFI),
     # The stream: never louder than the chord, the amplifier with the sound, the stop.
     ('stream.c', '        if (o > limit) o = limit;\n', '', SINK),
     ('stream.c', '        int32_t o = (int32_t)(((int64_t)v * gain_q15) / 32768);', '        int32_t o = v;', SINK),

@@ -4,7 +4,9 @@
  *                   record), late-poison (READY, then POISON once fs_ready was written).
  *   M19_FAKE_CBC:   good (default), wrong-bdf, caldb (CalDB: 1, a seed would be needed), none (no lines).
  *   M19_FAKE_FS_READY, M19_FAKE_KMSG: the files standing in for /sys/kernel/cnss/fs_ready and /dev/kmsg.
- *   M19_FAKE_POISON_ON: a path; once it exists, a POISON record (a daemon fault after the bring-up). */
+ *   M19_FAKE_POISON_ON: a path; once it exists, a POISON record (a daemon fault after the bring-up).
+ *   M19_FAKE_PARENT: the test's init (its subreaper). Like m12-cnssd (getppid() != 1: return 2), the stand-in returns 2
+ *                    at once under any other parent, as R6a's daemon did under m19-wifi. */
 #define _GNU_SOURCE
 #include "../../m12/next/cnssd.h"
 
@@ -59,7 +61,8 @@ static int fs_ready_written(void)
 
 int main(int argc, char **argv)
 {
-    if (argc != 2)
+    const char *init = getenv("M19_FAKE_PARENT");
+    if (!init || getppid() != (pid_t)atol(init) || argc != 2)
         return 2;
     fd = atoi(argv[1]);
     const char *mode = getenv("M19_FAKE_CNSSD") ? getenv("M19_FAKE_CNSSD") : "ready";

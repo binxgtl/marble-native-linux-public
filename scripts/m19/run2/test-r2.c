@@ -243,6 +243,9 @@ static int report_mode(char **argv)
         c.sink_ms = 1500;
         c.tone_ms = 3000;
         c.idle_wait_ms = 1500;
+        c.pulse_unit = "marble-pulse.service";
+        c.held_dir = speaker[2];
+        c.held_uid = getenv("M19_TEST_HELD_UID") ? (unsigned)strtoul(getenv("M19_TEST_HELD_UID"), NULL, 10) : (unsigned)getuid();
     }
     if (getenv("M19_TEST_WIFI")) {
         c.wifi = 1;

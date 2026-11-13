@@ -63,7 +63,7 @@ static const char *const zinkfinish_env[] = {M19_VK_ICD, "MESA_LOADER_DRIVER_OVE
 static const struct m19_show shows[] = {{"dri3", dri3_env}, {"noubwc", noubwc_env}, {"linear", linear_env}, {"zink", zink_env}, {"copy", copy_env},
                                         {"soft", soft_env}, {"finish", finish_env}, {"zinkfinish", zinkfinish_env}};
 
-/* R6: the session's PulseAudio, as XFCE started it for root. */
+/* R6: the session's PulseAudio (R6b: marble-pulse.service, which the reporter starts), for root. */
 static const char *const pulse_env[] = {"HOME=/run/m19/session", "XDG_RUNTIME_DIR=/run/m19/xdg", "PULSE_SERVER=unix:/run/m19/xdg/pulse/native",
                                         NULL};
 
@@ -93,6 +93,7 @@ static const struct m19_report report = {
     .sink_unit = "marble-sink.service", .sink_report = "/run/m19/sink.report", .sink_status = "/run/m19/sink.status",
     .pactl = "/usr/bin/pactl", .pacat = "/usr/bin/pacat", .sink_name = "marble_speaker", .tone_path = "/run/m19/sink-tone.raw",
     .pulse_env = pulse_env, .sink_ms = 60000, .tone_ms = 15000, .idle_wait_ms = 12000,
+    .pulse_unit = "marble-pulse.service", .held_dir = "/dev/m11-snd", .held_uid = 0,
     .wifi = 1, .wifi_ms = 240000, .wifi_result = "/run/m19/wifi.result", .wifi_report = "/run/m19/wifi.report", .nmcli = "/usr/bin/nmcli",
     .getent = "/usr/bin/getent", .route = "/proc/net/route", .nm_profile = "/etc/NetworkManager/system-connections/m19-wifi.nmconnection",
     .dns_name = "connectivity-check.ubuntu.com",

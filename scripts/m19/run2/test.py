@@ -198,6 +198,8 @@ case "$1" in
  is-active) echo active; echo active; exit "${M19_ACTIVE_RC:-0}";;
  start)
   echo "start $2" >> "$dir/started"
+  # R6b: the session's PulseAudio comes up when its unit starts; the unit's rc is judged on its own.
+  if [ "$2" = marble-pulse.service ]; then : > "$dir/pulse-up"; exit "${M19_PULSE_RC:-0}"; fi
   [ ! -e "$dir/speaker.report.staged" ] || cp "$dir/speaker.report.staged" "$dir/../speaker.report"
   [ ! -e "$dir/sink.report.staged" ] || cp "$dir/sink.report.staged" "$dir/../sink.report"
   [ ! -e "$dir/sink.status.staged" ] || cp "$dir/sink.status.staged" "$dir/../sink.status"
@@ -484,6 +486,7 @@ class SpeakerReport(Audio):
 PACTL = """#!/bin/sh
 d=$(dirname "$0")
 [ "${M19_TEST_PULSE:-}" = 1 ] || exit 9
+[ -e "$d/pulse-up" ] || exit 1
 case "$1 $2" in
  'list short') cat "$d/sinks" 2>/dev/null; exit 0;;
  'get-default-sink ') cat "$d/default-sink" 2>/dev/null; exit 0;;
@@ -493,6 +496,7 @@ exit 1
 PACAT = """#!/bin/sh
 d=$(dirname "$0")
 [ "${M19_TEST_PULSE:-}" = 1 ] || exit 9
+[ -e "$d/pulse-up" ] || exit 1
 for last; do :; done
 echo "$*" > "$d/pacat-args"
 [ "$(wc -c < "$last")" -eq 192000 ] || exit 8
@@ -552,7 +556,9 @@ class SinkReport(Audio):
                           k['tone_peaks'], k['amp_on_seen'], k['amp_idle_off']), ('1', '1', '1', '1', '0', '1', '1', '1', '1', '1'))
         self.assertEqual((k['loud'], k['enables'], k['disables'], k['peak_in'], k['peak_out']), ('192000', '1', '1', '32767', '10361'))
         self.assertEqual(self.verdict(log)['all_ok'], '1')
-        self.assertIn('start marble-sink.service', (self.test / 'started').read_text())
+        # R6b: PulseAudio only after the sink streams.
+        self.assertEqual((self.test / 'started').read_text(), 'start marble-sink.service\nstart marble-pulse.service\n')
+        self.assertEqual((k['pulse_unit_rc'], k['private_clean'], k['held_empty']), ('0', '1', '0'))
         self.assertIn('--playback --raw --format=s16le --rate=48000 --channels=2 --latency-msec=100 --device=marble_speaker ',
                       (self.test / 'pacat-args').read_text())
         self.assertEqual(len((self.root / 'sink-tone.raw').read_bytes()), 192000)
@@ -598,8 +604,59 @@ class SinkReport(Audio):
         (self.root / 'dev-clean').mkdir()
         (self.root / 'dev-clean/m11-snd').write_text('')
         fields, log, k, _ = self.sink()
-        self.assertEqual((k['private_clean'], k['sink_ok']), ('0', '0'))
+        self.assertEqual((k['private_clean'], k['held_empty'], k['sink_ok']), ('0', '0', '0'))
         self.assertIn('M19 R6 sink-dirty ', log)
+
+    def held(self, mode=0o700, entry=False):
+        (self.root / 'dev-clean').mkdir(exist_ok=True)
+        held = self.root / 'dev-clean/m11-snd'
+        held.mkdir()
+        if entry:
+            (held / 'pcmC0D0p').write_text('')
+        held.chmod(mode)
+        self.addCleanup(lambda: held.chmod(0o700))
+        return held
+
+    def test_runs31_empty_private_directory_passes_while_streaming(self):
+        # R6a: the stream holds Run31's private directory, its nodes unlinked as they were opened.
+        self.held()
+        fields, log, k, _ = self.sink()
+        self.assertEqual((k['private_clean'], k['held_empty'], k['sink_ok']), ('1', '1', '1'), log)
+        self.assertIn('M19 R6 sink-held ', log)
+        self.assertNotIn('sink-dirty', log)
+
+    def test_any_other_private_directory_fails(self):
+        cases = (('mode', {'mode': 0o755}, {}, None), ('entry', {'entry': True}, {}, None), ('owner', {}, {'M19_TEST_HELD_UID': str(os.getuid() + 1)}, None),
+                 ('not-streaming', {}, {}, {'state': 'failed'}), ('another-path', None, {}, None), ('link', 'link', {}, None))
+        for label, shape, env, report in cases:
+            with self.subTest(label=label):
+                self.setUp()
+                if shape == 'link':
+                    (self.root / 'dev-clean').mkdir()
+                    (self.root / 'elsewhere').mkdir(mode=0o700)
+                    (self.root / 'dev-clean/m11-snd').symlink_to(self.root / 'elsewhere')
+                elif shape is None:
+                    (self.root / 'dev-clean').mkdir()
+                    (self.root / 'dev-clean/m11-heap').mkdir(mode=0o700)
+                else:
+                    self.held(**shape)
+                if report:
+                    self.write_report(report)
+                fields, log, k, _ = self.sink(env)
+                self.assertEqual((k['private_clean'], k['held_empty'], k['sink_ok']), ('0', '0', '0'), log)
+                self.assertIn('M19 R6 sink-dirty ', log)
+
+    def test_pulseaudio_starts_only_once_the_sink_streams_and_its_unit_is_judged(self):
+        fields, log, k, _ = self.sink({'M19_PULSE_RC': '1'})
+        # The server came up, the tone played; the unit's failure alone fails the step.
+        self.assertEqual((k['pulse_unit_rc'], k['pulse_sink'], k['tone_loud'], k['sink_ok']), ('1', '1', '1', '0'), log)
+        for report in ({'state': 'failed'}, {'streaming': '0'}):
+            with self.subTest(report=report):
+                self.setUp()
+                self.write_report(report)
+                fields, log, k, _ = self.sink()
+                self.assertEqual((self.test / 'started').read_text(), 'start marble-sink.service\n')
+                self.assertEqual((k['pulse_unit_rc'], k['pulse_sink'], k['sink_ok']), ('-1', '0', '0'))
 
 
 ROUTE_HEAD = 'Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n'
@@ -1213,7 +1270,7 @@ class Static(unittest.TestCase):
             '-     {"T9-audio", "/m19/t9-audio", 30000, M19_STEP_REQUIRED},',
             '+     {"T9-sound", "/m19/t9-sound", 30000, M19_STEP_REQUIRED},',
             '+     {"T9-wifi", "/m19/t9-wifi", 240000, M19_STEP_REQUIRED},',
-            "+ /* R6: the session's PulseAudio, as XFCE started it for root. */",
+            "+ /* R6: the session's PulseAudio (R6b: marble-pulse.service, which the reporter starts), for root. */",
             '+ static const char *const pulse_env[] = {"HOME=/run/m19/session", "XDG_RUNTIME_DIR=/run/m19/xdg", "PULSE_SERVER=unix:/run/m19/xdg/pulse/native",',
             '+                                         NULL};',
             '+ ',
@@ -1224,6 +1281,7 @@ class Static(unittest.TestCase):
             '+     .sink_unit = "marble-sink.service", .sink_report = "/run/m19/sink.report", .sink_status = "/run/m19/sink.status",',
             '+     .pactl = "/usr/bin/pactl", .pacat = "/usr/bin/pacat", .sink_name = "marble_speaker", .tone_path = "/run/m19/sink-tone.raw",',
             '+     .pulse_env = pulse_env, .sink_ms = 60000, .tone_ms = 15000, .idle_wait_ms = 12000,',
+            '+     .pulse_unit = "marble-pulse.service", .held_dir = "/dev/m11-snd", .held_uid = 0,',
             '+     .wifi = 1, .wifi_ms = 240000, .wifi_result = "/run/m19/wifi.result", .wifi_report = "/run/m19/wifi.report", .nmcli = "/usr/bin/nmcli",',
             '+     .getent = "/usr/bin/getent", .route = "/proc/net/route", .nm_profile = "/etc/NetworkManager/system-connections/m19-wifi.nmconnection",',
             '+     .dns_name = "connectivity-check.ubuntu.com",',
@@ -1417,7 +1475,7 @@ class Plan6(unittest.TestCase):
         self.assertEqual({name[len('m19/r2/etc/'):] for name in etc}, {
             'systemd/system/m19-r5.target', 'systemd/system/m19-r5-report.service', 'systemd/system/marble-speaker.service',
             'systemd/system/m19-r6.target', 'systemd/system/m19-r6-report.service', 'systemd/system/marble-sink.service',
-            'systemd/system/marble-wifi.service', 'systemd/system/NetworkManager.service.d/m19.conf',
+            'systemd/system/marble-wifi.service', 'systemd/system/marble-pulse.service', 'systemd/system/NetworkManager.service.d/m19.conf',
             'systemd/system/wpa_supplicant.service.d/m19.conf', 'NetworkManager/conf.d/m19.conf', 'pulse/default.pa.d/m19-sink.pa',
             'udev/rules.d/70-m19-usb-input.rules'})
         self.assertEqual(self.files['m19/r2/default'], b'm19-r6.target\n')
@@ -1471,10 +1529,18 @@ class Plan6(unittest.TestCase):
         self.assertEqual(etc['pulse/default.pa.d/m19-sink.pa'],
                          'load-module module-pipe-sink file=/run/m19/sink/fifo sink_name=marble_speaker format=s16le rate=48000 channels=2 '
                          'sink_properties=device.description=Speaker\nset-default-sink marble_speaker\n')
+        # R6b: the reporter starts PulseAudio once the sink streams; XFCE's autostart entry stays hidden, so a second
+        # server never races it.
         hidden = self.files['m19/r3/hidden'].decode().split()
-        self.assertNotIn('pulseaudio', hidden)
+        self.assertIn('pulseaudio', hidden)
         self.assertNotIn('nm-applet', hidden)
-        self.assertEqual(sorted(set(self.r5['m19/r3/hidden'].decode().split()) - set(hidden)), ['nm-applet', 'pulseaudio'])
+        self.assertEqual(sorted(set(self.r5['m19/r3/hidden'].decode().split()) - set(hidden)), ['nm-applet'])
+        pulse = etc['systemd/system/marble-pulse.service']
+        for line in ('Environment=HOME=/run/m19/session XDG_RUNTIME_DIR=/run/m19/xdg',
+                     'ExecStart=/usr/bin/pulseaudio --daemonize=no --exit-idle-time=-1 --realtime=no --high-priority=no --log-target=journal',
+                     'Restart=no', 'ConditionPathExists=/run/m19/sink/fifo'):
+            self.assertIn(line + '\n', pulse)
+        self.assertNotIn('marble-pulse', etc['systemd/system/m19-r6.target'])
         for unit in ('alsa-restore.service', 'alsa-state.service'):
             self.assertIn(unit, self.files['m19/r2/masks'].decode().split())
 

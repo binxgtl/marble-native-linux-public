@@ -8,9 +8,11 @@
   starts only once m19-wifi reports the interface ready (wifi.ready), manages Wi-Fi devices only, and connects with
   the operator's one profile, which T9-wifi puts in the RAM /etc. NetworkManager and wpa_supplicant log warnings only:
   network names stay out of the journal.
-- Sound: PulseAudio, as XFCE starts it, gets one sink, marble_speaker, a pipe into /run/m19/sink/fifo; marble-sink
-  (run6/sink.c) plays Run31's chord, then streams that FIFO to the speaker, never louder than the chord. The reporter
-  starts it once in T12-audio, as R5b started its clip; nothing else does.
+- Sound: PulseAudio gets one sink, marble_speaker, a pipe into /run/m19/sink/fifo; marble-sink (run6/sink.c) plays
+  Run31's chord, then streams that FIFO to the speaker, never louder than the chord. The reporter starts it once in
+  T12-audio, as R5b started its clip; nothing else does. R6b: the reporter then starts PulseAudio too
+  (marble-pulse.service): the tree's autostart entry is for systemd user sessions, and this root session has none, so
+  in R6a nothing started it. XFCE's entry stays hidden, so no second server races it.
 - USB input: a keyboard or mouse plugged into a hub once the PC's cable is out gets its /dev/input node from udev
   (the kernel has no devtmpfs), so the X server picks it up.
 """
@@ -31,8 +33,9 @@ TOUCH_MATRIX = '0 1 0 -1 0 1 0 0 1'
 NETWORK_UNMASKED = ('NetworkManager.service', 'wpa_supplicant.service')
 NETWORK_MASKED = ('NetworkManager-wait-online.service',)
 MASKED = tuple(unit for unit in r5plan.MASKED if unit not in NETWORK_UNMASKED) + NETWORK_MASKED
-# The tray's network applet and PulseAudio now have something to run against.
-HIDDEN = tuple(name for name in r3plan.HIDDEN if name not in ('nm-applet', 'pulseaudio'))
+# The tray's network applet now has something to run against. PulseAudio's autostart stays hidden (R6b): the
+# reporter starts the server.
+HIDDEN = tuple(name for name in r3plan.HIDDEN if name != 'nm-applet')
 UDEV_MASKED = r5plan.UDEV_MASKED
 
 SINK_NAME = 'marble_speaker'
@@ -67,6 +70,26 @@ KillMode=none
 SendSIGKILL=no
 TimeoutStopSec=infinity
 OOMScoreAdjust=-900
+LimitCORE=0
+StandardInput=null
+StandardOutput=journal
+StandardError=journal
+'''
+
+# R6b: the session's sound server, the tree's PulseAudio for root, with the session's home and runtime directory
+# (where the desktop's clients find it), never daemonised and never exiting when idle. Started by the reporter once
+# the sink streams, never by the target.
+PULSE = '''[Unit]
+Description=M19 R6 PulseAudio for the session, into marble-sink's FIFO
+DefaultDependencies=no
+IgnoreOnIsolate=yes
+ConditionPathExists=/run/m19/sink/fifo
+
+[Service]
+Type=simple
+Environment=HOME=/run/m19/session XDG_RUNTIME_DIR=/run/m19/xdg
+ExecStart=/usr/bin/pulseaudio --daemonize=no --exit-idle-time=-1 --realtime=no --high-priority=no --log-target=journal
+Restart=no
 LimitCORE=0
 StandardInput=null
 StandardOutput=journal
@@ -136,6 +159,7 @@ FILES.update({'systemd/system/m19-r6.target': TARGET,
               'systemd/system/m19-r6-report.service': REPORT,
               'systemd/system/marble-sink.service': SINK,
               'systemd/system/marble-wifi.service': WIFI,
+              'systemd/system/marble-pulse.service': PULSE,
               'systemd/system/NetworkManager.service.d/m19.conf': NM_DROPIN,
               'systemd/system/wpa_supplicant.service.d/m19.conf': WPA_DROPIN,
               'NetworkManager/conf.d/m19.conf': NM_CONF,
@@ -148,7 +172,7 @@ def render():
     unmasked, the tray's network and sound shown, and the landscape glamor configuration."""
     assert len(set(MASKED)) == len(MASKED) and len(set(HIDDEN)) == len(HIDDEN)
     assert not set(NETWORK_UNMASKED) & set(MASKED) and set(NETWORK_UNMASKED) <= set(r5plan.MASKED)
-    assert 'marble-sink.service' not in TARGET and 'marble-speaker.service' not in FILES
+    assert 'marble-sink.service' not in TARGET and 'marble-pulse.service' not in TARGET and 'marble-speaker.service' not in FILES
     out = {name: data for name, data in r5plan.render().items() if not name.startswith('m19/r2/etc/') and name != 'm19/r5/udev-masks'}
     out['m19/r2/default'] = b'm19-r6.target\n'
     out['m19/r2/masks'] = ''.join(f'{unit}\n' for unit in MASKED).encode()

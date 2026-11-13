@@ -1871,12 +1871,38 @@ static void wifi_phase(const struct m19_report *c, int tty, struct wifi *w)
 }
 
 struct sink {
-    int unit_rc, report_seen, streaming, chord_ok, holder_alive, holder_fds, private_clean, pulse_sink, pulse_default, tone_rc;
+    int unit_rc, report_seen, streaming, chord_ok, holder_alive, holder_fds, private_clean, held_empty, pulse_unit_rc, pulse_sink,
+        pulse_default, tone_rc;
     int amp_off_before, tone_loud, tone_peaks, amp_on_seen, amp_idle_off, sink_ok;
     long pid, regions, re_verified, re0, re1, played, pcm, pdr_seen, unmap_attempted, volume_level;
     long loud_before, loud_after, enables_before, enables_after, disables_before, disables_after, peak_in, peak_out, underruns;
     char state[16], plan_sha[80];
 };
+
+/* R6b: Run31's private directory while the sink streams. Its backend unlinks each node as it opens it and removes the
+ * directory only at release, which a streaming sink does not reach: an empty directory, 0700, owned by uid. A link,
+ * another shape or mode, another owner or any entry in it is dirty. */
+static int held_dir_empty(const char *path, unsigned uid)
+{
+    int fd = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0)
+        return 0;
+    struct stat st;
+    if (fstat(fd, &st) || st.st_uid != uid || (st.st_mode & 07777) != 0700) {
+        close(fd);
+        return 0;
+    }
+    DIR *directory = fdopendir(fd);
+    if (!directory) {
+        close(fd);
+        return 0;
+    }
+    int entries = 0;
+    for (struct dirent *entry; (entry = readdir(directory));)
+        entries += strcmp(entry->d_name, ".") && strcmp(entry->d_name, "..");
+    closedir(directory);
+    return entries == 0;
+}
 
 static int sink_status_now(const struct m19_report *c, char *text, size_t room)
 {
@@ -1903,7 +1929,7 @@ static int write_tone(const char *path)
 }
 
 /* R6: T12-audio for the sound server. The chord (Run31's gates, as R5b judged them) and the switch to the stream,
- * then a tone through PulseAudio's default sink, which must be marble_speaker. */
+ * then (R6b) PulseAudio started, then a tone through PulseAudio's default sink, which must be marble_speaker. */
 static void sink_phase(const struct m19_report *c, int tty, struct sink *k)
 {
     memset(k, 0, sizeof(*k));
@@ -1954,12 +1980,24 @@ static void sink_phase(const struct m19_report *c, int tty, struct sink *k)
     k->private_clean = 1;
     for (unsigned i = 0; i < sizeof(c->speaker_clean) / sizeof(c->speaker_clean[0]); i++) {
         struct stat st;
-        if (c->speaker_clean[i] && (lstat(c->speaker_clean[i], &st) == 0 || errno != ENOENT)) {
-            addf("M19 R6 sink-dirty %s\n", c->speaker_clean[i]);
-            k->private_clean = 0;
+        const char *path = c->speaker_clean[i];
+        if (!path || (lstat(path, &st) != 0 && errno == ENOENT))
+            continue;
+        if (k->streaming && c->held_dir && !strcmp(path, c->held_dir) && held_dir_empty(path, c->held_uid)) {
+            addf("M19 R6 sink-held %s empty\n", path);
+            k->held_empty = 1;
+            continue;
         }
+        addf("M19 R6 sink-dirty %s\n", path);
+        k->private_clean = 0;
     }
-    /* PulseAudio, as the session started it: the pipe sink exists and is the default. */
+    /* R6b: PulseAudio, started here once the sink streams (nothing in the session starts it for root); then the pipe
+     * sink exists and is the default. */
+    k->pulse_unit_rc = -1;
+    if (k->streaming && c->pulse_unit) {
+        char *pulse_argv[] = {(char *)c->systemctl, "start", (char *)c->pulse_unit, NULL};
+        k->pulse_unit_rc = section(pulse_argv, SECTION_CAP / 16, c->command_ms);
+    }
     unsigned long long pulse_end = m19_now_ms() + c->sink_ms;
     while (k->streaming && !k->pulse_sink && m19_now_ms() < pulse_end) {
         static char out[8192];
@@ -2023,6 +2061,7 @@ static void sink_phase(const struct m19_report *c, int tty, struct sink *k)
     k->sink_ok = k->unit_rc == 0 && k->report_seen && k->streaming && k->chord_ok && k->regions == 2 && k->re_verified == 1 && k->re0 > 0 &&
                  k->re1 > 0 && k->pcm > 0 && k->played == k->pcm && k->pdr_seen == 0 && k->unmap_attempted == 0 && k->volume_level > 0 &&
                  k->volume_level <= 8 && is_hex64(k->plan_sha) && k->holder_alive && k->holder_fds >= 8 && k->private_clean &&
+                 (!c->pulse_unit || k->pulse_unit_rc == 0) &&
                  k->pulse_sink && k->pulse_default && k->tone_rc == 0 && k->amp_off_before && k->tone_loud && k->tone_peaks &&
                  k->amp_on_seen && k->amp_idle_off;
     (void)m19_wire_line(tty, c->pace_ms, M19_DEVICE_STEP " T12-audio %s %d %d %d %d %d", k->sink_ok ? "OK" : "FAIL", k->chord_ok,
@@ -2285,11 +2324,13 @@ int m19_report_main(const struct m19_report *c)
         if (c->sink_unit) {
             audio_ok = audio_ok && k.sink_ok;
             addf("M19 R6 sink unit_rc=%d report_seen=%d state=%s streaming=%d chord_ok=%d pid=%ld played=%ld pcm=%ld re=%ld/%ld/%ld "
-                 "regions=%ld volume=%ld holder_alive=%d holder_fds=%d private_clean=%d pulse_sink=%d pulse_default=%d tone_rc=%d "
+                 "regions=%ld volume=%ld holder_alive=%d holder_fds=%d private_clean=%d held_empty=%d pulse_unit_rc=%d pulse_sink=%d "
+                 "pulse_default=%d tone_rc=%d "
                  "amp_off_before=%d loud=%ld enables=%ld disables=%ld peak_in=%ld peak_out=%ld underruns=%ld tone_loud=%d tone_peaks=%d "
                  "amp_on_seen=%d amp_idle_off=%d sink_ok=%d\n",
                  k.unit_rc, k.report_seen, k.state, k.streaming, k.chord_ok, k.pid, k.played, k.pcm, k.re_verified, k.re0, k.re1, k.regions,
-                 k.volume_level, k.holder_alive, k.holder_fds, k.private_clean, k.pulse_sink, k.pulse_default, k.tone_rc, k.amp_off_before,
+                 k.volume_level, k.holder_alive, k.holder_fds, k.private_clean, k.held_empty, k.pulse_unit_rc, k.pulse_sink, k.pulse_default,
+                 k.tone_rc, k.amp_off_before,
                  k.loud_after == LONG_MIN || k.loud_before == LONG_MIN ? -1L : k.loud_after - k.loud_before,
                  k.enables_after == LONG_MIN || k.enables_before == LONG_MIN ? -1L : k.enables_after - k.enables_before,
                  k.disables_after == LONG_MIN || k.disables_before == LONG_MIN ? -1L : k.disables_after - k.disables_before, k.peak_in,

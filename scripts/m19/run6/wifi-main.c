@@ -46,6 +46,10 @@ int main(int argc, char **argv)
     c.iface_ms = env_ms("M19_WIFI_IFACE_MS", 1500);
     c.command_ms = env_ms("M19_WIFI_COMMAND_MS", 3000);
     c.pump_ms = 5;
+    /* The test is its own init: a subreaper that adopts the daemon. */
+    c.init_pid = (int)env_ms("M19_WIFI_INIT_PID", 1);
+    c.adopt_ms = env_ms("M19_WIFI_ADOPT_MS", 2000);
+    c.middle_hold_ms = env_ms("M19_WIFI_MIDDLE_MS", 0);
     c.return_after_ms = env_ms("M19_WIFI_RETURN_MS", 300);
     c.require_root = 0;
 #endif
