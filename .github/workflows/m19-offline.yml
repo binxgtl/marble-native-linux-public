@@ -21,6 +21,9 @@ jobs:
       - name: Bionic client against frozen Keystore2 AIDL (no device)
         if: runner.arch == 'X64'
         run: bash scripts/m19/unlock/build-ndk.sh artifacts/m19/ndk
+      - name: R7 CE client for bionic, built twice, against frozen Keystore2 and authorization AIDL (no device)
+        if: runner.arch == 'X64'
+        run: bash scripts/m19/ce/build-ndk.sh artifacts/m19/ce-ndk
       - name: Actual binding and one-shot probe on typed fakes, read-only fixtures and deadlines (no Binder or TEE)
         run: bash scripts/m19/unlock/test-probe.sh artifacts/m19/${{ runner.arch }}/probe-tests
       - name: Mutants of the safety gates (no device)
@@ -46,7 +49,7 @@ jobs:
       - name: Vulkan and Present headers, lavapipe and Xvfb for the GPU and Present probes (no device)
         run: |
           set -euo pipefail
-          pkgs=(libvulkan-dev mesa-vulkan-drivers libxcb-present-dev libxcb-dri3-dev xvfb libssl-dev)
+          pkgs=(libvulkan-dev mesa-vulkan-drivers libxcb-present-dev libxcb-dri3-dev xvfb libssl-dev libc++-dev libc++abi-dev libx11-dev libxtst-dev)
           if [ "${RUNNER_ARCH}" = "ARM64" ]; then
             pkgs+=(liblzma-dev)
           fi
@@ -159,6 +162,9 @@ jobs:
         run: bash scripts/m19/ce/test.sh artifacts/m19/${{ runner.arch }}/ce
         env:
           M19_MUTANTS: '0'
+      - name: R7 keypad logic, normal and ASan/UBSan, and the binary in Xvfb tapped through XTEST (no device, PIN or key)
+        timeout-minutes: 6
+        run: bash scripts/m19/run7/test.sh artifacts/m19/${{ runner.arch }}/run7
       - name: M11 Run12's PD mapper, from its pinned linux-msm sources, static and built twice (ARM64, no device)
         if: runner.arch == 'ARM64'
         run: |
@@ -194,6 +200,8 @@ jobs:
           path: |
             artifacts/m19/**/m19-rdx-a
             artifacts/m19/**/m19-unlock-a
+            artifacts/m19/**/m19-ce-a
+            artifacts/m19/**/m19-ce-prompt-a
             artifacts/m19/**/m19-probe-a
             artifacts/m19/**/m19-probe-b
             artifacts/m19/**/pid1-a

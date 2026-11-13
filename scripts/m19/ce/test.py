@@ -197,6 +197,13 @@ class Unlock(unittest.TestCase):
                 code, out = self.unlock()
                 self.assertEqual((out['status'], out['gk_calls']), ('CE_LAYOUT', '0'))
 
+    def test_secdis_size_is_checked_before_gatekeeper(self):
+        model.build(self.root, PIN)
+        path = next((self.root / 'spblob').glob('*.secdis'))
+        path.write_bytes(path.read_bytes()[:-1])
+        code, out = self.unlock()
+        self.assertEqual((out['status'], out['gk_calls']), ('SECDIS', '0'))
+
     def test_install_and_ephemeral_failures(self):
         model.build(self.root, PIN)
         code, out = self.unlock(fault='eph-fail')
@@ -285,11 +292,125 @@ class DeAndCopy(unittest.TestCase):
         self.assertEqual(source.read_bytes(), original, 'a link target was written through')
 
 
+def tool(name, *arguments, env=None):
+    path = getattr(ARGS, name)
+    result = subprocess.run([path, *arguments], capture_output=True, text=True, timeout=120, env={**os.environ, **(env or {})})
+    return result.returncode, result.stdout.strip()
+
+
+@unittest.skipUnless(os.environ.get('M19_CE_GK'), 'the libc++ fake is built by test.sh')
+class Gatekeeper(unittest.TestCase):
+    """gk.cpp's hand-laid platform ABI against a fake built with real libc++ types."""
+
+    def verify(self, mode='ok', absent=False):
+        env = {'M19_FAKE_GK': mode}
+        if absent:
+            env['M19_FAKE_GK_ABSENT'] = '1'
+        code, out = tool('gk_binary', ARGS.gk_library, env=env)
+        return out
+
+    def test_ok_and_reenroll_deliver_the_token(self):
+        self.assertEqual(self.verify(), 'GK result=0 detail=0 size=69 timeout=0 token_ok=1')
+        self.assertEqual(self.verify('reenroll'), 'GK result=0 detail=1 size=69 timeout=0 token_ok=1')
+
+    def test_failures(self):
+        self.assertEqual(self.verify('reject'), 'GK result=1 detail=-1 size=0 timeout=0 token_ok=0')
+        self.assertEqual(self.verify('retry'), 'GK result=2 detail=-2 size=0 timeout=30000 token_ok=0')
+        self.assertEqual(self.verify('transport'), 'GK result=3 detail=-32 size=0 timeout=0 token_ok=0')
+        self.assertEqual(self.verify('silent'), 'GK result=3 detail=-61 size=0 timeout=0 token_ok=0')
+        self.assertEqual(self.verify('large'), 'GK result=3 detail=-75 size=0 timeout=0 token_ok=0')
+        self.assertEqual(self.verify(absent=True), 'GK connect=-19')
+
+
+@unittest.skipUnless(os.environ.get('M19_CE_KS'), 'built by test.sh')
+class Keystore(unittest.TestCase):
+    def run_ks(self, fault='', alias=None):
+        code, out = tool('ks_binary', *([alias] if alias else []), env={'M19_TEST_FAULT': fault})
+        return out
+
+    def test_contract(self):
+        self.assertEqual(self.run_ks(), 'KS auth=0 auth_ok=1 result=0 detail=0 size=40 plain_ok=1 input_ok=1')
+
+    def test_failures(self):
+        self.assertEqual(self.run_ks('missing-keystore'), 'KS connect=-2')
+        self.assertEqual(self.run_ks('missing-authorization'), 'KS connect=-2')
+        self.assertEqual(self.run_ks('missing-lookup'), 'KS connect=-38')
+        self.assertEqual(self.run_ks(alias='synthetic_password_0'), 'KS auth=0 auth_ok=1 result=-1 detail=7 size=0 plain_ok=0 input_ok=0')
+        self.assertEqual(self.run_ks('auth-error'), 'KS auth=-1 auth_ok=1 result=-1 detail=-26 size=0 plain_ok=0 input_ok=0')
+        self.assertEqual(self.run_ks('create-error'), 'KS auth=0 auth_ok=1 result=-1 detail=-26 size=0 plain_ok=0 input_ok=0')
+        self.assertEqual(self.run_ks('null-operation'), 'KS auth=0 auth_ok=1 result=-1 detail=0 size=0 plain_ok=0 input_ok=0')
+        self.assertEqual(self.run_ks('finish-error'), 'KS auth=0 auth_ok=1 result=-1 detail=-30 size=0 plain_ok=0 input_ok=1')
+        self.assertEqual(self.run_ks('finish-oversize'), 'KS auth=0 auth_ok=1 result=-1 detail=0 size=0 plain_ok=0 input_ok=1')
+        self.assertEqual(self.run_ks('finish-empty'), 'KS auth=0 auth_ok=1 result=-1 detail=0 size=0 plain_ok=0 input_ok=1')
+
+
+@unittest.skipUnless(os.environ.get('M19_CE_BROKER'), 'built by test.sh')
+class Broker(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self.path = self.root / 'ce.sock'
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def serve(self, messages, uid=None, timeout=5000):
+        import socket
+        if self.path.exists():
+            self.path.unlink()
+        process = subprocess.Popen([ARGS.broker_binary, str(self.path), str(os.getuid() if uid is None else uid), str(timeout)],
+                                   stdout=subprocess.PIPE, text=True)
+        self.assertEqual(process.stdout.readline().strip(), 'BROKER ready')
+        self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
+        replies = []
+        for message in messages:
+            client = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+            try:
+                client.settimeout(10)
+                client.connect(str(self.path))
+                client.send(message)
+                replies.append(client.recv(256).decode())
+            except OSError as error:
+                replies.append(type(error).__name__)
+            finally:
+                client.close()
+        rest = process.communicate(timeout=30)[0].strip()
+        return replies, rest
+
+    def test_one_pin_one_attempt(self):
+        replies, rest = self.serve([b'PIN:482916', b'PIN:482916'])
+        self.assertEqual(replies[0], 'M19_CE status=OK detail=7 version=3 timeout=0')
+        self.assertIn(replies[1], ('ConnectionRefusedError', 'FileNotFoundError', 'ConnectionResetError', 'TimeoutError', ''))
+        self.assertEqual(rest, 'BROKER result=0 calls=1 pin=482916 line=M19_CE status=OK detail=7 version=3 timeout=0')
+
+    def test_wrong_pin_is_reported(self):
+        replies, rest = self.serve([b'PIN:111111'])
+        self.assertEqual(replies[0], 'M19_CE status=GK_REJECTED detail=7 version=3 timeout=0')
+
+    def test_malformed_messages_never_reach_an_attempt(self):
+        for message in (b'PINX482916', b'PIN:', b'PIN:' + b'1' * 61, b'482916'):
+            replies, rest = self.serve([message])
+            self.assertEqual(replies[0], 'M19_CE status=MESSAGE detail=0 version=0 timeout=0', message)
+            self.assertIn('calls=0', rest)
+
+    def test_other_users_are_refused(self):
+        replies, rest = self.serve([b'PIN:482916'], uid=os.getuid() + 1)
+        self.assertEqual(replies[0], 'M19_CE status=PEER detail=0 version=0 timeout=0')
+        self.assertIn('calls=0', rest)
+
+    def test_no_connection_times_out(self):
+        replies, rest = self.serve([], timeout=200)
+        self.assertEqual(rest, 'BROKER result=-1 calls=0 pin=- line=M19_CE status=NO_CONNECTION')
+
+
 def main():
     global ARGS
     parser = argparse.ArgumentParser()
     parser.add_argument('--binary', required=True)
     parser.add_argument('--libcrypto', default='libcrypto.so.3')
+    parser.add_argument('--gk-binary')
+    parser.add_argument('--gk-library')
+    parser.add_argument('--ks-binary')
+    parser.add_argument('--broker-binary')
     ARGS, rest = parser.parse_known_args()
     model.self_check()
     unittest.main(argv=[sys.argv[0], *rest], verbosity=1)

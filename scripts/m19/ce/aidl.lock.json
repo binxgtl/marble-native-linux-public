@@ -1,0 +1,10 @@
+{
+ "tag": "android-12.1.0_r27",
+ "repository": "platform/system/security",
+ "files": {
+  "authorization/android/security/authorization/AuthorizationTokens.aidl": "106fd711b8f55d6d66fa2f651730a8d5db83be9ebaf89fc895c7ecc4b948a31d",
+  "authorization/android/security/authorization/IKeystoreAuthorization.aidl": "e8438b2b3861f7dff52cfad2794cf6343502ca989fd274f31f79b938c64beae7",
+  "authorization/android/security/authorization/LockScreenEvent.aidl": "6be81987473338de86cfa9d5d178fefe8150309effdd08cdd59249003f171da9",
+  "authorization/android/security/authorization/ResponseCode.aidl": "ba62d79e07df92120dce6669543a8fbbd0f3aed0701566cbd3842a675e18625b"
+ }
+}

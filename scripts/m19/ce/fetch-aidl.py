@@ -1,0 +1,74 @@
+#!/usr/bin/env python3
+"""Fetch IKeystoreAuthorization's AIDL at the tag of TWRP's Keystore2 (Android 12) and check it against
+aidl.lock.json. The Keystore2, KeyMint and secure-clock AIDL come from scripts/m19/unlock/fetch-aidl.py."""
+import argparse
+import hashlib
+import io
+import json
+import sys
+import tarfile
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+LOCK = HERE / 'aidl.lock.json'
+TAG = 'android-12.1.0_r27'
+REPOSITORY = 'platform/system/security'
+PATH = 'keystore2/aidl/android/security/authorization'
+PREFIX = 'authorization/android/security/authorization'
+
+
+def read_archive(url):
+    for attempt in range(1, 4):
+        try:
+            with urllib.request.urlopen(url, timeout=120) as response:
+                return response.read()
+        except urllib.error.HTTPError as error:
+            error.close()
+            if error.code not in (429, 500, 502, 503, 504) or attempt == 3:
+                raise
+        except (urllib.error.URLError, TimeoutError):
+            if attempt == 3:
+                raise
+        print(f'AIDL transient download failure; retry {attempt}/3', file=sys.stderr)
+        time.sleep(attempt)
+    raise AssertionError('unreachable')
+
+
+def fetch():
+    url = f'https://android.googlesource.com/{REPOSITORY}/+archive/refs/tags/{TAG}/{PATH}.tar.gz'
+    files = {}
+    with tarfile.open(fileobj=io.BytesIO(read_archive(url)), mode='r:gz') as tar:
+        for member in tar.getmembers():
+            if member.isfile() and member.name.endswith('.aidl'):
+                relative = member.name.removeprefix('./')
+                if relative.startswith('/') or '/' in relative or '..' in relative:
+                    raise SystemExit(f'unsafe member {relative}')
+                files[f'{PREFIX}/{relative}'] = tar.extractfile(member).read()
+    return files
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--out', type=Path)
+    parser.add_argument('--write-lock', action='store_true')
+    arguments = parser.parse_args()
+    files = fetch()
+    hashes = {path: hashlib.sha256(data).hexdigest() for path, data in sorted(files.items())}
+    if arguments.write_lock:
+        LOCK.write_text(json.dumps({'tag': TAG, 'repository': REPOSITORY, 'files': hashes}, indent=1) + '\n', encoding='utf-8',
+                        newline='\n')
+    elif json.loads(LOCK.read_text(encoding='utf-8'))['files'] != hashes:
+        raise SystemExit('authorization AIDL does not match aidl.lock.json')
+    if arguments.out:
+        for path, data in files.items():
+            target = arguments.out / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+    print(f'authorization AIDL: {len(files)} files at {TAG}')
+
+
+if __name__ == '__main__':
+    main()
