@@ -161,6 +161,7 @@ class WifiRunner(unittest.TestCase):
         rc, out = self.run_wifi()
         self.assertEqual((rc, self.result()), (0, 'ready wlan0\n'), out)
         self.assertRegex(out, r'daemon pid=\d+ ready=1 idle=1 rc=0')
+        self.setUp()
         rc, out = self.run_wifi(M19_FAKE_CNSSD='exit')
         self.assertEqual((rc, self.result()), (1, 'failed owner -71\n'), out)
         self.assertIn('daemon receipt rc=-32', out)
