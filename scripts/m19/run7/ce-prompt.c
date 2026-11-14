@@ -146,14 +146,20 @@ static void unlock(const char *socket_path, const char *result_path)
     record(result_path, reply);
 }
 
+/* R8c: a program starting or a menu left open can hold the keyboard or pointer for a while. The keypad shows itself,
+ * stays on top and keeps asking for both until GRAB_MS; no key is acted on before it has them. */
+#define GRAB_MS 240000
 static int grab(void)
 {
-    for (int tries = 0; tries < 50; tries++) {
+    long long until = now_ms() + GRAB_MS;
+    do {
+        XRaiseWindow(display, window);
         if (XGrabKeyboard(display, window, True, GrabModeAsync, GrabModeAsync, CurrentTime) == GrabSuccess &&
             XGrabPointer(display, window, True, ButtonPressMask, GrabModeAsync, GrabModeAsync, window, None, CurrentTime) == GrabSuccess)
             return 0;
-        usleep(100000);
-    }
+        XSync(display, False);
+        usleep(200000);
+    } while (now_ms() < until);
     return -1;
 }
 
@@ -185,6 +191,7 @@ int main(int argc, char **argv)
     XMapRaised(display, window);
     gc = XCreateGC(display, window, 0, NULL);
     m19_prompt_layout(width, height, &layout);
+    draw();
     XSync(display, False);
     if (grab()) {
         record(argv[2], "M19_CE status=NO_GRAB");

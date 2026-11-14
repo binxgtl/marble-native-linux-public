@@ -13,6 +13,9 @@ HERE = Path(__file__).resolve().parent
 MUTANTS = (
     # T2-unlock: the read-write table, and nothing else accepted.
     ('t2-unlock', '/m19/m19-unlock --rw', '/m19/m19-unlock'),
+    ('t2-unlock', '$BB blockdev --setrw "$R/dev/m19-userdata" || fail userdata-writable\n', ''),
+    ('t2-unlock', '[ "$($BB blockdev --getro "$R/dev/m19-userdata")" = 0 ] || fail userdata-writable-check\n', ''),
+    ('t2-unlock', '[ -e "$R/dev/m19-userdata" ] && [ ! -L "$R/dev/m19-userdata" ] || fail userdata-node\n', ''),
     ('t2-unlock', '"M19_UNLOCK status=OK "*" table=rw dev="*) exit 0;;', '"M19_UNLOCK status=OK "*) exit 0;;'),
     # T5-mount: read-write, no discard, checked.
     ('t5-mount', 'rw,noatime,nodiscard,inlinecrypt', 'rw,noatime,inlinecrypt'),

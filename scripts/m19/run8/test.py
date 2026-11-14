@@ -117,10 +117,15 @@ class Unlock(Fixture):
         (self.root / 'm19/pins').write_text('USERDATA_SECTORS=123456\n')
         (self.root / 'sys/class/misc/device-mapper').mkdir(parents=True)
         (self.root / 'sys/class/misc/device-mapper/dev').write_text('10:236\n')
+        (self.root / 'dev/m19-userdata').write_text('')
 
     def test_the_read_write_table_passes_and_is_recorded(self):
-        result = self.run_script(M19_UNLOCK_LINE=OK_LINE)
+        result = self.run_script(M19_UNLOCK_LINE=OK_LINE, M19_GETRO='0')
         self.assertEqual(result.returncode, 0, result.stderr)
+        log = self.bb_log()
+        # R8c: T0's read-only flag on the userdata partition is cleared, and checked, before the table loads.
+        self.assertLess(log.index(f'blockdev --setrw {self.root}/dev/m19-userdata\n'), log.index('chroot '))
+        self.assertIn(f'blockdev --getro {self.root}/dev/m19-userdata\n', log)
         self.assertIn(f'chroot {self.root}/tee /m19/m19-unlock --rw /metadata/vold/metadata_encryption/key m19-userdata /dev/m19-userdata 123456\n',
                       self.bb_log())
         self.assertEqual((self.root / 'run/m19/unlock.line').read_text(), OK_LINE + '\n')
@@ -131,7 +136,18 @@ class Unlock(Fixture):
                      '', 'M19_UNLOCK status=OK detail=0 upgraded=0 table=ro dev=254:5'):
             with self.subTest(line=line):
                 self.setUp()
-                self.assertEqual(self.run_script(M19_UNLOCK_LINE=line).returncode, 1)
+                self.assertEqual(self.run_script(M19_UNLOCK_LINE=line, M19_GETRO='0').returncode, 1)
+
+    def test_a_partition_that_stays_read_only_or_no_node_stops_before_the_table(self):
+        for change, reason in (('flag', 'userdata-writable-check'), ('node', 'userdata-node')):
+            with self.subTest(change=change):
+                self.setUp()
+                if change == 'node':
+                    (self.root / 'dev/m19-userdata').unlink()
+                result = self.run_script(M19_UNLOCK_LINE=OK_LINE, M19_GETRO='1' if change == 'flag' else '0')
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(f'M19 T2 failed: {reason}\n', result.stderr)
+                self.assertNotIn('chroot', self.bb_log())
 
 
 class Mount(Fixture):

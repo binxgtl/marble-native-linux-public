@@ -36,6 +36,24 @@ class FakeBroker(threading.Thread):
             pass
 
 
+HOLDER = r"""
+import ctypes, sys, time
+x = ctypes.CDLL('libX11.so.6')
+x.XOpenDisplay.restype = ctypes.c_void_p
+x.XDefaultRootWindow.argtypes = [ctypes.c_void_p]
+x.XDefaultRootWindow.restype = ctypes.c_ulong
+x.XGrabPointer.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int, ctypes.c_uint, ctypes.c_int, ctypes.c_int, ctypes.c_ulong,
+                           ctypes.c_ulong, ctypes.c_ulong]
+x.XSync.argtypes = [ctypes.c_void_p, ctypes.c_int]
+x.XCloseDisplay.argtypes = [ctypes.c_void_p]
+display = x.XOpenDisplay(None)
+print(x.XGrabPointer(display, x.XDefaultRootWindow(display), 1, 0, 1, 1, 0, 0, 0), flush=True)
+x.XSync(display, 0)
+time.sleep(float(sys.argv[1]))
+x.XCloseDisplay(display)
+"""
+
+
 class Prompt(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -57,11 +75,12 @@ class Prompt(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.root, ignore_errors=True)
 
-    def session(self, keys, reply=b'M19_CE status=OK detail=0 version=3 timeout=0', broker=True):
+    def session(self, keys, reply=b'M19_CE status=OK detail=0 version=3 timeout=0', broker=True, wait=0):
         fake = FakeBroker(self.socket, reply) if broker else None
         if fake:
             fake.start()
         prompt = subprocess.Popen([ARGS.prompt, str(self.socket), str(self.result)])
+        time.sleep(wait)
         subprocess.run([ARGS.xclick, keys], check=True, timeout=60)
         code = prompt.wait(timeout=60)
         if fake:
@@ -90,6 +109,16 @@ class Prompt(unittest.TestCase):
         code, messages, result = self.session('123UC')
         self.assertEqual(messages, [])
         self.assertEqual(result, 'M19_CE status=CANCELLED\n')
+
+    def test_a_pointer_held_longer_than_r7s_five_seconds_only_delays_the_keypad(self):
+        # R8c: another client held the pointer when the keypad came up; R7's keypad gave up after five seconds.
+        holder = subprocess.Popen(['python3', '-c', HOLDER, '7'], stdout=subprocess.PIPE, text=True)
+        self.assertEqual(holder.stdout.readline().strip(), '0')
+        code, messages, result = self.session('48291BU', wait=8)
+        holder.wait(timeout=30)
+        self.assertEqual(messages, [b'PIN:4829'])
+        self.assertEqual(result, 'M19_CE status=OK detail=0 version=3 timeout=0\n')
+        self.assertEqual(code, 0)
 
     def test_no_broker(self):
         code, messages, result = self.session('4829U', broker=False)
