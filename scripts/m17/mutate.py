@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Mutation check for M17 G1: every mutant of scripts/m17/select.c must fail test.sh (normal and ASan/UBSan)."""
+"""Mutation check for M17: every mutant of scripts/m17/select.c and g3.c must fail test.sh (normal and ASan/UBSan)."""
 import concurrent.futures
 import os
 import shutil
@@ -43,6 +43,20 @@ MUTANTS = (
     ('select.c', '        if (n == 0 || n % (ssize_t)sizeof ev[0]) return -1;', '        if (n == 0) return -1;'),
     ('select.c', '            else if (!(p[i].revents & POLLIN) && (p[i].revents & (POLLERR | POLLHUP | POLLNVAL))) m17_window_fail(w, M17_WHY_READ_ERROR);\n',
      ''),
+    # G3 K1-keys: both modules in order, each wait its own, both keys pressed and released, edges only, the device's own
+    # key, broken and dropped events, the selector's view, ambiguity named, no endless window without keys.
+    ('g3.c', '    r->reboot_mode_rc = load_module(g, "reboot-mode.ko");\n', ''),
+    ('g3.c', 'M17_KEY_VOLUMEDOWN, g->down_wait_ms, down_event);', 'M17_KEY_VOLUMEDOWN, g->up_wait_ms, down_event);'),
+    ('g3.c', 'r->up_found && r->down_found && r->up_press && r->up_release && ', 'r->up_found && r->down_found && r->up_press && '),
+    ('g3.c', 'r->down_press && r->down_release && !r->read_error;', 'r->down_press && !r->read_error;'),
+    ('g3.c', 'r->down_press && r->down_release && !r->read_error;', 'r->down_press && r->down_release;'),
+    ('g3.c', '            if (ev[i].value == 1) (*k->press)++;', '            if (ev[i].value >= 1) (*k->press)++;'),
+    ('g3.c', '            if (ev[i].type != EV_KEY || ev[i].code != k->dev.code) continue;', '            if (ev[i].type != EV_KEY) continue;'),
+    ('g3.c', '            if (ev[i].type == EV_SYN && ev[i].code == SYN_DROPPED) return -1;\n', ''),
+    ('g3.c', '        if (n == 0 || n % (ssize_t)sizeof ev[0]) return -1;', '        if (n == 0) return -1;'),
+    ('g3.c', '            (void)m17_window_tick(w, now);\n', ''),
+    ('g3.c', '        if (rc == -EEXIST) {\n            say(g, "M17 G3 ambiguous %s", name);\n            return -1;\n        }\n', ''),
+    ('g3.c', '        if (!count) break; /* no key at all: nothing to wait for */\n', ''),
 )
 
 
@@ -56,7 +70,7 @@ def run(number, name, old, new):
         path.write_text(text.replace(old, new), encoding='utf-8', newline='\n')
         try:
             result = subprocess.run(['bash', str(target / 'test.sh'), str(Path(directory) / 'out')], stdin=subprocess.DEVNULL,
-                                    capture_output=True, timeout=300, start_new_session=True)
+                                    capture_output=True, timeout=300, start_new_session=True, env=dict(os.environ, M17_STATIC='0'))
             return result.returncode != 0
         except subprocess.TimeoutExpired:
             return True
@@ -64,7 +78,8 @@ def run(number, name, old, new):
 
 def main():
     with tempfile.TemporaryDirectory() as directory:
-        check = subprocess.run(['bash', str(HERE / 'test.sh'), directory], stdin=subprocess.DEVNULL, capture_output=True, timeout=300)
+        check = subprocess.run(['bash', str(HERE / 'test.sh'), directory], stdin=subprocess.DEVNULL, capture_output=True, timeout=300,
+                               env=dict(os.environ, M17_STATIC='0'))
         if check.returncode:
             print(check.stdout.decode('utf-8', 'replace') + check.stderr.decode('utf-8', 'replace'))
             raise SystemExit('the unmutated tests fail')

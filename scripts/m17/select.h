@@ -68,6 +68,10 @@ struct m17_key_dev {
  * <dev_root>/input/eventN read-only and nonblocking. With require_chr, the node must be a character device whose
  * number is the one sysfs gives. 0, or -ENOENT (none), -EEXIST (more than one), -ENODEV (node wrong) or -errno. */
 int m17_key_open(const char *sys_root, const char *dev_root, const char *name, unsigned code, int require_chr, struct m17_key_dev *out);
+/* The lookup alone: the one matching eventN in `found`. 0, -ENOENT or -EEXIST. */
+int m17_key_find(const char *sys_root, const char *name, unsigned code, char found[16]);
+/* Makes <dev_root>/input/<event> as the character device sysfs numbers (an existing node is kept). */
+int m17_key_node(const char *sys_root, const char *dev_root, const char *event);
 
 struct m17_loop {
     const char *sys_root, *dev_root;

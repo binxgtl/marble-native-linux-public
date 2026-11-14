@@ -187,11 +187,9 @@ static int event_entry(const char *name) {
     return strlen(name) < 16;
 }
 
-int m17_key_open(const char *sys_root, const char *dev_root, const char *name, unsigned code, int require_chr, struct m17_key_dev *out) {
-    out->fd = -1;
-    out->code = code;
-    out->node[0] = 0;
-    char dir[PATH_MAX], path[PATH_MAX], text[512], found[16] = "";
+int m17_key_find(const char *sys_root, const char *name, unsigned code, char found[16]) {
+    char dir[PATH_MAX], path[PATH_MAX], text[512];
+    found[0] = 0;
     if (snprintf(dir, sizeof dir, "%s/class/input", sys_root) >= (int)sizeof dir) return -ENAMETOOLONG;
     DIR *d = opendir(dir);
     if (!d) return -errno;
@@ -208,14 +206,43 @@ int m17_key_open(const char *sys_root, const char *dev_root, const char *name, u
         if (!matches++) memcpy(found, e->d_name, strlen(e->d_name) + 1); /* event_entry: under 16 bytes */
     }
     closedir(d);
-    if (!matches) return -ENOENT;
-    if (matches > 1) return -EEXIST;
-    unsigned want_major = 0, want_minor = 0;
-    if (require_chr) {
-        if (snprintf(path, sizeof path, "%s/%s/dev", dir, found) >= (int)sizeof path || read_text(path, text, sizeof text) ||
-            sscanf(text, "%u:%u", &want_major, &want_minor) != 2)
-            return -ENODEV;
+    if (!matches) {
+        found[0] = 0;
+        return -ENOENT;
     }
+    if (matches > 1) return -EEXIST;
+    return 0;
+}
+
+/* The event node's device number, from <sys_root>/class/input/<event>/dev. */
+static int event_number(const char *sys_root, const char *event, unsigned *maj, unsigned *min) {
+    char path[PATH_MAX], text[64];
+    if (snprintf(path, sizeof path, "%s/class/input/%s/dev", sys_root, event) >= (int)sizeof path || read_text(path, text, sizeof text) ||
+        sscanf(text, "%u:%u", maj, min) != 2)
+        return -ENODEV;
+    return 0;
+}
+
+int m17_key_node(const char *sys_root, const char *dev_root, const char *event) {
+    unsigned maj, min;
+    char path[PATH_MAX];
+    if (event_number(sys_root, event, &maj, &min)) return -ENODEV;
+    if (snprintf(path, sizeof path, "%s/input", dev_root) >= (int)sizeof path) return -ENAMETOOLONG;
+    if (mkdir(path, 0755) && errno != EEXIST) return -errno;
+    if (snprintf(path, sizeof path, "%s/input/%s", dev_root, event) >= (int)sizeof path) return -ENAMETOOLONG;
+    if (mknod(path, S_IFCHR | 0600, makedev(maj, min)) && errno != EEXIST) return -errno;
+    return 0;
+}
+
+int m17_key_open(const char *sys_root, const char *dev_root, const char *name, unsigned code, int require_chr, struct m17_key_dev *out) {
+    out->fd = -1;
+    out->code = code;
+    out->node[0] = 0;
+    char found[16];
+    int rc = m17_key_find(sys_root, name, code, found);
+    if (rc) return rc;
+    unsigned want_major = 0, want_minor = 0;
+    if (require_chr && event_number(sys_root, found, &want_major, &want_minor)) return -ENODEV;
     if (snprintf(out->node, sizeof out->node, "%s/input/%s", dev_root, found) >= (int)sizeof out->node) return -ENAMETOOLONG;
     int fd = open(out->node, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
     if (fd < 0) return -errno;
