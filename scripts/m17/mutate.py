@@ -86,7 +86,7 @@ MUTANTS = (
     ('native.c', '    if (rc || status)\n        return M17_END_BOOTSTRAP;', '    if (rc)\n        return M17_END_BOOTSTRAP;'),
     ('native.c', '    if (n->adsp_rc) {', '    if (0) {'),
     ('native.c', 'n->all_ok ? GREEN : YELLOW', 'GREEN'),
-    ('native.c', '        int retired = retire_owned(pid, &status, &reaped, !reaped);', '        int retired = retire_owned(pid, &status, &reaped, 0);'),
+    ('native.c', '        if (retired || !reaped)\n            rc = rc ? rc : -ECHILD;', '        if (0)\n            rc = rc ? rc : -ECHILD;'),
     ('native.c', '            keep = (size_t)(hit - line) + sizeof(command) - 1;', '            keep = length;'),
     ('native.c', '            keep = (size_t)(hit - line) + sizeof(serial) - 1;', '            keep = length;'),
     ('native.c', '                line[i + k] = \'x\';', '                line[i + k] = line[i + k];'),

@@ -451,6 +451,11 @@ static void test_native(void) {
     n = native_bench("0", "0", slow, 300);
     CHECK(m17_native_main(&n) == M17_END_NOT_PASS && n.results[4] == -ETIMEDOUT && !n.ownership_unresolved);
 
+    /* The owned step's leader succeeds but leaves a process in its group behind: never a success (R1's rule). */
+    static const char *const stray[5] = {"exit 0", "exit 0", "exit 0", "exit 0", "sleep 30 &\nexit 0"};
+    n = native_bench("0", "0", stray, 5000);
+    CHECK(m17_native_main(&n) == M17_END_NOT_PASS && n.results[4] == -ECHILD && !n.ownership_unresolved);
+
     /* No place for the log (/data not mounted): still a PASS, the log's failure recorded. */
     n = native_bench("0", "0", ok, 5000);
     snprintf(paths[11], 512, "%s", at("nat/nodata/ubuntu/var/lib/m19"));
@@ -606,6 +611,7 @@ static void test_volkeys(void) {
     struct input_event release_up[] = {ev(EV_KEY, M17_KEY_VOLUMEUP, 0)}, release_down[] = {ev(EV_KEY, M17_KEY_VOLUMEDOWN, 0)};
     send_events(up, release_up, 1);
     send_events(down, release_down, 1);
+    usleep(200000); /* both releases read before what follows on Volume Up's node */
     /* SYN_DROPPED forgets what was down. */
     struct input_event dropped[] = {ev(EV_KEY, M17_KEY_VOLUMEUP, 1), ev(EV_SYN, SYN_DROPPED, 0), ev(EV_KEY, M17_KEY_VOLUMEUP, 0)};
     send_events(up, dropped, 3);
