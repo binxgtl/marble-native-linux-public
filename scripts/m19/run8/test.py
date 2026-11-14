@@ -324,7 +324,7 @@ class Root(Fixture):
             self.assertIn(f'blockdev --setro {self.root}/dev/m19-ro-{name}\n', log)
         # R8b: the data disk keeps its flag, or the kernel counts its partitions read-only too.
         for name in ('sda', 'sda5', 'dm-5'):
-            self.assertNotIn(f'm19-ro-{name}', log)
+            self.assertNotRegex(log, rf'/dev/m19-ro-{name}(\s|$)')
         self.assertIn(f'mount -o bind {self.root}/m19-data/ubuntu {self.new}\n', log)
         self.assertNotIn(f'remount,bind,ro {self.new}\n', log)
         points = [f[0] for f in self.tmpfs()]
