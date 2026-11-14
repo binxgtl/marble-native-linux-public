@@ -1460,12 +1460,17 @@ static int ev_last(const char *s) {
 }
 
 /* The stream's source: once the sink switched to the stream (its status appears), 0.32 s of full-scale PCM, a pause
- * past idle_off_ms, about 0.14 s more, a pause again, then the stop marker. R9: the first part, eight whole 40 ms
- * buffers, dribbles in 1001-byte writes that split frames, as PulseAudio's pipe sink writes a few KiB at a time; the
- * sink must complete every buffer from them and lose no byte. The second part ends 4000 bytes into a buffer, which
- * after fill_wait_ms is padded: exactly one gap. */
+ * past idle_off_ms, a second and a third part with pauses between, then the stop marker. R9:
+ *  - the first part, eight whole 40 ms buffers, dribbles in 1001-byte writes that split frames, as PulseAudio's pipe
+ *    sink writes a few KiB at a time; the sink must complete every buffer from them and lose no byte;
+ *  - the second part is one whole buffer and 4001 bytes: after fill_wait_ms the sink sends 4000 of them padded (the one
+ *    gap) and keeps the last byte, half a sample;
+ *  - the third part, after a pause past fill_wait_ms, is the 7679 bytes that complete the kept byte's buffer: whole,
+ *    so no second gap. A sink that lost or sent the kept byte would leave the third part short: a second gap.
+ * The second and third parts each fit the FIFO, so each arrives in one piece. */
 #define FEED_FIRST 61440u
-#define FEED_SECOND 27040u
+#define FEED_SECOND 11681u
+#define FEED_THIRD 7679u
 #define FEED_PIECE 1001u
 static pid_t start_feeder(const struct world *w) {
     fflush(stdout);
@@ -1485,12 +1490,18 @@ static pid_t start_feeder(const struct world *w) {
         ssize_t n = write(fd, p + done, piece);
         if (n <= 0) _exit(71);
         done += (size_t)n;
-        usleep(2000);
+        usleep(500);
     }
     usleep(600000);
     for (size_t done = 0; done < FEED_SECOND;) {
         ssize_t n = write(fd, p + done, FEED_SECOND - done);
         if (n <= 0) _exit(72);
+        done += (size_t)n;
+    }
+    usleep(300000);
+    for (size_t done = FEED_SECOND; done < FEED_SECOND + FEED_THIRD;) {
+        ssize_t n = write(fd, p + done, FEED_SECOND + FEED_THIRD - done);
+        if (n <= 0) _exit(74);
         done += (size_t)n;
     }
     usleep(500000);
@@ -1646,8 +1657,10 @@ static void run_root_session_case(const char *base, const char *tag, struct adsp
         char state[32], status[1024];
         kv_str(rep, "state", state, sizeof state);
         assert(!strcmp(state, "stopped") && kv_long(rep, "chord_ok") == 1 && kv_long(rep, "streaming") == 1 && kv_long(rep, "stopped") == 1);
-        assert(kv_long(rep, "bytes_in") == FEED_FIRST + FEED_SECOND && kv_long(rep, "bytes_loud") == FEED_FIRST + FEED_SECOND);
-        /* R9: every buffer the dribbled sound reached was whole; only the second part's short tail was padded. */
+        assert(kv_long(rep, "bytes_in") == FEED_FIRST + FEED_SECOND + FEED_THIRD &&
+               kv_long(rep, "bytes_loud") == FEED_FIRST + FEED_SECOND + FEED_THIRD);
+        /* R9: every buffer the dribbled sound reached was whole; only the second part's tail was padded, and the
+         * third part completed the buffer its kept byte began. */
         assert(kv_long(rep, "gaps") == 1);
         assert(kv_long(rep, "peak_in") == 32768 && kv_long(rep, "peak_out") == 10362);
         assert(kv_long(rep, "amp_enables") >= 1 && kv_long(rep, "amp_disables") >= 2);

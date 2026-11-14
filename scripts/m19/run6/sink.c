@@ -587,14 +587,15 @@ static void session_record_cb(void *user, const char *line) {
  * R9: a buffer begun is completed. PulseAudio's pipe sink writes a few KiB at a time, and R6 to R8 padded the rest of
  * each short read with silence, which a desktop stream (R8's YouTube) heard as breaks and growing delay. A short read
  * now waits up to fill_wait_ms for the rest; a frame the deadline splits is kept for the next buffer, so the stream
- * never slips by a sample. With nothing waiting, it returns at once: silence. */
+ * never slips by a sample. With nothing new waiting, it returns at once: silence, the kept bytes still kept. */
 #define SINK_FRAME 4u /* s16le, two channels: the pipe sink's format (r6plan.PULSE_SINK) */
 static size_t sink_source(void *user, uint8_t *out, size_t room) {
     struct speaker_ctx *ctx = user;
     if (ctx->fifo_fd < 0 || room < SINK_FRAME) return 0;
     room -= room % SINK_FRAME;
-    size_t got = ctx->carry_len;
-    memcpy(out, ctx->carry, got);
+    const size_t carried = ctx->carry_len;
+    size_t got = carried;
+    memcpy(out, ctx->carry, carried);
     ctx->carry_len = 0;
     uint64_t deadline = 0;
     while (got < room) {
@@ -604,7 +605,7 @@ static size_t sink_source(void *user, uint8_t *out, size_t room) {
             got += (size_t)n;
             continue;
         }
-        if (!got || n == 0 || errno != EAGAIN) break;
+        if (got == carried || n == 0 || errno != EAGAIN) break;
         uint64_t t = m11_entry_now_ms();
         if (!deadline) deadline = t + ctx->cfg.fill_wait_ms;
         if (t >= deadline) break;

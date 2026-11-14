@@ -82,7 +82,7 @@ MUTANTS = (
     # The stream: never louder than the chord, the amplifier with the sound, the stop.
     # R9: a buffer begun is completed from the FIFO, frames split by the deadline kept; a short buffer is a gap.
     ('sink.c', '            got += (size_t)n;\n            continue;\n', '            got += (size_t)n;\n            break;\n', SINK),
-    ('sink.c', '        if (!got || n == 0 || errno != EAGAIN) break;', '        break;', SINK),
+    ('sink.c', '        if (got == carried || n == 0 || errno != EAGAIN) break;', '        break;', SINK),
     ('sink.c', '    ctx->carry_len = got % SINK_FRAME;', '    ctx->carry_len = 0;', SINK),
     ('sink.c', '    c.fill_wait_ms = 15u;', '    c.fill_wait_ms = 30u;', SINK),
     ('sink.c', '    c.pipe_bytes = 32768;', '    c.pipe_bytes = 16384;', SINK),
