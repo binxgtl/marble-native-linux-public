@@ -36,8 +36,8 @@ MUTANTS = (
     ('t9-root', '   [ ! -e "$twin" ] && [ ! -L "$twin" ] || fail "etc outranks $file";;', '   :;;'),
     ('t9-root', '   case "$ram" in *" /${file%/*} "*) ;; *) fail "etc file outside RAM $file";; esac;;', '   :;;'),
     ('t9-root', ' [ ! -e "$control/$unit" ] && [ ! -L "$control/$unit" ] || fail "mask over plan unit $unit"\n', ''),
-    ('t9-root', ' [ ! -e "$new/etc/systemd/system-generators/$name" ] && [ ! -L "$new/etc/systemd/system-generators/$name" ] || '
-                'fail "etc generator $name"\n', ''),
+    ('t9-root', '  [ -L "$generator" ] && [ "$($BB readlink "$generator")" = /dev/null ] || fail "etc generator $name"\n', ''),
+    ('t9-root', '[ "$($BB readlink "$generator")" = /dev/null ]', ':'),
     ('t9-root', '[ -f "$control/$default_unit" ] && [ ! -L "$control/$default_unit" ] || fail "default target missing $default_unit"\n', ''),
     ('t9-root', 'control=$new/run/systemd/system.control', 'control=$new/etc/systemd/system'),
     ('t9-root', "$BB grep -q 'libsystemd-shared-255\\.so' \"$probe\" || fail probe-major", ':'),

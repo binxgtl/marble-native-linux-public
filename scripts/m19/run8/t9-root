@@ -142,10 +142,16 @@ while read -r unit; do
  masks=$((masks+1))
 done <"$plan/masks"
 generators=0
+premasked=0
 while read -r name; do
  case "$name" in ''|'#'*) continue;; esac
  case "$name" in .*|*[!A-Za-z0-9._-]*) fail "generator name $name";; esac
- [ ! -e "$new/etc/systemd/system-generators/$name" ] && [ ! -L "$new/etc/systemd/system-generators/$name" ] || fail "etc generator $name"
+ generator=$new/etc/systemd/system-generators/$name
+ if [ -e "$generator" ] || [ -L "$generator" ]; then
+  # R8a: the tree's own mask (a link to /dev/null) masks the same generator; any other namesake might outrank /run.
+  [ -L "$generator" ] && [ "$($BB readlink "$generator")" = /dev/null ] || fail "etc generator $name"
+  premasked=$((premasked+1))
+ fi
  $BB ln -s /dev/null "$new/run/systemd/system-generators/$name" || fail "mask generator $name"
  generators=$((generators+1))
 done <"$plan/generators"
@@ -191,7 +197,8 @@ for tool in usr/bin/systemctl usr/bin/journalctl usr/bin/systemd-analyze; do
 done
 printf 'M19 T9 new root: read-write blocks-read-only=%s writable=%s machine-id=present fstab-lines=%s selinux-config=absent default-was=%s systemd=%s\n' \
  "$blocks" "$writable" "$fstab" "$default" "$systemd" >&2
-printf 'M19 T9 masks=%s generators=%s files=%s tmpfs=%s copied=%s nodes=%s\n' "$masks" "$generators" "$files" "$tmpfs" "$copied" "$nodes" >&2
+printf 'M19 T9 masks=%s generators=%s files=%s tmpfs=%s copied=%s nodes=%s etc-masked-generators=%s\n' "$masks" "$generators" "$files" "$tmpfs" \
+ "$copied" "$nodes" "$premasked" >&2
 wants=$($BB ls "$new/etc/systemd/system/multi-user.target.wants" 2>/dev/null | $BB tr '\n' ' ' || :)
 printf 'M19 T9 multi-user wants: %s\n' "$wants" >&2
 exit 0

@@ -337,6 +337,8 @@ class Root(Fixture):
         self.assertIn(f'M19 T9 masks={len((self.root / "m19/r8/masks").read_text().split())} '
                       f'generators={len((self.root / "m19/r8/generators").read_text().split())} files={len(files)} tmpfs={len(points)} copied=2 ',
                       result.stderr)
+        self.assertIn(' etc-masked-generators=0\n',
+                      result.stderr)
         self.assertIn('multi-user wants: ssh.service', result.stderr)
 
     def test_m19_files_are_in_ram_where_they_outrank_the_tree(self):
@@ -414,6 +416,21 @@ class Root(Fixture):
         name = (self.root / 'm19/r8/generators').read_text().split()[0]
         (self.root / f'm19-data/ubuntu/etc/systemd/system-generators/{name}').write_text('#!/bin/sh\n')
         self.assertFails(f'etc generator {name}')
+
+    def test_the_trees_own_generator_mask_passes(self):
+        # R8a: the tree has systemd-gpt-auto-generator -> /dev/null; a link anywhere else still stops.
+        generators = self.root / 'm19-data/ubuntu/etc/systemd/system-generators'
+        generators.mkdir(parents=True)
+        os.symlink('/dev/null', generators / 'systemd-gpt-auto-generator')
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(' etc-masked-generators=1\n', result.stderr)
+        self.assertEqual(os.readlink(self.new / 'run/systemd/system-generators/systemd-gpt-auto-generator'), '/dev/null')
+        self.setUp()
+        generators = self.root / 'm19-data/ubuntu/etc/systemd/system-generators'
+        generators.mkdir(parents=True)
+        os.symlink('/usr/lib/systemd/system-generators/systemd-gpt-auto-generator', generators / 'systemd-gpt-auto-generator')
+        self.assertFails('etc generator systemd-gpt-auto-generator')
 
     def test_the_writable_devices_must_be_the_data_pair(self):
         (self.root / 'run/m19/unlock.line').write_text(OK_LINE.replace('254:5', '254:9') + '\n')
