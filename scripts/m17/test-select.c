@@ -132,6 +132,8 @@ static void fifo(const char *rel) {
     char path[512];
     snprintf(path, sizeof path, "%s/%s", base, rel);
     char dir[512];
+    snprintf(dir, sizeof dir, "%s/dev", base);
+    mkdir(dir, 0755);
     snprintf(dir, sizeof dir, "%s/dev/input", base);
     mkdir(dir, 0755);
     unlink(path);
