@@ -95,10 +95,14 @@ static int exists(const char *rel) {
     return !access(at(rel), F_OK);
 }
 
+/* A painter or step the last case started may still be writing: the removal is tried again until it holds. */
 static void clean(void) {
     char cmd[400];
-    snprintf(cmd, sizeof cmd, "rm -rf '%s'", base);
-    assert(!system(cmd));
+    snprintf(cmd, sizeof cmd, "rm -rf '%s' 2>/dev/null", base);
+    int tries = 0;
+    while (system(cmd) && ++tries < 50)
+        usleep(100000);
+    assert(tries < 50);
     mkdir(base, 0755);
 }
 
@@ -445,22 +449,26 @@ static void test_native(void) {
     fclose(f);
     CHECK(m17_native_main(&n) == M17_END_NOT_PASS && n.write_warning && !n.all_ok);
     CHECK(strstr(slurp("nat/data/ubuntu/var/lib/m19/m17-native.log"), "summary all_ok=0 write_warning=1"));
+    CHECK(wait_lines("nat/display.txt", 2, 3000) && strstr(slurp("nat/display.txt"), "00ffff00 600000\n"));
 
     /* The owned step runs past its limit: its group is killed and reaped, and the run stops there. */
     static const char *const slow[5] = {"exit 0", "exit 0", "exit 0", "exit 0", "exec sleep 30"};
     n = native_bench("0", "0", slow, 300);
     CHECK(m17_native_main(&n) == M17_END_NOT_PASS && n.results[4] == -ETIMEDOUT && !n.ownership_unresolved);
+    CHECK(wait_lines("nat/display.txt", 2, 3000));
 
     /* The owned step's leader succeeds but leaves a process in its group behind: never a success (R1's rule). */
     static const char *const stray[5] = {"exit 0", "exit 0", "exit 0", "exit 0", "sleep 30 &\nexit 0"};
     n = native_bench("0", "0", stray, 5000);
     CHECK(m17_native_main(&n) == M17_END_NOT_PASS && n.results[4] == -ECHILD && !n.ownership_unresolved);
+    CHECK(wait_lines("nat/display.txt", 2, 3000));
 
     /* No place for the log (/data not mounted): still a PASS, the log's failure recorded. */
     n = native_bench("0", "0", ok, 5000);
     snprintf(paths[11], 512, "%s", at("nat/nodata/ubuntu/var/lib/m19"));
     n.log_dir = paths[11];
     CHECK(m17_native_main(&n) == M17_END_PASS && n.log_rc == -ENOENT && strstr(slurp("nat/kmsg"), "M17NAT log rc=-2"));
+    CHECK(wait_lines("nat/display.txt", 2, 3000));
 }
 
 /* ---- The session's starter ---- */
@@ -649,8 +657,11 @@ int main(void) {
     test_session();
     test_volkeys();
     char cmd[300];
-    snprintf(cmd, sizeof cmd, "rm -rf '%s'", base);
-    if (system(cmd))
+    snprintf(cmd, sizeof cmd, "rm -rf '%s' 2>/dev/null", base);
+    int tries = 0;
+    while (system(cmd) && ++tries < 50)
+        usleep(100000);
+    if (tries >= 50)
         failures++;
     if (failures) {
         fprintf(stderr, "M17 G5 tests: %d failed\n", failures);
