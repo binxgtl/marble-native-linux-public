@@ -296,6 +296,15 @@ static int report_mode(char **argv)
         c.battery_pm = "xfce4-power-man";
         c.proc = r8[4];
     }
+    /* R9: the tone under load, and the kernel's release. */
+    static char release_path[4200];
+    snprintf(release_path, sizeof(release_path), "%s/osrelease", root);
+    if (getenv("M19_TEST_LOAD"))
+        c.tone_load = (unsigned)strtoul(getenv("M19_TEST_LOAD"), NULL, 10);
+    if (getenv("M19_TEST_RELEASE")) {
+        c.osrelease = release_path;
+        c.want_release = "5.10.236-gb97c62c4e7d1";
+    }
     if (getenv("M19_TEST_MEDIA")) {
         c.media_view = r8[5];
         c.media_walk = (unsigned)strtoul(getenv("M19_TEST_MEDIA"), NULL, 10);

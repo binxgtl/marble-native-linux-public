@@ -265,6 +265,7 @@ static int stream_fill(sess *s, unsigned i, uint32_t chunk, uint32_t stride, uin
     if (got < chunk) {
         memset(scratch + got, 0, chunk - got);
         if (got || st->amp_on) st->underruns++;
+        if (got) st->gaps++;
     }
     st->bytes_in += got;
     const int loud = m19_stream_scale((int16_t *)(void *)scratch, chunk / 2u, sio->gain_q15, sio->peak_limit, &st->peak_in, &st->peak_out);

@@ -170,6 +170,9 @@ jobs:
         run: bash scripts/m19/run8/test.sh artifacts/m19/${{ runner.arch }}/run8
         env:
           M19_MUTANTS: '0'
+      - name: R9 kernel release patch on synthetic Images (no device, never the carrier Image)
+        timeout-minutes: 3
+        run: python3 scripts/m19/run9/test.py
       - name: M11 Run12's PD mapper, from its pinned linux-msm sources, static and built twice (ARM64, no device)
         if: runner.arch == 'ARM64'
         run: |
@@ -226,6 +229,8 @@ jobs:
             artifacts/m19/**/pid7-b
             artifacts/m19/**/pid8-a
             artifacts/m19/**/pid8-b
+            artifacts/m19/**/pid9-a
+            artifacts/m19/**/pid9-b
             artifacts/m19/**/m19-wifi-a
             artifacts/m19/**/m19-wifi-b
             artifacts/m19/**/m19-sink-a
@@ -291,6 +296,10 @@ jobs:
             needs_probes: false
           - suite: run8
             script: scripts/m19/run8/mutate.py
+            args: ''
+            needs_probes: false
+          - suite: run9
+            script: scripts/m19/run9/mutate.py
             args: ''
             needs_probes: false
     runs-on: ubuntu-24.04

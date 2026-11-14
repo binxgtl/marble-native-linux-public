@@ -137,6 +137,11 @@ struct m19_report {
      * its format's bytes: names and contents both decrypt. Counts and the format only; no name is printed. */
     const char *media_view;
     unsigned media_walk, media_depth;
+    /* R9, when tone_load is set: T12-audio plays its tone while tone_load busy processes keep the cores loaded, as a
+     * browser decoding video does, and the sink's gaps (buffers the server's sound ran short in) must not grow over it. */
+    unsigned tone_load;
+    /* R9, when osrelease is set: the kernel's release, read there, must be want_release. */
+    const char *osrelease, *want_release;
 };
 
 /* R3's guard, a service of its own beside the desktop. It stops the desktop units and paints YELLOW

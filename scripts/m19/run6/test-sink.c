@@ -932,6 +932,7 @@ static struct m19_sink_config cfg_for_world(const struct world *w) {
     c.idle_off_ms = 150u;
     c.status_ms = 20u;
     c.pipe_bytes = 16384;
+    c.fill_wait_ms = 100u;
     c.dev_root = w->dev;
     c.proc_root = "/proc";
     c.holder_proc_root = w->holder_proc;
@@ -1126,7 +1127,7 @@ static void test_defaults_and_cfg_bounds(const char *base) {
     assert(!strcmp(d.report_path, "/run/m19/sink.report"));
     assert(!strcmp(d.status_path, "/run/m19/sink.status") && !strcmp(d.fifo_path, "/run/m19/sink/fifo"));
     assert(!strcmp(d.stop_path, "/run/m19/guard-tripped"));
-    assert(d.idle_off_ms == 3000u && d.status_ms == 1000u && d.pipe_bytes == 16384 && d.amp_window_ms == 12000u);
+    assert(d.idle_off_ms == 3000u && d.status_ms == 1000u && d.pipe_bytes == 32768 && d.fill_wait_ms == 15u && d.amp_window_ms == 12000u);
     assert(!strcmp(d.dev_root, "/dev") && !strcmp(d.proc_root, "/proc") && !strcmp(d.holder_proc_root, "/proc"));
     assert(!strcmp(d.sys_root, "/sys") && !strcmp(d.proc_devices, "/proc/devices"));
     assert(!strcmp(d.cmdline_path, "/proc/cmdline") && !strcmp(d.journal_path, "/dev/kmsg"));
@@ -1153,6 +1154,10 @@ static void test_defaults_and_cfg_bounds(const char *base) {
     bad = cfg_for_world(&w); bad.journal_rotate = 10u;
     assert(m19_sink_run(&bad) == -EINVAL);
     bad = cfg_for_world(&w); bad.write_buffers = 9u;
+    assert(m19_sink_run(&bad) == -EINVAL);
+    bad = cfg_for_world(&w); bad.fill_wait_ms = 0u;
+    assert(m19_sink_run(&bad) == -EINVAL);
+    bad = cfg_for_world(&w); bad.fill_wait_ms = 120u;
     assert(m19_sink_run(&bad) == -EINVAL);
     bad = cfg_for_world(&w); bad.buffer_ms = 5u;
     assert(m19_sink_run(&bad) == -EINVAL);
@@ -1454,10 +1459,14 @@ static int ev_last(const char *s) {
     return -1;
 }
 
-/* The stream's source: once the sink switched to the stream (its status appears), 0.3 s of full-scale PCM, a pause
- * past idle_off_ms, 0.1 s more, a pause again, then the stop marker. */
-#define FEED_FIRST 57600u
-#define FEED_SECOND 19200u
+/* The stream's source: once the sink switched to the stream (its status appears), 0.32 s of full-scale PCM, a pause
+ * past idle_off_ms, about 0.14 s more, a pause again, then the stop marker. R9: the first part, eight whole 40 ms
+ * buffers, dribbles in 1001-byte writes that split frames, as PulseAudio's pipe sink writes a few KiB at a time; the
+ * sink must complete every buffer from them and lose no byte. The second part ends 4000 bytes into a buffer, which
+ * after fill_wait_ms is padded: exactly one gap. */
+#define FEED_FIRST 61440u
+#define FEED_SECOND 27040u
+#define FEED_PIECE 1001u
 static pid_t start_feeder(const struct world *w) {
     fflush(stdout);
     pid_t pid = fork();
@@ -1472,9 +1481,11 @@ static pid_t start_feeder(const struct world *w) {
     for (unsigned i = 0; i < FEED_FIRST / 2u; i++) pcm[i] = (int16_t)(i & 1u ? -32768 : 32767);
     const uint8_t *p = (const uint8_t *)pcm;
     for (size_t done = 0; done < FEED_FIRST;) {
-        ssize_t n = write(fd, p + done, FEED_FIRST - done);
+        size_t piece = FEED_FIRST - done < FEED_PIECE ? FEED_FIRST - done : FEED_PIECE;
+        ssize_t n = write(fd, p + done, piece);
         if (n <= 0) _exit(71);
         done += (size_t)n;
+        usleep(2000);
     }
     usleep(600000);
     for (size_t done = 0; done < FEED_SECOND;) {
@@ -1636,6 +1647,8 @@ static void run_root_session_case(const char *base, const char *tag, struct adsp
         kv_str(rep, "state", state, sizeof state);
         assert(!strcmp(state, "stopped") && kv_long(rep, "chord_ok") == 1 && kv_long(rep, "streaming") == 1 && kv_long(rep, "stopped") == 1);
         assert(kv_long(rep, "bytes_in") == FEED_FIRST + FEED_SECOND && kv_long(rep, "bytes_loud") == FEED_FIRST + FEED_SECOND);
+        /* R9: every buffer the dribbled sound reached was whole; only the second part's short tail was padded. */
+        assert(kv_long(rep, "gaps") == 1);
         assert(kv_long(rep, "peak_in") == 32768 && kv_long(rep, "peak_out") == 10362);
         assert(kv_long(rep, "amp_enables") >= 1 && kv_long(rep, "amp_disables") >= 2);
         /* Every switch write is read back: the chord's eight reads, then both switches at each toggle. */

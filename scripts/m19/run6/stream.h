@@ -30,6 +30,7 @@ typedef struct {
     int amp_on;               /* both switches read back Enable */
     int stopped;              /* stop_fn ended the stream */
     uint64_t buffers, bytes_in, bytes_loud, underruns;
+    uint64_t gaps; /* R9: buffers the server's sound ran short in, padded mid-sound: what a listener hears break up */
     uint32_t amp_enables, amp_disables;
     int32_t peak_in, peak_out; /* largest magnitude read from the server, and sent to the DSP */
     uint64_t started_ms, last_loud_ms;

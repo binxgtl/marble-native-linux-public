@@ -2349,6 +2349,8 @@ struct sink {
     int amp_off_before, tone_loud, tone_peaks, amp_on_seen, amp_idle_off, sink_ok;
     long pid, regions, re_verified, re0, re1, played, pcm, pdr_seen, unmap_attempted, volume_level;
     long loud_before, loud_after, enables_before, enables_after, disables_before, disables_after, peak_in, peak_out, underruns;
+    long gaps_before, gaps_after; /* R9 */
+    unsigned loaded;
     char state[16], plan_sha[80];
 };
 
@@ -2407,6 +2409,7 @@ static void sink_phase(const struct m19_report *c, int tty, struct sink *k)
 {
     memset(k, 0, sizeof(*k));
     k->unit_rc = -1;
+    k->gaps_before = k->gaps_after = LONG_MIN;
     snprintf(k->state, sizeof(k->state), "none");
     (void)m19_wire_line(tty, c->pace_ms, M19_DEVICE_STEP " T12-audio START");
     char *start_argv[] = {(char *)c->systemctl, "start", (char *)c->sink_unit, NULL};
@@ -2504,13 +2507,32 @@ static void sink_phase(const struct m19_report *c, int tty, struct sink *k)
         k->loud_before = kv_long(status, "bytes_loud");
         k->enables_before = kv_long(status, "amp_enables");
         k->disables_before = kv_long(status, "amp_disables");
+        k->gaps_before = kv_long(status, "gaps");
         char device[96];
         snprintf(device, sizeof(device), "--device=%.80s", c->sink_name);
         char *argv[] = {(char *)c->pacat, "--playback", "--raw", "--format=s16le", "--rate=48000", "--channels=2", "--latency-msec=100", device,
                         (char *)c->tone_path, NULL};
         size_t ignored;
         unsigned char out[1024];
+        /* R9: every core busy through the tone, as a browser decoding video keeps them. */
+        pid_t busy[16];
+        unsigned loaded = 0;
+        for (unsigned i = 0; i < c->tone_load && i < 16; i++) {
+            pid_t pid = fork();
+            if (pid == 0) {
+                alarm(30);
+                for (volatile unsigned spin = 0;; spin++) {
+                }
+            }
+            if (pid > 0)
+                busy[loaded++] = pid;
+        }
+        k->loaded = loaded;
         k->tone_rc = capture_env(argv, c->pulse_env, out, sizeof(out), &ignored, c->tone_ms);
+        for (unsigned i = 0; i < loaded; i++) {
+            (void)kill(busy[i], SIGKILL);
+            (void)waitpid(busy[i], NULL, 0);
+        }
         (void)poll(NULL, 0, 1500);
         if (sink_status_now(c, status, sizeof(status))) {
             k->loud_after = kv_long(status, "bytes_loud");
@@ -2518,6 +2540,7 @@ static void sink_phase(const struct m19_report *c, int tty, struct sink *k)
             k->peak_in = kv_long(status, "peak_in");
             k->peak_out = kv_long(status, "peak_out");
             k->underruns = kv_long(status, "underruns");
+            k->gaps_after = kv_long(status, "gaps");
         }
         k->tone_loud = k->loud_after != LONG_MIN && k->loud_before != LONG_MIN && k->loud_after - k->loud_before >= 172800; /* 90 % */
         k->tone_peaks = k->peak_in >= 30000 && k->peak_out >= 9000 && k->peak_out <= 10362;
@@ -2536,7 +2559,9 @@ static void sink_phase(const struct m19_report *c, int tty, struct sink *k)
                  k->volume_level <= 8 && is_hex64(k->plan_sha) && k->holder_alive && k->holder_fds >= 8 && k->private_clean &&
                  (!c->pulse_unit || k->pulse_unit_rc == 0) &&
                  k->pulse_sink && k->pulse_default && k->tone_rc == 0 && k->amp_off_before && k->tone_loud && k->tone_peaks &&
-                 k->amp_on_seen && k->amp_idle_off;
+                 k->amp_on_seen && k->amp_idle_off &&
+                 (!c->tone_load || (k->loaded == c->tone_load && k->gaps_before != LONG_MIN && k->gaps_after != LONG_MIN &&
+                                    k->gaps_after == k->gaps_before));
     (void)m19_wire_line(tty, c->pace_ms, M19_DEVICE_STEP " T12-audio %s %d %d %d %d %d", k->sink_ok ? "OK" : "FAIL", k->chord_ok,
                         k->streaming, k->tone_loud, k->tone_peaks, k->amp_idle_off);
 }
@@ -2665,6 +2690,7 @@ int m19_report_main(const struct m19_report *c)
     struct sink k;
     memset(&w, 0, sizeof(w));
     memset(&k, 0, sizeof(k));
+    k.gaps_before = k.gaps_after = LONG_MIN;
     if (c->wifi)
         wifi_phase(c, tty, &w);
     if (c->audio && c->sink_unit && (!c->desktop || d.x_ok))
@@ -2823,14 +2849,15 @@ int m19_report_main(const struct m19_report *c)
                  "regions=%ld volume=%ld holder_alive=%d holder_fds=%d private_clean=%d held_empty=%d pulse_unit_rc=%d pulse_sink=%d "
                  "pulse_default=%d tone_rc=%d "
                  "amp_off_before=%d loud=%ld enables=%ld disables=%ld peak_in=%ld peak_out=%ld underruns=%ld tone_loud=%d tone_peaks=%d "
-                 "amp_on_seen=%d amp_idle_off=%d sink_ok=%d\n",
+                 "amp_on_seen=%d amp_idle_off=%d gaps=%ld load=%u sink_ok=%d\n",
                  k.unit_rc, k.report_seen, k.state, k.streaming, k.chord_ok, k.pid, k.played, k.pcm, k.re_verified, k.re0, k.re1, k.regions,
                  k.volume_level, k.holder_alive, k.holder_fds, k.private_clean, k.held_empty, k.pulse_unit_rc, k.pulse_sink, k.pulse_default,
                  k.tone_rc, k.amp_off_before,
                  k.loud_after == LONG_MIN || k.loud_before == LONG_MIN ? -1L : k.loud_after - k.loud_before,
                  k.enables_after == LONG_MIN || k.enables_before == LONG_MIN ? -1L : k.enables_after - k.enables_before,
                  k.disables_after == LONG_MIN || k.disables_before == LONG_MIN ? -1L : k.disables_after - k.disables_before, k.peak_in,
-                 k.peak_out, k.underruns, k.tone_loud, k.tone_peaks, k.amp_on_seen, k.amp_idle_off, k.sink_ok);
+                 k.peak_out, k.underruns, k.tone_loud, k.tone_peaks, k.amp_on_seen, k.amp_idle_off,
+                 k.gaps_before == LONG_MIN || k.gaps_after == LONG_MIN ? -1L : k.gaps_after - k.gaps_before, k.loaded, k.sink_ok);
             addf("M19 sink report\n");
             (void)add_file(c->sink_report, SECTION_CAP / 4);
             addf("M19 sink status\n");
@@ -2871,8 +2898,16 @@ int m19_report_main(const struct m19_report *c)
         addf("M19 R8 media mounted_ro=%d entries=%d same=%d walked=%d kind=%s media_ok=%d\n", m.mounted_ro, m.entries, m.same, m.walked, m.kind,
              m.media_ok);
     }
+    int release_ok = 1;
+    if (c->osrelease) {
+        char release[96] = "";
+        if (!read_small(c->osrelease, release, sizeof(release)))
+            release[strcspn(release, "\n")] = 0;
+        release_ok = release[0] && !strcmp(release, c->want_release);
+        addf("M19 R9 kernel release=%s release_ok=%d\n", token(release), release_ok);
+    }
     int all_ok = init_ok && state_ok && targets_ok && writes_ok && ro_ok && mounts_ok && !write_warning && desktop_ok && gpu_ok && audio_ok &&
-                 wifi_ok && ce_ok && battery_ok && persist_ok && media_ok;
+                 wifi_ok && ce_ok && battery_ok && persist_ok && media_ok && release_ok;
     addf("M19 R2 verdict init=%d state=%s targets=%d writes=%d read_only=%d mounts=%d write_warning=%d all_ok=%d\n", init_ok, state, targets_ok,
          writes_ok, ro_ok, mounts_ok, write_warning, all_ok);
 

@@ -25,6 +25,7 @@ import r5plan  # noqa: E402
 import r6plan  # noqa: E402
 import r7plan  # noqa: E402
 import r8plan  # noqa: E402
+import r9plan  # noqa: E402
 import rootfs  # noqa: E402
 
 ARGS = None
@@ -541,9 +542,10 @@ loud=${M19_TONE_LOUD:-192000}
 peak_in=${M19_TONE_PEAK_IN:-32767}
 peak_out=${M19_TONE_PEAK_OUT:-10361}
 enables=${M19_TONE_ENABLES:-1}
-printf 'streaming=1\\namp_on=1\\nstopped=0\\nbuffers=60\\nbytes_in=%s\\nbytes_loud=%s\\nunderruns=0\\namp_enables=%s\\namp_disables=1\\npeak_in=%s\\npeak_out=%s\\n' "$loud" "$loud" "$enables" "$peak_in" "$peak_out" > "$d/../sink.status"
+gaps=${M19_TONE_GAPS:-0}
+printf 'streaming=1\\namp_on=1\\nstopped=0\\nbuffers=60\\nbytes_in=%s\\nbytes_loud=%s\\nunderruns=0\\ngaps=%s\\namp_enables=%s\\namp_disables=1\\npeak_in=%s\\npeak_out=%s\\n' "$loud" "$loud" "$gaps" "$enables" "$peak_in" "$peak_out" > "$d/../sink.status"
 if [ -z "${M19_TONE_STAYS_ON:-}" ]; then
- (sleep 0.3; printf 'streaming=1\\namp_on=0\\nstopped=0\\nbuffers=90\\nbytes_in=%s\\nbytes_loud=%s\\nunderruns=0\\namp_enables=%s\\namp_disables=2\\npeak_in=%s\\npeak_out=%s\\n' "$loud" "$loud" "$enables" "$peak_in" "$peak_out" > "$d/../sink.status.new" && mv "$d/../sink.status.new" "$d/../sink.status") &
+ (sleep 0.3; printf 'streaming=1\\namp_on=0\\nstopped=0\\nbuffers=90\\nbytes_in=%s\\nbytes_loud=%s\\nunderruns=0\\ngaps=%s\\namp_enables=%s\\namp_disables=2\\npeak_in=%s\\npeak_out=%s\\n' "$loud" "$loud" "$gaps" "$enables" "$peak_in" "$peak_out" > "$d/../sink.status.new" && mv "$d/../sink.status.new" "$d/../sink.status") &
 fi
 exit "${M19_PACAT_RC:-0}"
 """
@@ -576,9 +578,34 @@ class SinkReport(Audio):
         items = dict(self.report_fields(), **(overrides or {}))
         (self.test / 'sink.report.staged').write_text(''.join(f'{k}={v}\n' for k, v in items.items() if k not in drop))
 
-    def write_status(self, amp_on='0'):
+    def write_status(self, amp_on='0', gaps=True):
         (self.test / 'sink.status.staged').write_text(f'streaming=1\namp_on={amp_on}\nstopped=0\nbuffers=10\nbytes_in=0\nbytes_loud=0\n'
-                                                      'underruns=0\namp_enables=0\namp_disables=1\npeak_in=0\npeak_out=0\n')
+                                                      f'underruns=0\n{"gaps=0" + chr(10) if gaps else ""}amp_enables=0\namp_disables=1\n'
+                                                      'peak_in=0\npeak_out=0\n')
+
+    def test_r9_the_tone_under_load_must_bring_no_gap(self):
+        # R9: the tone plays with busy processes on the cores; the sink's gaps must not grow over it.
+        fields, log, k, steps = self.sink({'M19_TEST_LOAD': '2'})
+        self.assertEqual((k['gaps'], k['load'], k['sink_ok']), ('0', '2', '1'))
+        for name, env, setup in (('gaps', {'M19_TEST_LOAD': '2', 'M19_TONE_GAPS': '3'}, None),
+                                 ('no gaps field', {'M19_TEST_LOAD': '2'}, lambda: self.write_status(gaps=False)),
+                                 ('no gaps field before or after', {'M19_TEST_LOAD': '2', 'M19_TONE_GAPS': 'none'},
+                                  lambda: self.write_status(gaps=False)),
+                                 ('load capped at 16', {'M19_TEST_LOAD': '20'}, None)):
+            with self.subTest(case=name):
+                self.setUp()
+                if setup:
+                    setup()
+                fields, log, k, steps = self.sink(env)
+                self.assertEqual(k['sink_ok'], '0', name)
+                if name == 'gaps':
+                    self.assertEqual(k['gaps'], '3')
+                if name == 'load capped at 16':
+                    self.assertEqual(k['load'], '16')
+        # Without a load the gaps are recorded, not judged (R6 to R8).
+        self.setUp()
+        fields, log, k, steps = self.sink({'M19_TONE_GAPS': '3'})
+        self.assertEqual((k['gaps'], k['load'], k['sink_ok']), ('3', '0', '1'))
 
     def sink(self, env=None):
         data, colour = self.run_report(env=dict({'M19_TEST_AUDIO': '1', 'M19_TEST_SINK': '1'}, **(env or {})))
@@ -1036,6 +1063,30 @@ class MediaReport(ReportBase):
         self.setUp()
         log, m, steps = self.media('500', {'M19_TEST_MEDIA_DEPTH': '3'})
         self.assertEqual(m['media_ok'], '1')
+
+
+class ReleaseReport(ReportBase):
+    """R9: the kernel's release, without the build's -dirty."""
+
+    def release(self, text):
+        if text is not None:
+            (self.root / 'osrelease').write_text(text)
+        data, colour = self.run_report(env={'M19_TEST_RELEASE': '1'})
+        fields, log, steps = self.parse(data)
+        line = re.search(r'M19 R9 kernel (.*)\n', log)
+        return log, dict(item.split('=', 1) for item in line.group(1).split())
+
+    def test_the_clean_release_passes_and_dirty_fails(self):
+        log, r = self.release('5.10.236-gb97c62c4e7d1\n')
+        self.assertEqual(r, {'release': '5.10.236-gb97c62c4e7d1', 'release_ok': '1'})
+        self.assertEqual(self.verdict(log)['all_ok'], '1')
+        for text, shown in (('5.10.236-gb97c62c4e7d1-dirty\n', '5.10.236-gb97c62c4e7d1-dirty'), ('5.10.236\n', '5.10.236'), (None, 'none'),
+                            ('\n', 'none')):
+            with self.subTest(text=text):
+                self.setUp()
+                log, r = self.release(text)
+                self.assertEqual(r, {'release': shown, 'release_ok': '0'})
+                self.assertEqual(self.verdict(log)['all_ok'], '0')
 
 
 class WifiReport(ReportBase):
@@ -1536,7 +1587,7 @@ class Static(unittest.TestCase):
         self.assertNotRegex(text, r'\breboot\(|RB_AUTOBOOT|LINUX_REBOOT')
 
     def test_no_reboot_and_no_block_write_anywhere_in_r2(self):
-        for name in ('handoff.c', 'report.c', 'wire.c', 'pid2.c', 't9-root', 'pid4.c', 'pid5.c', 'pid6.c', 'pid7.c', 'pid8.c', 't9-gpu', 'gpu-probe.c',
+        for name in ('handoff.c', 'report.c', 'wire.c', 'pid2.c', 't9-root', 'pid4.c', 'pid5.c', 'pid6.c', 'pid7.c', 'pid8.c', 'pid9.c', 't9-gpu', 'gpu-probe.c',
                      'present-probe.c'):
             text = (HERE / name).read_text()
             self.assertNotRegex(text, r'\b(reboot|poweroff|mkfs|fsck|blkdiscard|fstrim|setrw|wipe|sgdisk|parted)\b|\bof=/dev|O_WRONLY[^\n]*/dev/(sd|block|dm)', name)
@@ -1630,6 +1681,16 @@ class Static(unittest.TestCase):
             self.assertEqual(items[-1], 'NULL')
             self.assertEqual(tuple(items[:-1]), want, name)
         self.assertNotRegex(text, r'\breboot\(|RB_AUTOBOOT|LINUX_REBOOT')
+
+    def test_pid9_is_pid8_with_the_tone_under_load_and_the_release_and_nothing_else(self):
+        def body(name):
+            text = (HERE / name).read_text()
+            return text[text.index('*/\n') + 3:].splitlines()
+        changes = [line[0] + ' ' + line[1:] for line in difflib.unified_diff(body('pid8.c'), body('pid9.c'), lineterm='', n=0)
+                   if line[:1] in '+-' and line[:3] not in ('+++', '---')]
+        self.assertEqual(changes, [
+            '+     /* R9: the tone with all eight cores busy; the release without -dirty. */',
+            '+     .tone_load = 8, .osrelease = "/proc/sys/kernel/osrelease", .want_release = "5.10.236-gb97c62c4e7d1",'])
 
     def test_pid8_is_pid7_with_r8s_checks_and_nothing_else(self):
         def body(name):
@@ -1867,6 +1928,104 @@ class Plan4(unittest.TestCase):
         # R4e: nothing in the session touches xfwm4's settings; only the reporter runs the compositor script.
         self.assertNotIn('autostart', r4plan.SESSION)
         self.assertNotIn('gpu-compositor', r4plan.SESSION)
+
+
+class Plan9(unittest.TestCase):
+    """R9's plan: R8d's, with PulseAudio real-time, marble-sink at nice -11, the sink's log in the tree and R9's
+    target, under R8's layout."""
+
+    ROOT = 'm19/r8/root/run/systemd/system.control/'
+
+    def setUp(self):
+        self.files, self.r8 = r9plan.render(), r8plan.render()
+
+    def test_everything_else_is_r8s(self):
+        new = {self.ROOT + 'm19-r9.target', self.ROOT + 'm19-r9-report.service', self.ROOT + 'marble-audio-log.service',
+               'm19/r8/root/run/m19/etc/sink-log'}
+        self.assertEqual(set(self.files) - set(self.r8), new)
+        self.assertEqual(set(self.r8) - set(self.files), {self.ROOT + 'm19-r8.target', self.ROOT + 'm19-r8-report.service'})
+        differ = {name for name in self.files if name in self.r8 and self.files[name] != self.r8[name]}
+        self.assertEqual(differ, {self.ROOT + 'marble-pulse.service', self.ROOT + 'marble-sink.service', 'm19/r8/default', 'm19/r8/files'})
+        self.assertEqual(self.files['m19/r8/default'], b'm19-r9.target\n')
+        listed = self.files['m19/r8/files'].decode().split()
+        self.assertEqual(sorted(listed), sorted(name[len('m19/r8/root/'):] for name in self.files if name.startswith('m19/r8/root/')))
+        self.assertFalse(any('/etc/m19/' in data.decode() for name, data in self.files.items() if name.startswith('m19/r8/root/')))
+
+    def test_the_sound_runs_ahead_of_the_browser(self):
+        pulse, old = self.files[self.ROOT + 'marble-pulse.service'].decode(), self.r8[self.ROOT + 'marble-pulse.service'].decode()
+        self.assertIn('ExecStart=/usr/bin/pulseaudio --daemonize=no --exit-idle-time=-1 --realtime=yes --high-priority=yes '
+                      '--log-target=journal\n', pulse)
+        self.assertEqual(pulse.replace('--realtime=yes --high-priority=yes', '--realtime=no --high-priority=no'), old)
+        sink, old = self.files[self.ROOT + 'marble-sink.service'].decode(), self.r8[self.ROOT + 'marble-sink.service'].decode()
+        self.assertEqual(sink.replace('Nice=-11\n', ''), old)
+        self.assertIn('OOMScoreAdjust=-900\nNice=-11\n', sink)
+        # Neither runs under a real-time policy systemd sets: a busy loop there would stop the desktop.
+        for text in (pulse, sink):
+            self.assertNotIn('CPUScheduling', text)
+
+    def test_the_target_report_and_log_unit(self):
+        target = self.files[self.ROOT + 'm19-r9.target'].decode()
+        old = self.r8[self.ROOT + 'm19-r8.target'].decode()
+        self.assertIn('\nWants=multi-user.target m19-r9-report.service marble-wifi.service m19-r3-guard.service marble-xorg.service '
+                      'marble-xfce.service marble-audio-log.service\n', target)
+        self.assertEqual(target.replace(' marble-audio-log.service', '').replace('m19-r9-report', 'm19-r8-report').split('\n')[2:],
+                         old.split('\n')[2:])
+        self.assertIn('Description=M19 R9 evidence over USB\n', self.files[self.ROOT + 'm19-r9-report.service'].decode())
+        unit = self.files[self.ROOT + 'marble-audio-log.service'].decode()
+        for line in ('ExecStart=/bin/sh /run/m19/etc/sink-log\n', 'IgnoreOnIsolate=yes\n', 'Restart=no\n', 'Nice=10\n'):
+            self.assertIn(line, unit)
+
+    def run_log(self, steps, cap=None):
+        """sink-log with its paths in a scratch directory and 5 s as 50 ms. steps: (status text or None, lines wanted)."""
+        work = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, work, True)
+        (work / 'boot_id').write_text('7f0e3c1a-0000-4000-8000-000000000001\n')
+        (work / 'uptime').write_text('123.45 900.00\n')
+        script = self.files['m19/r8/root/run/m19/etc/sink-log'].decode()
+        for old, new in (('/var/lib/m19', (work / 'lib').as_posix()), ('/run/m19/sink.status', (work / 'status').as_posix()),
+                         ('/proc/sys/kernel/random/boot_id', (work / 'boot_id').as_posix()), ('/proc/uptime', (work / 'uptime').as_posix()),
+                         ('while sleep 5;', 'while sleep 0.05;'), ('1048576', str(cap or 1048576))):
+            self.assertEqual(script.count(old), 1, old)
+            script = script.replace(old, new)
+        (work / 'sink-log').write_text(script)
+        log = work / 'lib/sink-status.log'
+        child = subprocess.Popen(['sh', str(work / 'sink-log')], stdin=subprocess.DEVNULL)
+        self.addCleanup(child.wait)
+        self.addCleanup(child.kill)
+        for status, lines in steps:
+            if status is not None:
+                (work / 'status.new').write_text(status)
+                os.replace(work / 'status.new', work / 'status')
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline and not (log.exists() and len(log.read_text().splitlines()) == lines):
+                time.sleep(0.02)
+            time.sleep(0.3)
+            self.assertIsNone(child.poll())
+            self.assertEqual(len(log.read_text().splitlines()), lines, log.read_text())
+        return work, log.read_text().splitlines()
+
+    @staticmethod
+    def status(amp_on=1, underruns=0, gaps=0, bytes_in=1920):
+        return (f'streaming=1\namp_on={amp_on}\nstopped=0\nbuffers=60\nbytes_in={bytes_in}\nbytes_loud={bytes_in}\nunderruns={underruns}\n'
+                f'gaps={gaps}\namp_enables=1\namp_disables=0\npeak_in=3\npeak_out=1\nlast_loud_ms=9\nstarted_ms=1\n')
+
+    def test_the_sink_log_writes_when_the_sound_or_its_gaps_change(self):
+        work, lines = self.run_log([(None, 1), (self.status(), 2), (self.status(bytes_in=9600), 2), (self.status(gaps=2, bytes_in=19200), 3),
+                                    (self.status(amp_on=0, gaps=2, bytes_in=19200), 4), (self.status(amp_on=0, underruns=1, gaps=2), 5)])
+        self.assertEqual(lines[0], 'boot 7f0e3c1a-0000-4000-8000-000000000001')
+        self.assertEqual(lines[1], '123.45 streaming=1 amp_on=1 buffers=60 bytes_in=1920 underruns=0 gaps=0 ')
+        self.assertEqual(lines[2], '123.45 streaming=1 amp_on=1 buffers=60 bytes_in=19200 underruns=0 gaps=2 ')
+        self.assertEqual(lines[3], '123.45 streaming=1 amp_on=0 buffers=60 bytes_in=19200 underruns=0 gaps=2 ')
+        self.assertEqual(lines[4], '123.45 streaming=1 amp_on=0 buffers=60 bytes_in=1920 underruns=1 gaps=2 ')
+        self.assertFalse((work / 'lib/sink-status.log.1').exists())
+
+    def test_the_sink_log_keeps_one_older_file_past_its_cap(self):
+        steps = [(None, 1)] + [(self.status(gaps=gaps), gaps + 2) for gaps in range(3)]
+        work, lines = self.run_log(steps + [(self.status(gaps=3), 1)], cap=250)
+        older = (work / 'lib/sink-status.log.1').read_text().splitlines()
+        self.assertEqual(len(older), 4)
+        self.assertEqual(older[0], 'boot 7f0e3c1a-0000-4000-8000-000000000001')
+        self.assertEqual(lines, ['123.45 streaming=1 amp_on=1 buffers=60 bytes_in=1920 underruns=0 gaps=3 '])
 
 
 class Plan8(unittest.TestCase):

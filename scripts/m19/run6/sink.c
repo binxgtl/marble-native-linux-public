@@ -11,6 +11,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -39,6 +40,8 @@ struct speaker_ctx {
     m19_stream_status sst;   /* M19 R6 */
     int fifo_fd, chord_ok, streaming_census;
     const char *state;
+    uint8_t carry[4]; /* R9: a frame the fill deadline split, for the next buffer */
+    size_t carry_len;
 };
 
 static volatile sig_atomic_t terminate_requested;
@@ -86,7 +89,8 @@ struct m19_sink_config m19_sink_config_default(void) {
     c.amp_window_ms = 12000u;
     c.idle_off_ms = 3000u;
     c.status_ms = 1000u;
-    c.pipe_bytes = 16384;
+    c.pipe_bytes = 32768;
+    c.fill_wait_ms = 15u;
     c.write_buffers = 4u;
     c.buffer_ms = 40u;
     return c;
@@ -504,6 +508,7 @@ static int write_report_file(struct speaker_ctx *ctx, int pre_step, int pre_rc) 
                      "bytes_in=%llu\n"
                      "bytes_loud=%llu\n"
                      "underruns=%llu\n"
+                     "gaps=%llu\n"
                      "amp_enables=%u\n"
                      "amp_disables=%u\n"
                      "peak_in=%d\n"
@@ -522,7 +527,7 @@ static int write_report_file(struct speaker_ctx *ctx, int pre_step, int pre_rc) 
                      ctx->plan_sha[0] ? ctx->plan_sha : "-",
                      ctx->sst.streaming, ctx->sst.amp_on, ctx->sst.stopped, (unsigned long long)ctx->sst.buffers,
                      (unsigned long long)ctx->sst.bytes_in, (unsigned long long)ctx->sst.bytes_loud,
-                     (unsigned long long)ctx->sst.underruns, ctx->sst.amp_enables, ctx->sst.amp_disables,
+                     (unsigned long long)ctx->sst.underruns, (unsigned long long)ctx->sst.gaps, ctx->sst.amp_enables, ctx->sst.amp_disables,
                      ctx->sst.peak_in, ctx->sst.peak_out);
     if (n <= 0 || (size_t)n >= sizeof body) return -EOVERFLOW;
 
@@ -578,13 +583,38 @@ static void session_record_cb(void *user, const char *line) {
         e->records++;
 }
 
-/* M19 R6: the server's PCM, nonblocking; 0 when none is waiting (the stream pads with silence) */
+/* M19 R6: the server's PCM, nonblocking; 0 when none is waiting (the stream pads with silence).
+ * R9: a buffer begun is completed. PulseAudio's pipe sink writes a few KiB at a time, and R6 to R8 padded the rest of
+ * each short read with silence, which a desktop stream (R8's YouTube) heard as breaks and growing delay. A short read
+ * now waits up to fill_wait_ms for the rest; a frame the deadline splits is kept for the next buffer, so the stream
+ * never slips by a sample. With nothing waiting, it returns at once: silence. */
+#define SINK_FRAME 4u /* s16le, two channels: the pipe sink's format (r6plan.PULSE_SINK) */
 static size_t sink_source(void *user, uint8_t *out, size_t room) {
     struct speaker_ctx *ctx = user;
-    if (ctx->fifo_fd < 0) return 0;
-    ssize_t n;
-    do n = read(ctx->fifo_fd, out, room); while (n < 0 && errno == EINTR);
-    return n > 0 ? (size_t)n : 0;
+    if (ctx->fifo_fd < 0 || room < SINK_FRAME) return 0;
+    room -= room % SINK_FRAME;
+    size_t got = ctx->carry_len;
+    memcpy(out, ctx->carry, got);
+    ctx->carry_len = 0;
+    uint64_t deadline = 0;
+    while (got < room) {
+        ssize_t n;
+        do n = read(ctx->fifo_fd, out + got, room - got); while (n < 0 && errno == EINTR);
+        if (n > 0) {
+            got += (size_t)n;
+            continue;
+        }
+        if (!got || n == 0 || errno != EAGAIN) break;
+        uint64_t t = m11_entry_now_ms();
+        if (!deadline) deadline = t + ctx->cfg.fill_wait_ms;
+        if (t >= deadline) break;
+        struct pollfd wait = {.fd = ctx->fifo_fd, .events = POLLIN};
+        (void)poll(&wait, 1, (int)(deadline - t));
+    }
+    ctx->carry_len = got % SINK_FRAME;
+    got -= ctx->carry_len;
+    memcpy(ctx->carry, out + got, ctx->carry_len);
+    return got;
 }
 
 static int sink_stop(void *user) {
@@ -596,10 +626,11 @@ static void sink_status(void *user, const m19_stream_status *st) {
     struct speaker_ctx *ctx = user;
     char body[512], tmp[PATH_MAX];
     int n = snprintf(body, sizeof body,
-                     "streaming=%d\namp_on=%d\nstopped=%d\nbuffers=%llu\nbytes_in=%llu\nbytes_loud=%llu\nunderruns=%llu\n"
+                     "streaming=%d\namp_on=%d\nstopped=%d\nbuffers=%llu\nbytes_in=%llu\nbytes_loud=%llu\nunderruns=%llu\ngaps=%llu\n"
                      "amp_enables=%u\namp_disables=%u\npeak_in=%d\npeak_out=%d\nlast_loud_ms=%llu\nstarted_ms=%llu\n",
                      st->streaming, st->amp_on, st->stopped, (unsigned long long)st->buffers, (unsigned long long)st->bytes_in,
-                     (unsigned long long)st->bytes_loud, (unsigned long long)st->underruns, st->amp_enables, st->amp_disables,
+                     (unsigned long long)st->bytes_loud, (unsigned long long)st->underruns, (unsigned long long)st->gaps, st->amp_enables,
+                     st->amp_disables,
                      st->peak_in, st->peak_out, (unsigned long long)st->last_loud_ms, (unsigned long long)st->started_ms);
     int tn = snprintf(tmp, sizeof tmp, "%s.tmp", ctx->cfg.status_path);
     if (n <= 0 || (size_t)n >= sizeof body || tn <= 0 || (size_t)tn >= sizeof tmp) return;
@@ -738,6 +769,7 @@ static int acquire_started_lock(const char *path) {
 static int cfg_valid(const struct m19_sink_config *c) {
     return c && c->started_path && c->plan_path && c->plan_sha_path && c->report_path && c->status_path && c->fifo_path &&
            c->stop_path && c->idle_off_ms >= 1u && c->status_ms >= 1u &&
+           c->fill_wait_ms >= 1u && c->write_buffers >= 2u && c->fill_wait_ms < c->buffer_ms * (c->write_buffers - 1u) &&
            c->dev_root && c->proc_root && c->holder_proc_root && c->sys_root &&
            c->proc_devices && c->cmdline_path && c->journal_path && c->panic_path &&
            c->endpoint_node && c->ion_node && c->ion_cma_node && c->heap_dir && c->heap_node &&

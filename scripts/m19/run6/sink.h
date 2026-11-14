@@ -78,7 +78,8 @@ struct m19_sink_config {
     uint32_t amp_window_ms;           /* production 12000: the chord's amplifier window, as Run31 */
     uint32_t idle_off_ms;             /* production 3000: silence before both switches go Disable */
     uint32_t status_ms;               /* production 1000 */
-    int pipe_bytes;                   /* production 16384: the FIFO's capacity, about 85 ms */
+    int pipe_bytes;                   /* production 32768: the FIFO's capacity, about 170 ms (R9; R6 to R8: 16384) */
+    unsigned fill_wait_ms;            /* production 15: how long a buffer begun waits for the rest of its sound (R9) */
     unsigned write_buffers;           /* production 4 */
     uint32_t buffer_ms;               /* production 40 */
     uint64_t boot_epoch;              /* 0 = derived at entry */
