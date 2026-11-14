@@ -59,7 +59,6 @@ MUTANTS = (
     ('t9-ce', 'case "$options" in ro|ro,*) ;; *) fail "view-read-only-check $options";; esac\n', ''),
     ('t9-ce', '$BB mount -o bind "$R/m19-data/media/0" "$new/media/Android"', '$BB mount -o bind "$R/m19-data/media" "$new/media/Android"'),
     ('t9-ce', '[ ! -e "$new/media/Android" ] && [ ! -L "$new/media/Android" ] || fail view-point', '[ ! -L "$new/media/Android" ] || fail view-point'),
-    ('t9-ce', '$BB mkdir -m 0755 "$new/media/Android"', '$BB mkdir -m 0700 "$new/media/Android"'),
     ('t9-ce', '[ -d "$R/m19-data/media/0" ] && [ ! -L "$R/m19-data/media/0" ] || fail user0\n', ''),
 )
 

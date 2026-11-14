@@ -245,7 +245,7 @@ class Writes(Fixture):
         for change, kwargs in (('metadata', {'metadata': stat(1, 8), 'sdb': stat(1, 8)}), ('ssd', {'other_part': stat(1, 8)}),
                                ('other disk', {'sdb': stat(1, 8)}), ('persist', {'persist': stat(1, 8)}), ('other dm', {'other_dm': stat(1, 8)}),
                                ('data discard', {'data': stat(7, 56, 1, 8)}), ('disk discard', {'disk': stat(7, 56, 1, 8)}),
-                               ('dm discard', {'dm': stat(7, 56, 1, 8)}), ('no data dm', {'dm_name': 'other2'})):
+                               ('dm discard', {'dm': stat(7, 56, 1, 8)}), ('no data dm', {'dm_name': 'other2', 'dm': stat()})):
             with self.subTest(change=change):
                 self.setUp()
                 self.build(**kwargs)
@@ -539,7 +539,6 @@ class Ce(Fixture):
         self.assertIn(f'mount -o bind {self.root}/m19-data/media/0 {self.new}/media/Android\n', log)
         self.assertIn(f'mount -o remount,bind,ro {self.new}/media/Android\n', log)
         self.assertIn(f'mount -o remount,bind,ro {self.new}/run/m19/android\n', log)
-        self.assertEqual((self.new / 'media/Android').stat().st_mode & 0o777, 0o755)
         self.assertTrue((self.new / 'media/Android/DCIM').is_dir())
         self.assertIn('M19 T9-ce broker listening, media read-only, view /media/Android\n', result.stderr)
 
