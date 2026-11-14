@@ -60,12 +60,12 @@ static void put(const char *rel, const char *text) {
     fclose(f);
 }
 
-/* A shell script; "@" in body stands for base. */
+/* A shell script; "@/" in body stands for base and a slash ("$@" stays the shell's). */
 static void script(const char *rel, const char *body) {
     char text[8192];
     size_t used = (size_t)snprintf(text, sizeof text, "#!/bin/sh\n");
     for (const char *p = body; *p && used + 300 < sizeof text; p++) {
-        if (*p == '@')
+        if (p[0] == '@' && p[1] == '/')
             used += (size_t)snprintf(text + used, sizeof text - used, "%s", base);
         else
             text[used++] = *p;

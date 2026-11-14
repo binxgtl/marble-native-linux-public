@@ -158,7 +158,7 @@ __attribute__((format(printf, 2, 3))) static void note(const struct m17_volkeys 
     uint64_t now = boot_ms();
     snprintf(text, sizeof(text), "%llu.%03llu %s\n", (unsigned long long)(now / 1000), (unsigned long long)(now % 1000), line);
     (void)m17_append(k->log, text, LOG_LIMIT);
-    int fd = open(k->kmsg, O_WRONLY | O_CLOEXEC);
+    int fd = open(k->kmsg, O_WRONLY | O_APPEND | O_CLOEXEC);
     if (fd >= 0) {
         char record[260];
         int r = snprintf(record, sizeof(record), "<6>M17KEYS %s\n", line);
