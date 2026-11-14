@@ -7,6 +7,7 @@
 #define M17_KMS_OK 0
 #define M17_KMS_FAILED 1
 #define M17_KMS_UNSAFE_ROLLBACK 2
+#define M17_KMS_LIT_BLACK 3
 
 struct m17_kms {
 	int fd;
@@ -31,5 +32,11 @@ int m17_kms_show(struct m17_kms *k, int i);
 /* Disables and verifies by readback, then frees: M17_KMS_OK, M17_KMS_FAILED (never opened) or
  * M17_KMS_UNSAFE_ROLLBACK (the disable could not be verified; the buffers are kept). */
 int m17_kms_close(struct m17_kms *k);
+/* G4b: hands the panel to Android lit, as the bootloader's splash leaves it (docs/m17-g4a-result.md: Goodix reads its
+ * board ID pin low with the panel powered down). First the plane detached with the CRTC kept active (M17_KMS_OK: the
+ * panel lit, no buffer of the selector's on it); if the hardware refuses an active CRTC with no plane, a black frame on
+ * the plane (M17_KMS_LIT_BLACK). Each by a TEST_ONLY commit, then the commit, then a readback. Buffers no plane uses are
+ * freed; the descriptor stays open for the caller, who keeps it alive past the hand-off. On a failure: m17_kms_close(). */
+int m17_kms_release(struct m17_kms *k);
 
 #endif

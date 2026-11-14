@@ -373,6 +373,48 @@ int m17_kms_show(struct m17_kms *k, int i) {
 	return 0;
 }
 
+/* The plane's FB_ID and CRTC_ID and the CRTC's ACTIVE, read back. */
+static int read_back(struct m17_kms *k, uint64_t *fb, uint64_t *crtc, uint64_t *active) {
+	struct props pp, rp;
+	return get_props(k->fd, k->plane, DRM_MODE_OBJECT_PLANE, &pp) || get_props(k->fd, k->crtc, DRM_MODE_OBJECT_CRTC, &rp) ||
+	       prop_value(&pp, k->props[3], fb) || prop_value(&pp, k->props[4], crtc) || prop_value(&rp, k->props[2], active) ? -1 : 0;
+}
+
+/* Frees the buffers no plane scans out; RMFB on a framebuffer nothing uses commits nothing. */
+static void free_unused(struct m17_kms *k, uint32_t kept) {
+	for (int i = 0; i < 2; ++i) {
+		if (k->buf[i].fb == kept) continue;
+		if (k->buf[i].map && k->buf[i].map != MAP_FAILED) munmap(k->buf[i].map, k->size);
+		if (k->buf[i].fb) ioctl(k->fd, DRM_IOCTL_MODE_RMFB, &k->buf[i].fb);
+		if (k->buf[i].handle)
+			ioctl(k->fd, DRM_IOCTL_MODE_DESTROY_DUMB, &(struct drm_mode_destroy_dumb){.handle = k->buf[i].handle});
+		k->buf[i].map = NULL;
+		k->buf[i].fb = k->buf[i].handle = 0;
+	}
+}
+
+int m17_kms_release(struct m17_kms *k) {
+	uint32_t counts[3] = {1, 2, 2};
+	uint64_t fb, crtc, active;
+	if (k->fd < 0 || !k->committed) return m17_kms_close(k);
+	/* The panel lit with no plane: connector and CRTC as they are, the plane detached. */
+	uint64_t empty[5] = {k->crtc, k->blob, 1, 0, 0};
+	if (!atomic_commit(k->fd, k->connector, k->crtc, k->plane, counts, k->props, empty, DRM_MODE_ATOMIC_TEST_ONLY) &&
+		!atomic_commit(k->fd, k->connector, k->crtc, k->plane, counts, k->props, empty, 0) &&
+		!read_back(k, &fb, &crtc, &active) && !fb && !crtc && active == 1) {
+		free_unused(k, 0);
+		return M17_KMS_OK;
+	}
+	/* Refused: a black frame on the plane instead, in the buffer not on the panel. */
+	int back = k->values[3] == k->buf[0].fb ? 1 : 0;
+	memset(k->buf[back].map, 0, k->size);
+	if (!m17_kms_show(k, back) && !read_back(k, &fb, &crtc, &active) && fb == k->buf[back].fb && crtc == k->crtc && active == 1) {
+		free_unused(k, k->buf[back].fb);
+		return M17_KMS_LIT_BLACK;
+	}
+	return m17_kms_close(k);
+}
+
 int m17_kms_close(struct m17_kms *k) {
 	uint32_t disable_counts[3] = {1, 2, 2};
 	uint64_t disabled[5] = {0};

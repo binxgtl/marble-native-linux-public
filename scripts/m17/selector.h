@@ -26,7 +26,9 @@ struct m17_selector_ops {
     int (*menu_open)(void *user);                         /* the panel's first frame */
     /* The window with its countdown on the panel; the choice, as m17_run_window gives it. */
     enum m17_choice (*window)(void *user, struct m17_window *w);
-    int (*menu_close)(void *user); /* M17_KMS_OK, M17_KMS_FAILED or M17_KMS_UNSAFE_ROLLBACK */
+    /* G4b: the panel handed on lit: M17_KMS_OK (no plane) or M17_KMS_LIT_BLACK (a black frame); after a failure,
+     * M17_KMS_FAILED or M17_KMS_UNSAFE_ROLLBACK, the panel off as in G4a. */
+    int (*menu_close)(void *user);
     int (*unmount_early)(void *user);
     int (*exec_android)(void *user); /* returns only on failure */
     int (*run_native)(void *user);   /* NULL: this build has no native path */

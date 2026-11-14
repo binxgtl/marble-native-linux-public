@@ -13,6 +13,7 @@
 #include <poll.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
@@ -25,6 +26,9 @@
 #define LIST "/m17/modules.list"
 #define CARD_WAIT_MS 15000u
 #define KEYS_WAIT_MS 5000u
+/* G4b: how long the holder keeps the panel's descriptor after the hand-off, by when Android's composer has its own. */
+#define HOLD_MS 60000u
+#define DRM_IOCTL_DROP_MASTER _IO('d', 0x1f)
 
 struct ctx {
     int kmsg;
@@ -193,9 +197,33 @@ static enum m17_choice window(void *user, struct m17_window *w) {
     return m17_run_window(&l, w);
 }
 
+/* G4b: the panel stays lit for Android (docs/m17-g4a-result.md). A child keeps the descriptor, so its closing never turns
+ * the panel off before Android's own composer holds one; it gives up DRM master at once, so the composer can take it,
+ * and exits after HOLD_MS. It holds nothing else. */
+static void hold_panel(struct ctx *c, int fd) {
+    pid_t pid = fork();
+    if (pid == 0) {
+        (void)ioctl(fd, DRM_IOCTL_DROP_MASTER, 0);
+        for (int i = 0; i < 1024; i++)
+            if (i != fd) close(i);
+        for (unsigned waited = 0; waited < HOLD_MS; waited += 500) (void)poll(NULL, 0, 500);
+        _exit(0);
+    }
+    char line[64];
+    snprintf(line, sizeof line, "M17SEL panel holder pid=%d", (int)pid);
+    klog(c, line);
+}
+
 static int menu_close(void *user) {
     struct ctx *c = user;
-    return m17_kms_close(&c->kms);
+    int rc = m17_kms_release(&c->kms);
+    klog(c, rc == M17_KMS_OK ? "M17SEL panel lit=empty" : rc == M17_KMS_LIT_BLACK ? "M17SEL panel lit=black" : "M17SEL panel lit=off");
+    if ((rc == M17_KMS_OK || rc == M17_KMS_LIT_BLACK) && c->kms.fd >= 0) {
+        hold_panel(c, c->kms.fd);
+        close(c->kms.fd); /* the holder's copy stays */
+        c->kms.fd = -1;
+    }
+    return rc;
 }
 
 static int unmount_early(void *user) {

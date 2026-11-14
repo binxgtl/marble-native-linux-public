@@ -260,6 +260,13 @@ static void test_flow(void) {
     f.why = M17_WHY_VOLUME_UP;
     flow(&f, &r);
     CHECK(r.menu_closed == M17_KMS_UNSAFE_ROLLBACK && strstr(f.calls, "close,unmount,android") && strstr(f.log, "menu_closed=2"));
+    /* G4b: the panel handed on lit with a black frame is recorded, and Android follows. */
+    f = fresh();
+    f.close_rc = M17_KMS_LIT_BLACK;
+    f.choice = M17_ANDROID;
+    f.why = M17_WHY_TIMEOUT;
+    flow(&f, &r);
+    CHECK(r.menu_closed == M17_KMS_LIT_BLACK && strstr(f.calls, "close,unmount,android") && strstr(f.log, "menu_closed=3"));
     /* A window that returns undecided still ends in Android. */
     f = fresh();
     flow(&f, &r);
