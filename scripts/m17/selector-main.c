@@ -245,6 +245,18 @@ static int exec_android(void *user) {
     return -e;
 }
 
+#if M17_NATIVE_BUILD
+/* G5: M19's init script, byte for byte, at its own path: it mounts what M19's PID 1 expects and execs /sbin/m19-pid1.
+ * The panel holder stays: it keeps the panel lit while the native bootstrap loads the touch modules. */
+#define NATIVE_INIT "/m17/native-init"
+static int run_native(void *user) {
+    struct ctx *c = user;
+    char *argv[] = {NATIVE_INIT, NULL};
+    execve(NATIVE_INIT, argv, c->envp);
+    return -errno;
+}
+#endif
+
 int main(int argc, char **argv, char **envp) {
     (void)argc;
     if (getpid() != 1) return 64;
@@ -254,7 +266,12 @@ int main(int argc, char **argv, char **envp) {
     struct m17_selector_ops ops = {
         .user = &c, .log = klog, .mount_early = mount_early, .read_cmdline = read_cmdline, .read_bootconfig = read_bootconfig,
         .load_modules = load_modules, .wait_card = wait_card, .wait_keys = wait_keys, .menu_open = menu_open, .window = window,
-        .menu_close = menu_close, .unmount_early = unmount_early, .exec_android = exec_android, .run_native = NULL,
+        .menu_close = menu_close, .unmount_early = unmount_early, .exec_android = exec_android,
+#if M17_NATIVE_BUILD
+        .run_native = run_native,
+#else
+        .run_native = NULL,
+#endif
     };
     struct m17_selector_result r;
     (void)m17_selector_run(&ops, &r);

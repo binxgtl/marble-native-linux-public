@@ -31,7 +31,9 @@ struct m17_selector_ops {
     int (*menu_close)(void *user);
     int (*unmount_early)(void *user);
     int (*exec_android)(void *user); /* returns only on failure */
-    int (*run_native)(void *user);   /* NULL: this build has no native path */
+    /* NULL: this build has no native path. G5: called after unmount_early; returns only on failure, and Android then
+     * follows. */
+    int (*run_native)(void *user);
 };
 
 struct m17_selector_result {
@@ -41,7 +43,7 @@ struct m17_selector_result {
     int native_ran;
 };
 
-/* Runs the selector. Returns only when /init.stock could not be executed (or, with a native path, when it ended). */
+/* Runs the selector. Returns only when /init.stock could not be executed. */
 int m17_selector_run(const struct m17_selector_ops *o, struct m17_selector_result *r);
 
 #endif

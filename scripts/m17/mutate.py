@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Mutation check for M17: every mutant of scripts/m17/select.c, g3.c, selector.c, menu.c and modules.c must fail test.sh
-(normal and ASan/UBSan)."""
+"""Mutation check for M17: every mutant of scripts/m17/select.c, g3.c, selector.c, menu.c, modules.c and G5's native.c, load.c,
+volkeys.c, session.c and cmd.c must fail test.sh (normal and ASan/UBSan)."""
 import concurrent.futures
 import os
 import shutil
@@ -74,6 +74,50 @@ MUTANTS = (
     ('modules.c', '            if (*s == \'"\') quoted = !quoted;\n', ''),
     ('modules.c', '                if (rc == -EEXIST) (*already)++;\n                else if (rc) failed++;', '                if (rc) failed++;'),
     ('modules.c', ' || memchr(s, \'/\', len)) {', ') {'),
+    # G5, the selector's native branch: the early mounts undone first, and Android after a native start that returns.
+    ('selector.c', '        int u = o->unmount_early(o->user);\n        say(o, "M17SEL native unmount=%d", u);',
+     '        int u = 0;\n        say(o, "M17SEL native unmount=%d", u);'),
+    ('selector.c', '        say(o, "M17SEL native failed rc=%d: android", rc);\n        return o->exec_android(o->user);',
+     '        say(o, "M17SEL native failed rc=%d: android", rc);\n        return rc;'),
+    # G5, the native runtime: R1's step rules, the bootstrap and ADSP holds, the write warning, the colours, the log.
+    ('native.c', '        if (stopped && !(step->flags & M19_STEP_ALWAYS))', '        if (stopped && 0)'),
+    ('native.c', '        if (run_step(n, i) && (step->flags & M19_STEP_REQUIRED)) {', '        if (run_step(n, i) && 0) {'),
+    ('native.c', '        n->write_warning = 1;\n        n->all_ok = 0;', '        n->write_warning = 1;'),
+    ('native.c', '    if (rc || status)\n        return M17_END_BOOTSTRAP;', '    if (rc)\n        return M17_END_BOOTSTRAP;'),
+    ('native.c', '    if (n->adsp_rc) {', '    if (0) {'),
+    ('native.c', 'n->all_ok ? GREEN : YELLOW', 'GREEN'),
+    ('native.c', '        int retired = retire_owned(pid, &status, &reaped, !reaped);', '        int retired = retire_owned(pid, &status, &reaped, 0);'),
+    ('native.c', '            keep = (size_t)(hit - line) + sizeof(command) - 1;', '            keep = length;'),
+    ('native.c', '            keep = (size_t)(hit - line) + sizeof(serial) - 1;', '            keep = length;'),
+    ('native.c', '                line[i + k] = \'x\';', '                line[i + k] = line[i + k];'),
+    ('native.c', '        int next = openat(fd, part, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);\n        if (next < 0 && errno == ENOENT',
+     '        int next = openat(fd, part, O_RDONLY | O_DIRECTORY | O_CLOEXEC);\n        if (next < 0 && errno == ENOENT'),
+    ('native.c', '    if (!error && renameat(fd, name, fd, older) && errno != ENOENT)', '    if (0)'),
+    ('native.c', '        if (next < 0 && errno == ENOENT && !*rest) {', '        if (next < 0 && errno == ENOENT) {'),
+    # G5, the loader: the kernel's modules skipped, EEXIST tolerated, exactly the union, the kernel's names.
+    ('load.c', '        if (has(&loaded, key)) {\n            l->already++;\n            continue;\n        }\n', ''),
+    ('load.c', '        if (rc == -EEXIST)\n            l->already++;\n        else if (rc)', '        if (0)\n            l->already++;\n        else if (rc)'),
+    ('load.c', 'l->present == all.count && loaded.count == all.count && all.count == l->total',
+     'l->present == all.count && all.count == l->total'),
+    ('load.c', 'all.count == l->total;', '1;'),
+    ('load.c', "        key[at++] = file[i] == '-' ? '_' : file[i];", '        key[at++] = file[i];'),
+    ('load.c', '    return out->count == l->rows ? 0 : -1;', '    return 0;'),
+    # G5, the volume keys: the chord, the tap, the repeat, the kernel's repeat, the limits, a dropped report.
+    ('volkeys.c', '        if (other) {\n            v->chord = 1;', '        if (0) {\n            v->chord = 1;'),
+    ('volkeys.c', '        v->pending = 0;\n        v->due_ms = 0;\n        return step_for(code);', '        v->pending = 0;\n        v->due_ms = 0;\n        return M17_VK_NONE;'),
+    ('volkeys.c', '        v->due_ms = now_ms + v->repeat_ms;', '        v->due_ms = now_ms + v->delay_ms;'),
+    ('volkeys.c', '(code != M17_KEY_VOLUMEUP && code != M17_KEY_VOLUMEDOWN) || (value != 0 && value != 1)',
+     '(code != M17_KEY_VOLUMEUP && code != M17_KEY_VOLUMEDOWN) || (value != 0 && value != 1 && value != 2)'),
+    ('volkeys.c', 'next > 100 ? 100 : next', 'next'),
+    ('volkeys.c', '                    m17_vk_reset(&v);\n                    continue;', '                    continue;'),
+    ('volkeys.c', '        const char *unmute[] = {k->pactl, "set-sink-mute", "@DEFAULT_SINK@", "0", NULL};\n        (void)m17_run(unmute, k->pulse_env, out, sizeof(out), k->command_ms);\n', ''),
+    # G5, the session: PulseAudio only once the sink streams, the whole desktop, the keypad's word only.
+    ('session.c', '        if (r->streaming) {', '        if (1) {'),
+    ('session.c', 'r->x_ok && running(s->proc, s->panel_comm) && running(s->proc, s->desktop_comm)', 'r->x_ok && running(s->proc, s->panel_comm)'),
+    ('session.c', "        if (!((word[i] >= 'A' && word[i] <= 'Z') || word[i] == '_'))\n            return;\n", ''),
+    # G5, records: the older file kept, never through a link.
+    ('cmd.c', '        if ((size_t)st.st_size >= limit) {', '        if (0) {'),
+    ('cmd.c', '        if (!S_ISREG(st.st_mode))\n            return -EINVAL;\n', ''),
     # The menu: the bar as wide as the time left, Ubuntu's band only with a native path, glyphs the right way round,
     # nothing drawn outside the panel.
     ('menu.c', '    return (unsigned)((unsigned long long)M17_MENU_BAR_W * left_ms / total_ms);', '    return M17_MENU_BAR_W;'),
@@ -87,6 +131,10 @@ def run(number, name, old, new):
     with tempfile.TemporaryDirectory() as directory:
         target = Path(directory) / 'm17'
         shutil.copytree(HERE, target, ignore=shutil.ignore_patterns('__pycache__'))
+        # G5's runtime includes M19 R1's step table header as ../m19/run1/r1.h.
+        header = Path(directory) / 'm19' / 'run1' / 'r1.h'
+        header.parent.mkdir(parents=True)
+        shutil.copy2(HERE.parent / 'm19' / 'run1' / 'r1.h', header)
         path = target / name
         text = path.read_text(encoding='utf-8')
         assert text.count(old) == 1, f'mutant {number} does not apply exactly once to {name}: {old!r}'

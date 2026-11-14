@@ -49,8 +49,14 @@ int m17_selector_run(const struct m17_selector_ops *o, struct m17_selector_resul
     r->why = w.why;
     say(o, "M17SEL choice=%s why=%s menu_closed=%d", m17_choice_name(r->choice), m17_reason_name(r->why), r->menu_closed);
     if (r->choice == M17_NATIVE && o->run_native) {
+        /* G5: native starts as Android would, from a root with nothing mounted (M19's init mounts its own). Only a failed
+         * start returns, and then Android follows. */
         r->native_ran = 1;
-        return o->run_native(o->user);
+        int u = o->unmount_early(o->user);
+        say(o, "M17SEL native unmount=%d", u);
+        int rc = o->run_native(o->user);
+        say(o, "M17SEL native failed rc=%d: android", rc);
+        return o->exec_android(o->user);
     }
     if (r->choice == M17_NATIVE) say(o, "M17SEL native-unavailable in this build: android");
     return to_android(o);

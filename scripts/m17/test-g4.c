@@ -159,7 +159,7 @@ static enum m17_choice f_window(void *u, struct m17_window *w) {
 static int f_close(void *u) { call(u, "close"); return ((struct fake *)u)->close_rc; }
 static int f_unmount(void *u) { call(u, "unmount"); return 0; }
 static int f_exec(void *u) { call(u, "android"); return ((struct fake *)u)->exec_rc; }
-static int f_native(void *u) { call(u, "native"); return 0; }
+static int f_native(void *u) { call(u, "native"); return -2; }
 
 static int flow(struct fake *f, struct m17_selector_result *r) {
     struct m17_selector_ops o = {.user = f, .log = f_log, .mount_early = f_mount, .read_cmdline = f_cmdline, .read_bootconfig = f_bootconfig,
@@ -245,13 +245,14 @@ static void test_flow(void) {
     flow(&f, &r);
     CHECK(!strcmp(f.calls, "mount,cmdline,bootconfig,modules,card,keys,menu,window,close,unmount,android,"));
     CHECK(r.choice == M17_NATIVE && !r.native_ran && strstr(f.log, "native-unavailable"));
-    /* With one: native runs, Android does not, and the early mounts stay for it. */
+    /* With one (G5): the early mounts undone, then native; a native start that returns (it failed) goes to Android. */
     f = fresh();
     f.native = 1;
     f.choice = M17_NATIVE;
     f.why = M17_WHY_VOLUME_DOWN;
     flow(&f, &r);
-    CHECK(!strcmp(f.calls, "mount,cmdline,bootconfig,modules,card,keys,menu,window,close,native,") && r.native_ran);
+    CHECK(!strcmp(f.calls, "mount,cmdline,bootconfig,modules,card,keys,menu,window,close,unmount,native,android,") && r.native_ran);
+    CHECK(strstr(f.log, "M17SEL native unmount=0") && strstr(f.log, "M17SEL native failed rc=-2: android"));
 
     /* An unverified teardown is recorded, and Android still follows. */
     f = fresh();
