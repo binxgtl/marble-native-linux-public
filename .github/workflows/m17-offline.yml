@@ -1,0 +1,32 @@
+name: M17 dual-boot selector offline
+on:
+  push:
+    branches: [m17/dual-boot-selector]
+    paths: ['scripts/m17/**', '.github/workflows/m17-offline.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: m17-offline-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  regression:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: M17 G1 selector core on synthetic boot modes, sysfs trees and evdev FIFOs, normal and ASan/UBSan (no device)
+        timeout-minutes: 5
+        run: bash scripts/m17/test.sh artifacts/m17/${{ runner.arch }}
+  mutants:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Mutants of the M17 selector core (no device)
+        timeout-minutes: 15
+        run: python3 scripts/m17/mutate.py

@@ -1,0 +1,85 @@
+#!/usr/bin/env python3
+"""Mutation check for M17 G1: every mutant of scripts/m17/select.c must fail test.sh (normal and ASan/UBSan)."""
+import concurrent.futures
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+
+MUTANTS = (
+    # The boot mode: anything but a plain normal boot goes to Android.
+    ('select.c', '    if (is(k, kn, "androidboot.mode")) return is(v, vn, "normal");', '    if (is(k, kn, "androidboot.mode")) return 1;'),
+    ('select.c', '    if (is(k, kn, "androidboot.alarmboot")) return is(v, vn, "false") || is(v, vn, "0");',
+     '    if (is(k, kn, "androidboot.alarmboot")) return 1;'),
+    ('select.c', '        (*v)++;\n        *n -= 2;\n', ''),
+    ('select.c', '            if (*s == \'"\') quoted = !quoted;\n', ''),
+    ('select.c', '            while (v < ve && isspace((unsigned char)*v)) v++;\n', ''),
+    ('select.c', '    return (!cmdline || cmdline_normal(cmdline)) && (!bootconfig || bootconfig_normal(bootconfig));',
+     '    return (!cmdline || cmdline_normal(cmdline)) || (!bootconfig || bootconfig_normal(bootconfig));'),
+    # The window: press edges only, Volume Up first, both means Android, a choice is final, the deadline.
+    ('select.c', '        if (value) return decide(w, M17_ANDROID, M17_WHY_VOLUME_UP);\n', ''),
+    ('select.c', 'return w->up_down ? decide(w, M17_ANDROID, M17_WHY_BOTH) : decide(w, M17_NATIVE, M17_WHY_VOLUME_DOWN);',
+     'return decide(w, M17_NATIVE, M17_WHY_VOLUME_DOWN);'),
+    ('select.c', '(value != 0 && value != 1)', '(value != 0 && value != 1 && value != 2)'),
+    ('select.c', '    } else if (code == M17_KEY_VOLUMEDOWN && value == 1) {', '    } else if (code == M17_KEY_VOLUMEDOWN) {'),
+    ('select.c', '    if (w->choice == M17_UNDECIDED && now_ms >= w->deadline_ms)', '    if (w->choice == M17_UNDECIDED && now_ms > w->deadline_ms)'),
+    ('select.c', '    if (w->choice == M17_UNDECIDED) {\n        w->choice = choice;', '    if (1) {\n        w->choice = choice;'),
+    # The keys: by exact name, one device only, the key in its bitmap, a character device when asked.
+    ('select.c', '            strcmp(text, name))', '            strncmp(text, name, strlen(name)))'),
+    ('select.c', '    if (matches > 1) return -EEXIST;\n', ''),
+    ('select.c', '    return (int)((words[count - 1u - index] >> (code % 64u)) & 1u);', '    return (int)((words[index] >> (code % 64u)) & 1u);'),
+    ('select.c', '        if (count == 16 || !isxdigit((unsigned char)*s)) return 0;', '        if (!isxdigit((unsigned char)*s)) return 0;'),
+    ('select.c', '    if (require_chr && (fstat(fd, &st)', '    if (require_chr && 0 && (fstat(fd, &st)'),
+    # The loop: no keys, no menu, broken or dropped events and a closed device all go to Android.
+    ('select.c', '        m17_window_fail(w, M17_WHY_NO_KEYS);\n        goto out;\n', '        goto out;\n'),
+    ('select.c', '    if (l->menu && l->menu(l->user, shown) < 0) {\n        m17_window_fail(w, M17_WHY_NO_MENU);\n        goto out;',
+     '    if (l->menu && l->menu(l->user, shown) < 0) {\n        goto out;'),
+    ('select.c', '            if (ev[i].type == EV_SYN && ev[i].code == SYN_DROPPED) return -1;\n', ''),
+    ('select.c', 'if (ev[i].type == EV_KEY && ev[i].code == k->code && ', 'if (ev[i].type == EV_KEY && '),
+    ('select.c', '        if (n == 0 || n % (ssize_t)sizeof ev[0]) return -1;', '        if (n == 0) return -1;'),
+    ('select.c', '            else if (!(p[i].revents & POLLIN) && (p[i].revents & (POLLERR | POLLHUP | POLLNVAL))) m17_window_fail(w, M17_WHY_READ_ERROR);\n',
+     ''),
+)
+
+
+def run(number, name, old, new):
+    with tempfile.TemporaryDirectory() as directory:
+        target = Path(directory) / 'm17'
+        shutil.copytree(HERE, target, ignore=shutil.ignore_patterns('__pycache__'))
+        path = target / name
+        text = path.read_text(encoding='utf-8')
+        assert text.count(old) == 1, f'mutant {number} does not apply exactly once to {name}: {old!r}'
+        path.write_text(text.replace(old, new), encoding='utf-8', newline='\n')
+        try:
+            result = subprocess.run(['bash', str(target / 'test.sh'), str(Path(directory) / 'out')], stdin=subprocess.DEVNULL,
+                                    capture_output=True, timeout=300, start_new_session=True)
+            return result.returncode != 0
+        except subprocess.TimeoutExpired:
+            return True
+
+
+def main():
+    with tempfile.TemporaryDirectory() as directory:
+        check = subprocess.run(['bash', str(HERE / 'test.sh'), directory], stdin=subprocess.DEVNULL, capture_output=True, timeout=300)
+        if check.returncode:
+            print(check.stdout.decode('utf-8', 'replace') + check.stderr.decode('utf-8', 'replace'))
+            raise SystemExit('the unmutated tests fail')
+    survivors = []
+    with concurrent.futures.ThreadPoolExecutor(max(1, min(4, os.cpu_count() or 1))) as pool:
+        futures = {pool.submit(run, number, name, old, new): (number, name, old) for number, (name, old, new) in enumerate(MUTANTS, 1)}
+        for future in concurrent.futures.as_completed(futures):
+            number, name, old = futures[future]
+            if not future.result():
+                survivors.append((number, name, old))
+    for number, name, old in sorted(survivors):
+        print(f'SURVIVED {number} {name}: {old!r}')
+    print(f'M17 mutants killed: {len(MUTANTS) - len(survivors)} of {len(MUTANTS)}')
+    return 1 if survivors else 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
