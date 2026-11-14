@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Mutation check for M17: every mutant of scripts/m17/select.c and g3.c must fail test.sh (normal and ASan/UBSan)."""
+"""Mutation check for M17: every mutant of scripts/m17/select.c, g3.c, selector.c, menu.c and modules.c must fail test.sh
+(normal and ASan/UBSan)."""
 import concurrent.futures
 import os
 import shutil
@@ -57,6 +58,28 @@ MUTANTS = (
     ('g3.c', '            (void)m17_window_tick(w, now);\n', ''),
     ('g3.c', '        if (rc == -EEXIST) {\n            say(g, "M17 G3 ambiguous %s", name);\n            return -1;\n        }\n', ''),
     ('g3.c', '        if (!count) break; /* no key at all: nothing to wait for */\n', ''),
+    # G4 the selector: a normal boot needs mounts and a mode; the menu only when the keys are there, and closed only when
+    # opened; native only with a native path; Android always after the early mounts are undone; undecided is Android.
+    ('selector.c', '    r->normal = !m && !c && m17_normal_boot(cmdline, b ? NULL : bootconfig);',
+     '    r->normal = !c && m17_normal_boot(cmdline, b ? NULL : bootconfig);'),
+    ('selector.c', 'm17_normal_boot(cmdline, b ? NULL : bootconfig);', 'm17_normal_boot(cmdline, bootconfig);'),
+    ('selector.c', '    r->keys = r->card && !o->wait_keys(o->user);', '    r->keys = !o->wait_keys(o->user);'),
+    ('selector.c', '    if (r->menu) r->menu_closed = o->menu_close(o->user);', '    r->menu_closed = o->menu_close(o->user);'),
+    ('selector.c', '    if (r->choice == M17_NATIVE && o->run_native) {', '    if (r->choice == M17_NATIVE) {'),
+    ('selector.c', '    if (r->choice == M17_NATIVE) say(o, "M17SEL native-unavailable in this build: android");\n    return to_android(o);',
+     '    if (r->choice == M17_NATIVE) say(o, "M17SEL native-unavailable in this build: android");\n    return o->exec_android(o->user);'),
+    ('selector.c', '    r->choice = w.choice == M17_UNDECIDED ? M17_ANDROID : w.choice;', '    r->choice = w.choice;'),
+    # The modules: options by canonical name and whole quoted words, a loaded module is no failure, no paths.
+    ('modules.c', "out[j++] = in[i] == '-' ? '_' : in[i];", 'out[j++] = in[i];'),
+    ('modules.c', '            if (*s == \'"\') quoted = !quoted;\n', ''),
+    ('modules.c', '                if (rc == -EEXIST) (*already)++;\n                else if (rc) failed++;', '                if (rc) failed++;'),
+    ('modules.c', ' || memchr(s, \'/\', len)) {', ') {'),
+    # The menu: the bar as wide as the time left, Ubuntu's band only with a native path, glyphs the right way round,
+    # nothing drawn outside the panel.
+    ('menu.c', '    return (unsigned)((unsigned long long)M17_MENU_BAR_W * left_ms / total_ms);', '    return M17_MENU_BAR_W;'),
+    ('menu.c', 'native_available ? M17_MENU_NATIVE : M17_MENU_BG', 'M17_MENU_NATIVE'),
+    ('menu.c', 'if (g->rows[r] & (0x10u >> c))', 'if (g->rows[r] & (0x01u << c))'),
+    ('menu.c', '    if (w > M17_MENU_W - x) w = M17_MENU_W - x;\n', ''),
 )
 
 

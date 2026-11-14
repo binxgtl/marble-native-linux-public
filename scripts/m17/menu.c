@@ -1,0 +1,85 @@
+/* M17 selector menu (menu.h). */
+#include "menu.h"
+
+#include <stddef.h>
+#include <stdio.h>
+
+struct glyph {
+    char c;
+    uint8_t rows[7]; /* 5 bits each, the leftmost column in bit 4 */
+};
+
+static const struct glyph font[] = {
+    {'A', {0x0e, 0x11, 0x11, 0x1f, 0x11, 0x11, 0x11}}, {'B', {0x1e, 0x11, 0x11, 0x1e, 0x11, 0x11, 0x1e}},
+    {'C', {0x0e, 0x11, 0x10, 0x10, 0x10, 0x11, 0x0e}}, {'D', {0x1e, 0x11, 0x11, 0x11, 0x11, 0x11, 0x1e}},
+    {'E', {0x1f, 0x10, 0x10, 0x1e, 0x10, 0x10, 0x1f}}, {'F', {0x1f, 0x10, 0x10, 0x1e, 0x10, 0x10, 0x10}},
+    {'H', {0x11, 0x11, 0x11, 0x1f, 0x11, 0x11, 0x11}}, {'I', {0x0e, 0x04, 0x04, 0x04, 0x04, 0x04, 0x0e}},
+    {'L', {0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1f}}, {'M', {0x11, 0x1b, 0x15, 0x15, 0x11, 0x11, 0x11}},
+    {'N', {0x11, 0x19, 0x15, 0x13, 0x11, 0x11, 0x11}}, {'O', {0x0e, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0e}},
+    {'P', {0x1e, 0x11, 0x11, 0x1e, 0x10, 0x10, 0x10}}, {'R', {0x1e, 0x11, 0x11, 0x1e, 0x14, 0x12, 0x11}},
+    {'S', {0x0f, 0x10, 0x10, 0x0e, 0x01, 0x01, 0x1e}}, {'T', {0x1f, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04}},
+    {'U', {0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0e}}, {'V', {0x11, 0x11, 0x11, 0x11, 0x11, 0x0a, 0x04}},
+    {'W', {0x11, 0x11, 0x11, 0x15, 0x15, 0x15, 0x0a}}, {'Y', {0x11, 0x11, 0x0a, 0x04, 0x04, 0x04, 0x04}},
+    {'0', {0x0e, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0e}}, {'1', {0x04, 0x0c, 0x04, 0x04, 0x04, 0x04, 0x0e}},
+    {'2', {0x0e, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1f}}, {'3', {0x1e, 0x01, 0x01, 0x0e, 0x01, 0x01, 0x1e}},
+    {'4', {0x02, 0x06, 0x0a, 0x12, 0x1f, 0x02, 0x02}}, {'5', {0x1f, 0x10, 0x1e, 0x01, 0x01, 0x11, 0x0e}},
+    {'6', {0x06, 0x08, 0x10, 0x1e, 0x11, 0x11, 0x0e}}, {'7', {0x1f, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08}},
+    {'8', {0x0e, 0x11, 0x11, 0x0e, 0x11, 0x11, 0x0e}}, {'9', {0x0e, 0x11, 0x11, 0x0f, 0x01, 0x02, 0x0c}},
+    {'+', {0x00, 0x04, 0x04, 0x1f, 0x04, 0x04, 0x00}}, {'-', {0x00, 0x00, 0x00, 0x1f, 0x00, 0x00, 0x00}},
+    {':', {0x00, 0x0c, 0x0c, 0x00, 0x0c, 0x0c, 0x00}},
+};
+
+static const struct glyph *find(char c) {
+    for (size_t i = 0; i < sizeof font / sizeof font[0]; i++)
+        if (font[i].c == c) return &font[i];
+    return NULL;
+}
+
+static void fill(uint32_t *pixels, uint32_t pitch, unsigned x, unsigned y, unsigned w, unsigned h, uint32_t colour) {
+    if (x >= M17_MENU_W || y >= M17_MENU_H) return;
+    if (w > M17_MENU_W - x) w = M17_MENU_W - x;
+    if (h > M17_MENU_H - y) h = M17_MENU_H - y;
+    for (unsigned j = 0; j < h; j++) {
+        uint32_t *row = pixels + (size_t)(y + j) * pitch + x;
+        for (unsigned i = 0; i < w; i++) row[i] = colour;
+    }
+}
+
+void m17_menu_text(uint32_t *pixels, uint32_t pitch, unsigned x, unsigned y, unsigned scale, uint32_t colour, const char *text) {
+    for (; *text; text++, x += 6u * scale) {
+        const struct glyph *g = find(*text);
+        if (!g) continue;
+        for (unsigned r = 0; r < 7; r++)
+            for (unsigned c = 0; c < 5; c++)
+                if (g->rows[r] & (0x10u >> c)) fill(pixels, pitch, x + c * scale, y + r * scale, scale, scale, colour);
+    }
+}
+
+unsigned m17_menu_bar_width(unsigned left_ms, unsigned total_ms) {
+    if (!total_ms || !left_ms) return 0;
+    if (left_ms >= total_ms) return M17_MENU_BAR_W;
+    return (unsigned)((unsigned long long)M17_MENU_BAR_W * left_ms / total_ms);
+}
+
+/* Text centred across the panel at `scale`. */
+static void centred(uint32_t *pixels, uint32_t pitch, unsigned y, unsigned scale, uint32_t colour, const char *text) {
+    unsigned n = 0;
+    while (text[n]) n++;
+    unsigned width = n ? (6u * n - 1u) * scale : 0;
+    m17_menu_text(pixels, pitch, width < M17_MENU_W ? (M17_MENU_W - width) / 2u : 0, y, scale, colour, text);
+}
+
+void m17_menu_draw(uint32_t *pixels, uint32_t pitch, unsigned left_ms, unsigned total_ms, int native_available) {
+    fill(pixels, pitch, 0, 0, M17_MENU_W, M17_MENU_H, M17_MENU_BG);
+    centred(pixels, pitch, 300, 12, M17_MENU_TEXT, "CHOOSE");
+    fill(pixels, pitch, 90, 700, 900, 400, M17_MENU_ANDROID);
+    centred(pixels, pitch, 790, 10, M17_MENU_TEXT, "VOL +");
+    centred(pixels, pitch, 950, 10, M17_MENU_TEXT, "ANDROID");
+    fill(pixels, pitch, 90, 1250, 900, 400, native_available ? M17_MENU_NATIVE : M17_MENU_BG);
+    centred(pixels, pitch, 1340, 10, M17_MENU_TEXT, "VOL -");
+    centred(pixels, pitch, 1500, 10, M17_MENU_TEXT, native_available ? "UBUNTU" : "NOT IN TEST");
+    char seconds[8];
+    snprintf(seconds, sizeof seconds, "%u", (left_ms + 999u) / 1000u);
+    centred(pixels, pitch, 1820, 16, M17_MENU_TEXT, seconds);
+    fill(pixels, pitch, M17_MENU_BAR_X, M17_MENU_BAR_Y, m17_menu_bar_width(left_ms, total_ms), M17_MENU_BAR_H, M17_MENU_BAR);
+}

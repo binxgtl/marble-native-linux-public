@@ -19,7 +19,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - name: M17 selector core (G1) and K1-keys (G3) on synthetic trees and evdev FIFOs, normal and ASan/UBSan, then static binaries twice (no device)
+      - name: M17 selector core (G1), K1-keys (G3) and the selector (G4) on synthetic trees, normal and ASan/UBSan, then static binaries twice (no device)
         timeout-minutes: 10
         run: bash scripts/m17/test.sh artifacts/m17/${{ runner.arch }}
       - name: Upload the reviewable static binaries (ARM64 only, no boot image)
@@ -32,6 +32,8 @@ jobs:
             artifacts/m17/ARM64/m17-pid-g3-b
             artifacts/m17/ARM64/m17-keys-a
             artifacts/m17/ARM64/m17-keys-b
+            artifacts/m17/ARM64/m17-selector-a
+            artifacts/m17/ARM64/m17-selector-b
             artifacts/m17/ARM64/m17-binaries.txt
           if-no-files-found: error
           retention-days: 30
@@ -40,6 +42,6 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - name: Mutants of the M17 selector core and K1-keys (no device)
+      - name: Mutants of the M17 selector core, K1-keys and the selector (no device)
         timeout-minutes: 25
         run: python3 scripts/m17/mutate.py
