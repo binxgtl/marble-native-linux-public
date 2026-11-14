@@ -27,7 +27,9 @@ MUTANTS = (
     ('t8-writes', '[ -z "$found" ] || { printf', 'false && { printf'),
     # T9-root: the data pair writable, the rest read-only; the root read-write; M19's files in RAM only.
     ('t9-root', '[ "$number" = "$data_number" ] || ', ''),
-    ('t9-root', '[ "$writable" -eq 2 ]', '[ "$writable" -ge 1 ]'),
+    ('t9-root', '[ "$writable" -eq 3 ]', '[ "$writable" -ge 1 ]'),
+    ('t9-root', ' || [ -e "$entry/$data_part" ]', ''),
+    ('t9-root', '  [ -z "$data_part" ] || fail data-partitions\n', ''),
     ('t9-root', 'case "$options" in rw|rw,*) ;; *) fail "root-read-write-check $options";; esac\n', ''),
     ('t9-root', '! $BB grep -qx uninitialized "$new/etc/machine-id" || fail machine-id\n', ''),
     ('t9-root', '[ ! -e "$new/etc/selinux/config" ] && [ ! -L "$new/etc/selinux/config" ] || fail selinux-config\n', ''),

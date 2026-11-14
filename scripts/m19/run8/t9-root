@@ -10,7 +10,7 @@
 #  - The tree's machine-id must be present and SELinux's config absent, so systemd neither commits an ID nor applies
 #    first-boot presets to the writable /etc.
 #  - The tree's systemd may be updated within Ubuntu 24.04's systemd 255; another major stops here.
-# Every block device is set read-only first, except the userdata partition and the dm device T2 made from it. The new
+# Every block device is set read-only first, except the userdata partition, its disk and the dm device T2 made from it. The new
 # /dev holds a short list of character nodes and no block node at all.
 set -eu
 R=${M19_ROOT:-}
@@ -46,8 +46,18 @@ case "$line" in "M19_UNLOCK status=OK "*" table=rw dev="*) ;; *) fail unlock-tab
 data_number=${line##*dev=}
 number_ok "$data_number" || fail data-number
 
-# 1. Every block device read-only, through nodes in the old /dev, except the userdata partition and its dm device.
-#    Ubuntu never gets a block node.
+# 1. Every block device read-only, through nodes in the old /dev, except the userdata partition, the disk that holds
+#    it and the dm device T2 made from it. R8b: on this kernel a read-only disk makes each of its partitions read-only
+#    too (the block layer then warns on every write to /data), so the data disk keeps its flag and each of its other
+#    partitions gets its own. Ubuntu never gets a block node.
+data_part=
+for entry in "$R"/sys/class/block/*; do
+ if $BB grep -qx PARTNAME=userdata "$entry/uevent" 2>/dev/null; then
+  [ -z "$data_part" ] || fail data-partitions
+  data_part=${entry##*/}
+ fi
+done
+case "$data_part" in ''|*[!A-Za-z0-9._-]*) fail data-partition;; esac
 blocks=0
 kept=
 for entry in "$R"/sys/class/block/*; do
@@ -56,7 +66,7 @@ for entry in "$R"/sys/class/block/*; do
  case "$name" in ''|*[!A-Za-z0-9._-]*) fail "block name";; esac
  number=$($BB cat "$entry/dev") || fail "block number $name"
  number_ok "$number" || fail "block number $name"
- if [ "$number" = "$data_number" ] || $BB grep -qx PARTNAME=userdata "$entry/uevent" 2>/dev/null; then
+ if [ "$number" = "$data_number" ] || [ "$name" = "$data_part" ] || [ -e "$entry/$data_part" ]; then
   kept="$kept $name"
   continue
  fi
@@ -69,7 +79,7 @@ done
 [ "$blocks" -gt 0 ] || fail no-block-device
 set -- $kept
 writable=$#
-[ "$writable" -eq 2 ] || fail "writable devices$kept"
+[ "$writable" -eq 3 ] || fail "writable devices$kept"
 
 # 2. / is the tree, read-write, checked in mountinfo.
 $BB mkdir -m 755 "$new" || fail newroot

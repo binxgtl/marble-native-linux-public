@@ -488,7 +488,8 @@ static void check_blocks_rw(const struct m19_report *c, int *writes_ok, int *ro_
             }
         }
         counts_line(name, data[0] ? "data-disk" : "disk", &n);
-        if (!n.ro)
+        /* R8b: the data disk stays writable; read-only, the kernel would count its partitions read-only too. */
+        if (data[0] ? n.ro : !n.ro)
             *ro_ok = 0;
         if (!data[0]) {
             if (!counts_zero(&n))

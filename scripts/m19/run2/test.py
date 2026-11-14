@@ -791,7 +791,7 @@ class RwReport(ReportBase):
         for name in ('sda', 'sda/sda33', 'dm-0'):
             block_stat(block / name / 'stat', 9, 72)
         block_stat(block / 'sda/sda1/stat')
-        for name in ('sda/sda33', 'dm-0'):
+        for name in ('sda', 'sda/sda33', 'dm-0'):
             (block / name / 'ro').write_text('0\n')
         (block / 'dm-0/dm').mkdir()
         (block / 'dm-0/dm/name').write_text('m19-userdata\n')
@@ -809,7 +809,7 @@ class RwReport(ReportBase):
     def test_writes_on_the_data_path_pass(self):
         log, verdict = self.run_rw()
         self.assertEqual((verdict['writes'], verdict['read_only'], verdict['mounts'], verdict['all_ok']), ('1', '1', '1', '1'))
-        for line in ('M19 R8 block sda data-disk writes=9 sectors=72 discards=0 discarded=0 ro=1', 'M19 R8 block sda33 data writes=9 sectors=72',
+        for line in ('M19 R8 block sda data-disk writes=9 sectors=72 discards=0 discarded=0 ro=0', 'M19 R8 block sda33 data writes=9 sectors=72',
                      'M19 R8 block dm-0 data writes=9', 'M19 R8 block dm-1 other writes=0', 'M19 R8 block sdb disk writes=0'):
             self.assertIn(line, log)
         self.assertNotIn('M19 R8 block sda1 ', log)
@@ -832,7 +832,8 @@ class RwReport(ReportBase):
                  ('data partition read-only', lambda: (block / 'sda/sda33/ro').write_text('1\n'), 'read_only'),
                  ('other partition writable', lambda: (block / 'sda/sda1/ro').write_text('0\n'), 'read_only'),
                  ('other disk partition writable', lambda: (block / 'sdb/sdb1/ro').write_text('0\n'), 'read_only'),
-                 ('data disk writable', lambda: (block / 'sda/ro').write_text('0\n'), 'read_only'),
+                 ('data disk read-only', lambda: (block / 'sda/ro').write_text('1\n'), 'read_only'),
+                 ('other disk writable', lambda: (block / 'sdb/ro').write_text('0\n'), 'read_only'),
                  ('other dm writable', lambda: (block / 'dm-1/ro').write_text('0\n'), 'read_only'),
                  ('unreadable partition', lambda: (block / 'sda/sda1/stat').unlink(), 'writes'),
                  ('root read-only', lambda: (self.root / 'mountinfo').write_text(MOUNTINFO_RW.replace('/ rw,noatime', '/ ro,noatime')), 'mounts'),

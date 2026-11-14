@@ -320,9 +320,10 @@ class Root(Fixture):
         result = self.run_script()
         self.assertEqual(result.returncode, 0, result.stderr)
         log = self.bb_log()
-        for name in ('sda', 'sda6', 'sdb', 'sdb1', 'dm-0'):
+        for name in ('sda6', 'sdb', 'sdb1', 'dm-0'):
             self.assertIn(f'blockdev --setro {self.root}/dev/m19-ro-{name}\n', log)
-        for name in ('sda5', 'dm-5'):
+        # R8b: the data disk keeps its flag, or the kernel counts its partitions read-only too.
+        for name in ('sda', 'sda5', 'dm-5'):
             self.assertNotIn(f'm19-ro-{name}', log)
         self.assertIn(f'mount -o bind {self.root}/m19-data/ubuntu {self.new}\n', log)
         self.assertNotIn(f'remount,bind,ro {self.new}\n', log)
@@ -331,7 +332,7 @@ class Root(Fixture):
         for fields in self.tmpfs():
             self.assertIn(f'mount -t tmpfs -o mode={fields[1]},nosuid,nodev,size={fields[2]} tmpfs {self.new}{fields[0]}\n', log)
         self.assertLess(log.index(f'tmpfs {self.new}/run\n'), log.index(f'tmpfs {self.new}/tmp\n'))
-        self.assertIn('M19 T9 new root: read-write blocks-read-only=5 writable=2 machine-id=present fstab-lines=1 selinux-config=absent '
+        self.assertIn('M19 T9 new root: read-write blocks-read-only=4 writable=3 machine-id=present fstab-lines=1 selinux-config=absent '
                       'default-was=/lib/systemd/system/graphical.target systemd=pinned\n', result.stderr)
         files = (self.root / 'm19/r8/files').read_text().split()
         self.assertIn(f'M19 T9 masks={len((self.root / "m19/r8/masks").read_text().split())} '
@@ -434,13 +435,13 @@ class Root(Fixture):
 
     def test_the_writable_devices_must_be_the_data_pair(self):
         (self.root / 'run/m19/unlock.line').write_text(OK_LINE.replace('254:5', '254:9') + '\n')
-        self.assertFails('writable devices sda5')
+        self.assertFails('writable devices sda sda5')
         self.setUp()
         (self.root / 'run/m19/unlock.line').write_text(OK_LINE.replace(' table=rw', '') + '\n')
         self.assertFails('unlock-table')
         self.setUp()
         (self.root / 'sys/block/sda/sda6/uevent').write_text('PARTNAME=userdata\n')
-        self.assertFails('writable devices dm-5 sda5 sda6')
+        self.assertFails('data-partitions')
 
     def test_read_only_that_did_not_take_stops(self):
         self.assertFails('read-only check dm-0', M19_GETRO='0')
