@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Mutation check for M17: every mutant of scripts/m17/select.c, g3.c, selector.c, menu.c, modules.c and G5's native.c, load.c,
-volkeys.c, session.c and cmd.c must fail test.sh (normal and ASan/UBSan)."""
+volkeys.c, session.c and cmd.c, and G5b's awprobe.c must fail test.sh (normal and ASan/UBSan)."""
 import concurrent.futures
 import os
 import shutil
@@ -115,6 +115,19 @@ MUTANTS = (
     ('session.c', '        if (r->streaming) {', '        if (1) {'),
     ('session.c', 'r->x_ok && running(s->proc, s->panel_comm) && running(s->proc, s->desktop_comm)', 'r->x_ok && running(s->proc, s->panel_comm)'),
     ('session.c', "        if (!((word[i] >= 'A' && word[i] <= 'Z') || word[i] == '_'))\n            return;\n", ''),
+    # G5b, the protection probe: a read command for message 7, a 32-byte read, every field of the reply checked, the
+    # speakers' words where libawcal reads them, the log never through a link and bounded.
+    ('awprobe.c', '    put32(out + 32, 1u);                 /* message type 1: a command */', '    put32(out + 32, 0u);'),
+    ('awprobe.c', '    put32(out + 36, M17_AW_MSG_STATUS);', '    put32(out + 36, 8u);'),
+    ('awprobe.c', '    put32(out + 24, M17_AW_STATUS_BYTES);', '    put32(out + 24, 8u);'),
+    ('awprobe.c', 'get32(p) != 0u || ', ''),
+    ('awprobe.c', 'get32(p + 4) != M17_AW_IID || ', ''),
+    ('awprobe.c', 'get32(p + 8) != M17_AW_MSG_PARAM ||', '0 ||'),
+    ('awprobe.c', 'get32(p + 12) < M17_AW_STATUS_BYTES', '0'),
+    ('awprobe.c', '|| get32(p + 16) != 0u)', ')'),
+    ('awprobe.c', '(int32_t)out->raw[4 * ch] * 1000', '(int32_t)out->raw[2 * ch] * 1000'),
+    ('awprobe.c', '        if (!S_ISREG(s.st_mode))\n            return -EINVAL;\n', ''),
+    ('awprobe.c', '        if ((size_t)s.st_size >= limit) {', '        if (0) {'),
     # G5, records: the older file kept, never through a link.
     ('cmd.c', '        if ((size_t)st.st_size >= limit) {', '        if (0) {'),
     ('cmd.c', '        if (!S_ISREG(st.st_mode))\n            return -EINVAL;\n', ''),

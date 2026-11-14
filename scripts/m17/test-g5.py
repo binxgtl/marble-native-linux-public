@@ -120,5 +120,42 @@ class Counts(unittest.TestCase):
                 dailyplan.t9_gpu(text)
 
 
+class SinkCopy(unittest.TestCase):
+    """G5b: M17's sink stream and entry are M19 R6's byte for byte outside their marked probe blocks."""
+    BEGIN, END = '/* M17 PROBE BEGIN */\n', '/* M17 PROBE END */\n'
+
+    def unmarked(self, text):
+        out, at = [], 0
+        while True:
+            begin = text.find(self.BEGIN, at)
+            if begin < 0:
+                return ''.join(out) + text[at:]
+            end = text.find(self.END, begin)
+            self.assertGreater(end, begin)
+            self.assertNotIn(self.BEGIN, text[begin + len(self.BEGIN):end])
+            out.append(text[at:begin])
+            at = end + len(self.END)
+
+    def test_copies(self):
+        for mine, theirs, blocks in (('scripts/m17/sink-stream.c', 'scripts/m19/run6/stream.c', 5),
+                                     ('scripts/m17/sink-main.c', 'scripts/m19/run6/sink-main.c', 3)):
+            text = (ROOT / mine).read_text(encoding='utf-8')
+            self.assertEqual(text.count(self.BEGIN), blocks, mine)
+            self.assertEqual(text.count(self.END), blocks, mine)
+            self.assertEqual(self.unmarked(text), (ROOT / theirs).read_text(encoding='utf-8'), mine)
+
+    def test_probe_is_read_only(self):
+        """The blocks send only the read command and the read, to the protection module, through the custodian."""
+        text = (ROOT / 'scripts/m17/sink-stream.c').read_text(encoding='utf-8')
+        blocks = ''.join(text[b:text.index(self.END, b)] for b in [i for i in range(len(text)) if text.startswith(self.BEGIN, i)])
+        self.assertEqual(blocks.count('m11_custodian_cfg_observed('), 1)
+        self.assertEqual(blocks.count('probe_round(s, '), 2)
+        self.assertIn('probe_round(s, M11_APM_CMD_SET_CFG, cmd, m17_aw_status_cmd(cmd)', blocks)
+        self.assertIn('probe_round(s, M11_APM_CMD_GET_CFG, req, m17_aw_status_req(req)', blocks)
+        for word in ('m11_snd_ctl_set', 'gain_q15 =', 'peak_limit =', 'set_switches', 'amp_set(', 'm11_custodian_data_submit',
+                     'm11_custodian_graph_cmd'):
+            self.assertNotIn(word, blocks)
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

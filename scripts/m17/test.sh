@@ -22,14 +22,17 @@ for variant in "${variants[@]}"; do
   gcc "${flags[@]}" "$src/select.c" "$src/load.c" "$src/native.c" "$src/cmd.c" "$src/session.c" "$src/volkeys.c" "$src/test-g5.c" \
     -o "$out/test-g5-$variant" &
   fourth=$!
+  gcc "${flags[@]}" "$src/awprobe.c" "$src/test-g5b.c" -o "$out/test-g5b-$variant" &
+  fifth=$!
   wait "$first"
   wait "$second"
   wait "$third"
   wait "$fourth"
+  wait "$fifth"
 done
 pids=()
 for variant in "${variants[@]}"; do
-  for name in select g3 g4 g5; do
+  for name in select g3 g4 g5 g5b; do
     TMPDIR=$(mktemp -d) "$out/test-$name-$variant" >"$out/test-$name-$variant.txt" 2>&1 &
     pids+=("$!")
   done
@@ -57,7 +60,31 @@ for copy in a b; do
   gcc "${flags[@]}" "$m19/unlock/hash.c" "$m19/run2/wire.c" "$m19/run2/handoff.c" "$m19/run2/report.c" "$src/select.c" "$src/load.c" \
     "$src/native.c" "$src/cmd.c" "$src/session.c" "$src/volkeys.c" "$src/native-main.c" -o "$out/m17-native-$copy"
 done
-for name in m17-pid-g3 m17-keys m17-selector m17-selector-native m17-native; do
+# G5b: M19 R6's m19-sink, built as M19 builds it (scripts/m19/run6/test.sh: the same units, flags and options), but for
+# its stream and entry, which are M19's with the protection probe added in marked blocks (test-g5.py checks the rest is
+# M19's byte for byte), and the probe itself.
+repair=$m19/../m11/qualification/runtime-repair
+own=$m19/../m11/qualification/ownership
+native=$m19/../m11/anchor-native
+sink_srcs=("$m19/unlock/hash.c")
+for u in m11_gpr_engine m11_shmem m11_apm_protocol m11_aw_protection m11_strict_mock; do
+  sink_srcs+=("$repair/$u.c")
+done
+for u in m11_custodian m11_pid1_anchor m11_anchor_linux m11_anchor_owner; do
+  sink_srcs+=("$own/$u.c")
+done
+for u in gpr_transport_native shmem_backend_native dmabuf_pool_native heap_node_native intent_journal_native \
+         pdr_loop_native terminal_native custodian_runner_native custodian_boot_native pd_session_native \
+         custodian_entry_native snd_backend_native speaker_plan_native; do
+  sink_srcs+=("$native/$u.c")
+done
+sink_srcs+=("$src/sink-stream.c" "$m19/run6/sink.c" "$src/awprobe.c")
+m11_flags=(-DM11_ANCHOR_NATIVE -DM11_CUSTODIAN_NATIVE -DM11_ANCHOR_NATIVE_ION -I"$own" -I"$repair" -I"$native" -I"$m19/run6")
+for copy in a b; do
+  gcc -std=c11 -O2 -Wall -Wextra -Werror -static -no-pie -Wl,--build-id=none "${m11_flags[@]}" "${sink_srcs[@]}" "$src/sink-main.c" \
+    -o "$out/m17-sink-$copy"
+done
+for name in m17-pid-g3 m17-keys m17-selector m17-selector-native m17-native m17-sink; do
   cmp "$out/$name-a" "$out/$name-b"
   sha256sum "$out/$name-a"
 done | tee "$out/m17-binaries.txt"

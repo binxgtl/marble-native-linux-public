@@ -22,7 +22,7 @@ jobs:
       - name: M17 selector core (G1), K1-keys (G3), the selector (G4) and the native path (G5) on synthetic trees, normal and ASan/UBSan, then static binaries twice (no device)
         timeout-minutes: 10
         run: bash scripts/m17/test.sh artifacts/m17/${{ runner.arch }}
-      - name: M17 G5 daily profile against M19 R9's own plan (no device)
+      - name: M17 G5 daily profile against M19 R9's own plan, and G5b's sink against M19's (no device)
         timeout-minutes: 5
         run: python3 scripts/m17/test-g5.py
       - name: Upload the reviewable static binaries (ARM64 only, no boot image)
@@ -41,6 +41,8 @@ jobs:
             artifacts/m17/ARM64/m17-selector-native-b
             artifacts/m17/ARM64/m17-native-a
             artifacts/m17/ARM64/m17-native-b
+            artifacts/m17/ARM64/m17-sink-a
+            artifacts/m17/ARM64/m17-sink-b
             artifacts/m17/ARM64/m17-binaries.txt
           if-no-files-found: error
           retention-days: 30
