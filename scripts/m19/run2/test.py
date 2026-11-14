@@ -1032,6 +1032,7 @@ class MediaReport(ReportBase):
                 if name == 'pin rejected':
                     self.assertFalse([step for step in steps if 'T12-media' in step])
                     self.assertEqual(m['kind'], 'none')
+        self.setUp()
         log, m, steps = self.media('500', {'M19_TEST_MEDIA_DEPTH': '3'})
         self.assertEqual(m['media_ok'], '1')
 

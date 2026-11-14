@@ -598,7 +598,8 @@ class SystemdPaths(unittest.TestCase):
         self.assertEqual(self.systemctl('get-default').stdout.strip(), 'm19-r8.target')
         # The tree's file has no [Install] (static); only M19's, in control, has one (disabled): control's is the one read.
         self.assertEqual(self.systemctl('is-enabled', 'marble-xfce.service').stdout.strip(), 'disabled')
-        self.assertEqual(self.systemctl('is-enabled', 'm19-r8.target').stdout.strip(), 'static')
+        # Found, with no [Install] of its own; default.target's link makes it an alias's target.
+        self.assertIn(self.systemctl('is-enabled', 'm19-r8.target').stdout.strip(), ('static', 'indirect'))
         self.assertEqual(os.readlink(self.root / 'etc/systemd/system/display-manager.service'), '/usr/lib/systemd/system/lightdm.service')
 
     def test_the_search_path_puts_control_before_etc(self):
