@@ -50,7 +50,8 @@ MUTANTS = [
     # R2 thermal: load once, a failed load fails the unit, only numbers count as readable
     ('thermal', "if ! grep -q '^qcom_tsens ' \"$PROC/modules\" 2>/dev/null; then", 'if true; then'),
     ('thermal', '    loaded=failed\n    rc=1', '    loaded=failed'),
-    ('thermal', "    ''|*[!0-9-]*) ;;", "    '') ;;"),
+    ('thermal', "    ''|*[!0-9]*) ;;", "    '') ;;"),
+    ('thermal', '  digits=${t#-}', '  digits=$t'),
     ('thermal', 'zones=$((zones + 1))', 'zones=$((zones + 0))'),
     # boot-analyze: waits for the start, keeps the previous boot's account
     ('boot-analyze', 'running|degraded) break;;', 'nothing) break;;'),
