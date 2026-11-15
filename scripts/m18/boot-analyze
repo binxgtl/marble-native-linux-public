@@ -1,0 +1,32 @@
+#!/bin/sh
+# M18 R1 (docs/m18-performance-polish.md): once the system has started (or after LIMIT seconds), systemd's own account
+# of the boot into /var/lib/m19/m18-analyze.log: `systemd-analyze time`, the 40 slowest units, and the critical chain to
+# the default target. The previous boot's file is kept as .1. Read-only. M18_LOG, M18_ANALYZE, M18_SYSTEMCTL and
+# M18_LIMIT are for the tests.
+set -u
+LOG=${M18_LOG:-/var/lib/m19/m18-analyze.log}
+ANALYZE=${M18_ANALYZE:-systemd-analyze}
+SYSTEMCTL=${M18_SYSTEMCTL:-systemctl}
+LIMIT=${M18_LIMIT:-180}
+
+i=0
+state=unknown
+while [ "$i" -lt "$LIMIT" ]; do
+  state=$($SYSTEMCTL is-system-running 2>/dev/null || :)
+  case "$state" in running|degraded) break;; esac
+  sleep 1
+  i=$((i + 1))
+done
+if [ -f "$LOG" ]; then
+  mv -f "$LOG" "$LOG.1"
+fi
+{
+  printf 'M18 analyze v1 boot=%s state=%s waited=%s\n' "$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || echo none)" "$state" "$i"
+  printf '== time\n'
+  $ANALYZE time 2>&1 || :
+  printf '== blame\n'
+  $ANALYZE blame --no-pager 2>&1 | head -n 40 || :
+  printf '== critical-chain\n'
+  $ANALYZE critical-chain --no-pager 2>&1 | head -n 60 || :
+} >"$LOG"
+exit 0

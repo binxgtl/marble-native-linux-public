@@ -1,0 +1,22 @@
+#!/bin/sh
+# M18 R1: after the keypad (marble-ce.service's ExecStopPost). The keypad's one status line ("M19_CE status=WORD ...":
+# status codes and counts only, never the PIN) goes to the session's record, and once Android's storage is unlocked the
+# menu's entry is hidden. M18_RUN and M18_LIB are for the tests.
+set -eu
+RUN=${M18_RUN:-/run/m19}
+LIB=${M18_LIB:-/var/lib/m19}
+result=$RUN/ce.result
+entry=$RUN/xdg-data/applications/m18-unlock-android.desktop
+line=none
+if [ -f "$result" ]; then
+  line=$(head -n 1 "$result" | tr -cd 'A-Za-z0-9_=. -')
+fi
+up=$(cut -d ' ' -f 1 /proc/uptime 2>/dev/null || echo 0)
+printf '%s M18 ce %s\n' "$up" "$line" >>"$LIB/m18-ce.log" || :
+case "$line" in
+  "M19_CE status=OK"*)
+    if [ -f "$entry" ]; then
+      sed -i 's/^NoDisplay=false$/NoDisplay=true/' "$entry"
+    fi;;
+esac
+exit 0

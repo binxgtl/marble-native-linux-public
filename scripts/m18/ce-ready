@@ -1,0 +1,56 @@
+#!/bin/sh
+# M18 R1 (docs/m18-performance-polish.md): before the keypad (marble-ce.service, opened from the menu), a CE broker
+# listening on the session's /run/m19/ce/ce.sock.
+#  1. The boot's broker (T9-ce's, R7's), while it still waits (its 30 minutes): it is used as it is.
+#  2. Otherwise a fresh one, the same /m19/m19-ce R7 proved, one attempt, inside the TEE island: through the root of a
+#     process that lives in the island (its /m19/m19-ce and the socket directory T9-ce bound to /m19-ce), which the
+#     hand-off spared. It runs in this unit's group, so it ends with the keypad.
+# Nothing here reads, sends or logs a PIN. M18_PROC and M18_RUN are for the tests.
+set -eu
+PROC=${M18_PROC:-/proc}
+RUN=${M18_RUN:-/run/m19}
+WAIT=${M18_WAIT:-100}
+sock=$RUN/ce/ce.sock
+say() { printf 'M18 ce-ready %s\n' "$*" >&2; }
+
+for p in "$PROC"/[0-9]*; do
+  [ -r "$p/cmdline" ] || continue
+  cmd=$(tr '\000' ' ' <"$p/cmdline" 2>/dev/null) || continue
+  case "$cmd" in
+    "/m19/m19-ce broker /m19-ce/ce.sock "*)
+      if [ -S "$sock" ]; then
+        say "broker=boot pid=${p##*/}"
+        exit 0
+      fi;;
+  esac
+done
+
+island=
+for p in "$PROC"/[0-9]*; do
+  if [ -f "$p/root/m19/m19-ce" ] && [ -d "$p/root/m19-ce" ]; then
+    island=$p/root
+    break
+  fi
+done
+if [ -z "$island" ]; then
+  say "broker=none why=no-island"
+  exit 1
+fi
+# a socket the boot's broker left when it ended; the broker refuses an existing path
+if [ -e "$sock" ] || [ -L "$sock" ]; then
+  rm -f "$sock"
+fi
+LD_LIBRARY_PATH=/system/lib64:/vendor/lib64/hw setsid ${M18_CHROOT:-chroot} "$island" /m19/m19-ce broker /m19-ce/ce.sock \
+  </dev/null >/dev/null 2>&1 &
+i=0
+while [ ! -S "$sock" ]; do
+  if [ "$i" -ge "$WAIT" ]; then
+    say "broker=none why=no-socket"
+    exit 1
+  fi
+  sleep 0.1
+  i=$((i + 1))
+done
+p=${island%/root}
+say "broker=fresh island=${p##*/}"
+exit 0

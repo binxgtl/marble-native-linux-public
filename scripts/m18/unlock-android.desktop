@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Unlock Android storage
+Name[vi]=Mở khóa dữ liệu Android
+Comment=Type the phone's PIN to read Android's files in /media/Android
+Comment[vi]=Nhập mã PIN để đọc tệp của Android trong /media/Android
+Exec=systemctl start --no-block marble-ce.service
+Icon=dialog-password
+Terminal=false
+Categories=System;Utility;
+NoDisplay=false

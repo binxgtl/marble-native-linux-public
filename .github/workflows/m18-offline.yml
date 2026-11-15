@@ -1,0 +1,47 @@
+name: M18 performance and polish offline
+on:
+  push:
+    branches: [m18/performance-polish]
+    paths: ['scripts/m18/**', '.github/workflows/m18-offline.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: m18-offline-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  regression:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: M18 R1 copies against M17, M17's native-path and session tests on M18's copies (normal and ASan/UBSan), the plan on M19 R9's own plan, the scripts on synthetic trees, then static binaries twice (no device)
+        timeout-minutes: 10
+        run: bash scripts/m18/test.sh artifacts/m18/${{ runner.arch }}
+      - name: Upload the reviewable static binaries (ARM64 only, no boot image)
+        if: runner.arch == 'ARM64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: m18-native-ARM64-${{ github.sha }}
+          path: |
+            artifacts/m18/ARM64/m18-native-a
+            artifacts/m18/ARM64/m18-native-b
+            artifacts/m18/ARM64/m17-native-a
+            artifacts/m18/ARM64/m17-native-b
+            artifacts/m18/ARM64/m17-selector-native-a
+            artifacts/m18/ARM64/m17-selector-native-b
+            artifacts/m18/ARM64/m18-binaries.txt
+          if-no-files-found: error
+          retention-days: 30
+  mutants:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Mutants of M18's copies and scripts (no device)
+        timeout-minutes: 25
+        run: python3 scripts/m18/mutate.py
