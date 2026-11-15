@@ -53,6 +53,22 @@ MUTANTS = [
     ('thermal', "    ''|*[!0-9]*) ;;", "    '') ;;"),
     ('thermal', '  digits=${t#-}', '  digits=$t'),
     ('thermal', 'zones=$((zones + 1))', 'zones=$((zones + 0))'),
+    # R3 spinner: the head, its trail and floor, the clear, the dots' shape and bounds, the timeline's file
+    ('bye.c', 'const unsigned head = (frame / M18_BYE_STEP_FRAMES) % M18_BYE_DOTS;', 'const unsigned head = frame % M18_BYE_DOTS;'),
+    ('bye.c', 'const int level = 255 - 20 * (int)behind;', 'const int level = 255 - 10 * (int)behind;'),
+    ('bye.c', 'return (uint32_t)(level < 40 ? 40 : level);', 'return (uint32_t)(level < 0 ? 0 : level);'),
+    ('bye.c', '(head + M18_BYE_DOTS - dot % M18_BYE_DOTS) % M18_BYE_DOTS', '(dot % M18_BYE_DOTS + M18_BYE_DOTS - head) % M18_BYE_DOTS'),
+    ('bye.c', 'if (!pixels || !width || !height || pitch < width)', 'if (!pixels || !width || !height)'),
+    ('bye.c', '        memset(pixels + (size_t)y * pitch + x0, 0, (size_t)(x1 - x0) * sizeof(uint32_t));\n', ''),
+    ('bye.c', 'if (ex * ex + ey * ey <= r * r)', 'if (ex * ex + ey * ey < r * r)'),
+    ('bye.c', '            if (x < 0 || x >= (int)width)\n                    continue;\n', ''),
+    ('bye.c', 'const int box = (int)(M18_BYE_RING + M18_BYE_DOT + 2);', 'const int box = (int)(M18_BYE_RING);'),
+    ('bye.c', 'O_WRONLY | O_APPEND | O_CREAT | O_NOFOLLOW | O_CLOEXEC', 'O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC'),
+    ('bye.c', 'O_WRONLY | O_APPEND | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600', 'O_WRONLY | O_APPEND | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0644'),
+    # R3 mark: filtered, appended, never failing
+    ('mark', "| tr -cd 'A-Za-z0-9-')", ')'),
+    ('mark', '>>"$LIB/m18-shutdown.log" 2>/dev/null || :', '>"$LIB/m18-shutdown.log" 2>/dev/null || :'),
+    ('mark', '"${word:-none}"', '"$word"'),
     # boot-analyze: waits for the start, keeps the previous boot's account
     ('boot-analyze', 'running|degraded) break;;', 'nothing) break;;'),
     ('boot-analyze', '  mv -f "$LOG" "$LOG.1"', '  rm -f "$LOG"'),

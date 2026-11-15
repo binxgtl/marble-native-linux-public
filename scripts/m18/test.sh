@@ -21,16 +21,19 @@ for variant in "${variants[@]}"; do
   fi
   gcc "${flags[@]}" "$m17/select.c" "$m17/load.c" "$src/native.c" "$m17/cmd.c" "$src/session.c" "$m17/volkeys.c" "$src/test-r1.c" \
     -o "$out/test-r1-$variant"
+  gcc "${flags[@]}" "$src/bye.c" "$src/test-r3.c" -lm -o "$out/test-r3-$variant"
 done
 rc=0
 for variant in "${variants[@]}"; do
   TMPDIR=$(mktemp -d) "$out/test-r1-$variant" >"$out/test-r1-$variant.txt" 2>&1 || rc=1
   cat "$out/test-r1-$variant.txt"
+  TMPDIR=$(mktemp -d) "$out/test-r3-$variant" || rc=1
 done
 python3 "$src/test-r1.py" || rc=1
 python3 "$src/test-r2.py" || rc=1
+python3 "$src/test-r3.py" || rc=1
 [[ $rc -eq 0 ]] || { echo "M18 tests failed" >&2; exit 1; }
-echo "M18 R1 and R2 copies, native path, session, plans and scripts PASS (${variants[*]})"
+echo "M18 R1 to R3 copies, native path, session, spinner, plans and scripts PASS (${variants[*]})"
 
 [[ ${M18_STATIC:-1} == 1 ]] || exit 0
 # The phone's binaries: M18's native path (its copies of native.c, session.c and native-main.c), M17's native path and
@@ -43,8 +46,10 @@ for copy in a b; do
     "$m17/native.c" "$m17/cmd.c" "$m17/session.c" "$m17/volkeys.c" "$m17/native-main.c" -o "$out/m17-native-$copy"
   gcc "${flags[@]}" -DM17_NATIVE_BUILD=1 "$m17/select.c" "$m17/selector.c" "$m17/menu.c" "$m17/modules.c" "$m17/kms.c" \
     "$m17/selector-main.c" -o "$out/m17-selector-native-$copy"
+  # R3: the shutdown's spinner, with the selector's KMS code
+  gcc "${flags[@]}" -I"$m17" "$src/bye.c" "$src/bye-main.c" "$m17/kms.c" -lm -o "$out/m18-bye-$copy"
 done
-for name in m18-native m17-native m17-selector-native; do
+for name in m18-native m17-native m17-selector-native m18-bye; do
   cmp "$out/$name-a" "$out/$name-b"
   sha256sum "$out/$name-a"
 done | tee "$out/m18-binaries.txt"

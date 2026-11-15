@@ -1,0 +1,7 @@
+#!/bin/sh
+# M18 R3 (docs/m18-r3.md): one mark in /var/lib/m19/m18-shutdown.log, from a unit's ExecStop when the shutdown begins.
+# The word is letters, digits and dashes only. M18_LIB is for the tests.
+LIB=${M18_LIB:-/var/lib/m19}
+word=$(printf '%s' "${1:-none}" | tr -cd 'A-Za-z0-9-')
+printf '%s M18 mark %s\n' "$(cut -d ' ' -f 1 /proc/uptime 2>/dev/null || echo 0)" "${word:-none}" >>"$LIB/m18-shutdown.log" 2>/dev/null || :
+exit 0
