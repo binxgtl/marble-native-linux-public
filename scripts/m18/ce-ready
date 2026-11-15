@@ -5,13 +5,18 @@
 #  2. Otherwise a fresh one, the same /m19/m19-ce R7 proved, one attempt, inside the TEE island: through the root of a
 #     process that lives in the island (its /m19/m19-ce and the socket directory T9-ce bound to /m19-ce), which the
 #     hand-off spared. It runs in this unit's group, so it ends with the keypad.
-# Nothing here reads, sends or logs a PIN. M18_PROC and M18_RUN are for the tests.
+# Each outcome is one line on stderr (the journal) and in /var/lib/m19/m18-ce.log. Nothing here reads, sends or logs a
+# PIN. M18_PROC, M18_RUN and M18_LIB are for the tests.
 set -eu
 PROC=${M18_PROC:-/proc}
 RUN=${M18_RUN:-/run/m19}
+LIB=${M18_LIB:-/var/lib/m19}
 WAIT=${M18_WAIT:-100}
 sock=$RUN/ce/ce.sock
-say() { printf 'M18 ce-ready %s\n' "$*" >&2; }
+say() {
+  printf 'M18 ce-ready %s\n' "$*" >&2
+  printf '%s M18 ce-ready %s\n' "$(cut -d ' ' -f 1 /proc/uptime 2>/dev/null || echo 0)" "$*" >>"$LIB/m18-ce.log" 2>/dev/null || :
+}
 
 for p in "$PROC"/[0-9]*; do
   [ -r "$p/cmdline" ] || continue

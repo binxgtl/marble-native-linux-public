@@ -111,8 +111,13 @@ class CeReady(unittest.TestCase):
                                's.bind(sys.argv[1]); time.sleep(3)" "$M18_TEST_SOCK"\n')
         self.chroot.chmod(0o755)
         self.calls = self.dir / 'calls'
+        self.lib = self.dir / 'lib'
+        self.lib.mkdir()
         self.env = {'M18_PROC': str(self.proc), 'M18_RUN': str(self.run), 'M18_CHROOT': str(self.chroot), 'M18_WAIT': '50',
-                    'M18_TEST_CALLS': str(self.calls), 'M18_TEST_SOCK': str(self.sock)}
+                    'M18_TEST_CALLS': str(self.calls), 'M18_TEST_SOCK': str(self.sock), 'M18_LIB': str(self.lib)}
+
+    def logged(self):
+        return (self.lib / 'm18-ce.log').read_text()
 
     def tearDown(self):
         if self.listener:
@@ -141,6 +146,7 @@ class CeReady(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn('broker=boot pid=10', r.stderr)
         self.assertFalse(self.calls.exists())
+        self.assertIn(' M18 ce-ready broker=boot pid=10\n', self.logged())
 
     def test_starts_a_fresh_broker_in_the_island(self):
         self.process(5, b'/usr/bin/Xorg\0')
@@ -182,6 +188,7 @@ class CeReady(unittest.TestCase):
         r = sh('ce-ready', self.env)
         self.assertEqual(r.returncode, 1)
         self.assertIn('broker=none why=no-island', r.stderr)
+        self.assertIn(' M18 ce-ready broker=none why=no-island\n', self.logged())
 
     def test_no_socket(self):
         self.process(7, b'', island=True)

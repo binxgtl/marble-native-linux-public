@@ -40,6 +40,19 @@ COPIES = {
          '#!/bin/busybox sh\n# M18 R1: M17 G5\'s, with the payload a plain tar (scripts/m18/copies.py); the ramdisk is compressed already.\n', 1),
         ('/m19/payload.tar.xz', '/m19/payload.tar', 3),
         ('$BB tar -xJpf ', '$BB tar -xpf ', 1),
+        # the old root stays in RAM for the whole session (the TEE island lives there): the 32 MB archive goes once unpacked
+        ('$BB tar -xpf /m19/payload.tar -C / || hold payload-archive-extract\n',
+         '$BB tar -xpf /m19/payload.tar -C / || hold payload-archive-extract\n$BB rm -f /m19/payload.tar || hold payload-archive-remove\n', 1),
+    ]),
+    # M17's single boot, for M18's candidates: its manifests and its reservation marker under m18.
+    'scripts/m18/one-shot.ps1': ('scripts/m17/one-shot.ps1', [
+        ('# M17: the single boot of a frozen G3 or later image (docs/m17-g3.md, docs/m17-g4.md).',
+         '# M18: M17\'s single boot (scripts/m17/one-shot.ps1, with the substitutions in scripts/m18/copies.py), for a frozen M18 image.\n'
+         '# M17: the single boot of a frozen G3 or later image (docs/m17-g3.md, docs/m17-g4.md).', 1),
+        ("if($ManifestPath -notmatch '^manifests/m17-g[3-9][a-z]-candidate\\.json$'){throw 'Manifest must be a new g3a..g9z candidate'}",
+         "if($ManifestPath -notmatch '^manifests/m18-r[1-9][a-z]-candidate\\.json$'){throw 'Manifest must be a new r1a..r9z candidate'}", 1),
+        ('$marker=Join-Path $root "artifacts/m17/$($manifest.label)-candidate/execution-reserved.json"',
+         '$marker=Join-Path $root "artifacts/m18/$($manifest.label)-candidate/execution-reserved.json"', 1),
     ]),
     # M17's tests on the copies: a PASS paints only blue, then (blue_ms 0) nothing; a session without a CE unit.
     'scripts/m18/test-r1.c': ('scripts/m17/test-g5.c', [

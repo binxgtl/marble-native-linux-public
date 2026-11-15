@@ -15,6 +15,7 @@ hold() { printf "M17 native bootstrap failed: %s\n" "$*" >&2 || :; exit 1; }
 (cd / && $BB sha256sum -c /m19/payload.tar.sha256) || hold payload-archive-hash
 [ ! -e /sbin/m16-display ] && [ ! -e /m6 ] || hold payload-destination-exists
 $BB tar -xpf /m19/payload.tar -C / || hold payload-archive-extract
+$BB rm -f /m19/payload.tar || hold payload-archive-remove
 (cd / && $BB sha256sum -c /m19/files.sha256) || hold staged-hashes
 /sbin/m19-pid1 load /m19/closure.tsv /m17/modules.list || hold modules
 [ "$($BB wc -l </proc/modules)" -eq 104 ] || hold module-count

@@ -28,6 +28,7 @@ MUTANTS = [
     ('ce-ready', 'if [ -z "$island" ]; then', 'if false; then'),
     ('ce-ready', '    say "broker=none why=no-socket"\n    exit 1', '    say "broker=none why=no-socket"\n    exit 0'),
     ('ce-ready', ' /m19/m19-ce broker /m19-ce/ce.sock \\\n', ' /m19/m19-ce broker /m19-ce/other.sock \\\n'),
+    ('ce-ready', '>>"$LIB/m18-ce.log" 2>/dev/null || :', '>/dev/null 2>/dev/null || :'),
     # ce-done: hide only once unlocked, the status line filtered, recorded
     ('ce-done', '  "M19_CE status=OK"*)', '  "M19_CE status="*)'),
     ('ce-done', "sed -i 's/^NoDisplay=false$/NoDisplay=true/'", "sed -i 's/^NoDisplay=true$/NoDisplay=false/'"),
