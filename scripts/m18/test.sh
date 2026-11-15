@@ -28,8 +28,9 @@ for variant in "${variants[@]}"; do
   cat "$out/test-r1-$variant.txt"
 done
 python3 "$src/test-r1.py" || rc=1
+python3 "$src/test-r2.py" || rc=1
 [[ $rc -eq 0 ]] || { echo "M18 tests failed" >&2; exit 1; }
-echo "M18 R1 copies, native path, session, plan and scripts PASS (${variants[*]})"
+echo "M18 R1 and R2 copies, native path, session, plans and scripts PASS (${variants[*]})"
 
 [[ ${M18_STATIC:-1} == 1 ]] || exit 0
 # The phone's binaries: M18's native path (its copies of native.c, session.c and native-main.c), M17's native path and

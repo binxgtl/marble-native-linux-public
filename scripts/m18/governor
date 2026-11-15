@@ -1,0 +1,40 @@
+#!/bin/sh
+# M18 R2 (docs/m18-r2.md): every CPU policy to the governor stock Android uses, walt (sched-walt.ko is in the native
+# closure), or schedutil when walt is not offered; never performance. Each policy's outcome, read back, is one line in
+# /var/lib/m19/m18-tune.log. Under load walt raises a policy to its scaling_max_freq, which nothing native lowers; idle,
+# it lets the policy drop. M18_SYS and M18_LIB are for the tests.
+set -u
+SYS=${M18_SYS:-/sys}
+LIB=${M18_LIB:-/var/lib/m19}
+up=$(cut -d ' ' -f 1 /proc/uptime 2>/dev/null || echo 0)
+rc=0
+for p in "$SYS"/devices/system/cpu/cpufreq/policy*; do
+  [ -f "$p/scaling_available_governors" ] || continue
+  offered=$(cat "$p/scaling_available_governors" 2>/dev/null || :)
+  want=
+  for g in walt schedutil; do
+    case " $offered " in
+      *" $g "*) want=$g; break;;
+    esac
+  done
+  before=$(cat "$p/scaling_governor" 2>/dev/null || echo -)
+  if [ -z "$want" ]; then
+    printf '%s M18 governor %s before=%s offered=%s set=none\n' "$up" "${p##*/}" "$before" "$(echo $offered | tr ' ' ',')" >>"$LIB/m18-tune.log"
+    rc=1
+    continue
+  fi
+  printf '%s\n' "$want" >"$p/scaling_governor" 2>/dev/null || :
+  now=$(cat "$p/scaling_governor" 2>/dev/null || echo -)
+  [ "$now" = "$want" ] || rc=1
+  printf '%s M18 governor %s before=%s offered=%s set=%s now=%s max=%s\n' "$up" "${p##*/}" "$before" "$(echo $offered | tr ' ' ',')" \
+    "$want" "$now" "$(cat "$p/scaling_max_freq" 2>/dev/null || echo -)" >>"$LIB/m18-tune.log"
+  # walt's own tunables as the native boot leaves them (read only; stock's: hispeed_load 90, rate limits 0)
+  if [ "$now" = walt ] && [ -d "$p/walt" ]; then
+    tun=
+    for f in hispeed_freq hispeed_load target_load_thresh up_rate_limit_us down_rate_limit_us boost; do
+      tun="$tun $f=$(cat "$p/walt/$f" 2>/dev/null || echo -)"
+    done
+    printf '%s M18 walt %s%s\n' "$up" "${p##*/}" "$tun" >>"$LIB/m18-tune.log"
+  fi
+done
+exit "$rc"

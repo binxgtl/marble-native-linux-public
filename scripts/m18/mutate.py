@@ -41,6 +41,17 @@ MUTANTS = [
     ('perf-recorder', '"$(wc -c <"$LOG")" -ge "$LIMIT"', '"$(wc -c <"$LOG")" -ge 999999999'),
     ('perf-recorder', '[ "$n" -ge "$COUNT" ]', '[ "$n" -gt "$COUNT" ]'),
     ('perf-recorder', "grep -m 1 '^MemAvailable:'", "grep -m 1 '^MemFree:'"),
+    # R2 governor: walt first, then schedutil, never anything else; the read-back decides; walt's tunables recorded
+    ('governor', '  for g in walt schedutil; do', '  for g in schedutil walt; do'),
+    ('governor', '  for g in walt schedutil; do', '  for g in walt schedutil performance; do'),
+    ('governor', '  [ "$now" = "$want" ] || rc=1', '  :'),
+    ('governor', '    rc=1\n    continue', '    continue'),
+    ('governor', 'for f in hispeed_freq hispeed_load target_load_thresh', 'for f in hispeed_freq target_load_thresh'),
+    # R2 thermal: load once, a failed load fails the unit, only numbers count as readable
+    ('thermal', "if ! grep -q '^qcom_tsens ' \"$PROC/modules\" 2>/dev/null; then", 'if true; then'),
+    ('thermal', '    loaded=failed\n    rc=1', '    loaded=failed'),
+    ('thermal', "    ''|*[!0-9-]*) ;;", "    '') ;;"),
+    ('thermal', 'zones=$((zones + 1))', 'zones=$((zones + 0))'),
     # boot-analyze: waits for the start, keeps the previous boot's account
     ('boot-analyze', 'running|degraded) break;;', 'nothing) break;;'),
     ('boot-analyze', '  mv -f "$LOG" "$LOG.1"', '  rm -f "$LOG"'),

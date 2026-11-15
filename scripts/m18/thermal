@@ -1,0 +1,38 @@
+#!/bin/sh
+# M18 R2 (docs/m18-r2.md): the SoC's temperature sensors back. Stock loads qcom_tsens.ko from its vendor ramdisk (9th in
+# modules.load); its dependencies (qcom_ipc_logging, minidump, smem) are in the native closure since M6. The image
+# carries the stock module, byte for byte, at /run/m19/etc/qcom_tsens.ko. Loaded once; then how many thermal zones read,
+# of how many, is one line in /var/lib/m19/m18-tune.log. M18_SYS, M18_PROC, M18_LIB, M18_INSMOD and M18_MODULE are for
+# the tests.
+set -u
+SYS=${M18_SYS:-/sys}
+PROC=${M18_PROC:-/proc}
+LIB=${M18_LIB:-/var/lib/m19}
+INSMOD=${M18_INSMOD:-insmod}
+MODULE=${M18_MODULE:-/run/m19/etc/qcom_tsens.ko}
+up=$(cut -d ' ' -f 1 /proc/uptime 2>/dev/null || echo 0)
+loaded=already
+rc=0
+if ! grep -q '^qcom_tsens ' "$PROC/modules" 2>/dev/null; then
+  if $INSMOD "$MODULE" 2>/dev/null; then
+    loaded=now
+  else
+    loaded=failed
+    rc=1
+  fi
+fi
+sleep "${M18_SETTLE:-2}"
+zones=0
+readable=0
+for z in "$SYS"/class/thermal/thermal_zone*; do
+  [ -d "$z" ] || continue
+  zones=$((zones + 1))
+  t=
+  read -r t <"$z/temp" 2>/dev/null || :
+  case "$t" in
+    ''|*[!0-9-]*) ;;
+    *) readable=$((readable + 1));;
+  esac
+done
+printf '%s M18 thermal qcom_tsens=%s zones=%s readable=%s\n' "$up" "$loaded" "$zones" "$readable" >>"$LIB/m18-tune.log"
+exit "$rc"
