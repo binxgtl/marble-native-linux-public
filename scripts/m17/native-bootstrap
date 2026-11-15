@@ -1,0 +1,32 @@
+#!/bin/busybox sh
+# M17 G5 (docs/m17-g5.md): M19's bootstrap (scripts/m19/run1/bootstrap) for a boot the selector started, then R5a's
+# audio stage, as M19's bootstrap-audio runs the two. What differs from M19's:
+#  - the selector already loaded its 98 modules (/m17/modules.list): the display without the two touch modules, and
+#    the keys. The rest of M19's 102 load here in the closure's order, every module the kernel has skipped (load.c),
+#    so M7's touch modules load while the selector's panel holder keeps the panel lit;
+#  - the count is the union's, 104: M19's 102 and the two key-only modules, reboot-mode and qcom-pon. The audio stage
+#    and T9-gpu in this image count two more than M19's for the same reason (scripts/m17/dailyplan.py).
+# Nothing else: the payload and every staged file checked by hash, then the display node.
+set -eu
+BB=/bin/busybox
+hold() { printf "M17 native bootstrap failed: %s\n" "$*" >&2 || :; exit 1; }
+[ -e /m19/payload.tar.xz ] || hold payload-missing
+(cd / && $BB sha256sum -c /m19/payload.tar.xz.sha256) || hold payload-archive-hash
+[ ! -e /sbin/m16-display ] && [ ! -e /m6 ] || hold payload-destination-exists
+$BB tar -xJpf /m19/payload.tar.xz -C / || hold payload-archive-extract
+(cd / && $BB sha256sum -c /m19/files.sha256) || hold staged-hashes
+/sbin/m19-pid1 load /m19/closure.tsv /m17/modules.list || hold modules
+[ "$($BB wc -l </proc/modules)" -eq 104 ] || hold module-count
+link=
+i=0
+while [ "$i" -lt 300 ]; do
+ link=$($BB readlink -f /sys/class/drm/card0/device || :)
+ case "$link" in */ae00000.qcom,mdss_mdp) break;; esac
+ $BB sleep 0.1; i=$((i+1))
+done
+[ "$i" -lt 300 ] || hold mdss-card
+devno=$($BB cat /sys/class/drm/card0/dev) || hold card-dev
+major=${devno%%:*}; minor=${devno#*:}
+case "$major:$minor" in *[!0-9:]*|:*|*:) hold card-dev-format;; esac
+$BB mknod -m 600 /dev/dri/card0 c "$major" "$minor" || hold card-node
+exec /m19/audio-stage
