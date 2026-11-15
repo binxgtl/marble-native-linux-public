@@ -121,7 +121,7 @@ class Counts(unittest.TestCase):
 
 
 class SinkCopy(unittest.TestCase):
-    """G5b: M17's sink stream and entry are M19 R6's byte for byte outside their marked probe blocks."""
+    """G5b/G5c: M17's sink stream and entry are M19 R6's byte for byte outside their marked probe blocks."""
     BEGIN, END = '/* M17 PROBE BEGIN */\n', '/* M17 PROBE END */\n'
 
     def unmarked(self, text):
@@ -137,24 +137,54 @@ class SinkCopy(unittest.TestCase):
             at = end + len(self.END)
 
     def test_copies(self):
-        for mine, theirs, blocks in (('scripts/m17/sink-stream.c', 'scripts/m19/run6/stream.c', 5),
+        for mine, theirs, blocks in (('scripts/m17/sink-stream.c', 'scripts/m19/run6/stream.c', 7),
                                      ('scripts/m17/sink-main.c', 'scripts/m19/run6/sink-main.c', 3)):
             text = (ROOT / mine).read_text(encoding='utf-8')
             self.assertEqual(text.count(self.BEGIN), blocks, mine)
             self.assertEqual(text.count(self.END), blocks, mine)
             self.assertEqual(self.unmarked(text), (ROOT / theirs).read_text(encoding='utf-8'), mine)
 
+    def blocks(self):
+        text = (ROOT / 'scripts/m17/sink-stream.c').read_text(encoding='utf-8')
+        return ''.join(text[b:text.index(self.END, b)] for b in [i for i in range(len(text)) if text.startswith(self.BEGIN, i)])
+
     def test_probe_is_read_only(self):
         """The blocks send only the read command and the read, to the protection module, through the custodian."""
-        text = (ROOT / 'scripts/m17/sink-stream.c').read_text(encoding='utf-8')
-        blocks = ''.join(text[b:text.index(self.END, b)] for b in [i for i in range(len(text)) if text.startswith(self.BEGIN, i)])
+        blocks = self.blocks()
         self.assertEqual(blocks.count('m11_custodian_cfg_observed('), 1)
         self.assertEqual(blocks.count('probe_round(s, '), 2)
         self.assertIn('probe_round(s, M11_APM_CMD_SET_CFG, cmd, m17_aw_status_cmd(cmd)', blocks)
         self.assertIn('probe_round(s, M11_APM_CMD_GET_CFG, req, m17_aw_status_req(req)', blocks)
-        for word in ('m11_snd_ctl_set', 'gain_q15 =', 'peak_limit =', 'set_switches', 'amp_set(', 'm11_custodian_data_submit',
-                     'm11_custodian_graph_cmd'):
+        for word in ('m11_snd_ctl_set', 'set_switches', 'amp_set(', 'm11_custodian_data_submit', 'm11_custodian_graph_cmd',
+                     'sio->gain_q15 =', 'sio->peak_limit =', 'm17_probe.gain_q15 =', 'm17_probe.peak_limit ='):
             self.assertNotIn(word, blocks)
+
+    def test_louder_only_under_the_backstop(self):
+        """G5c: the gain is raised in one place, only when the backstop is valid, and every other write puts M19's back."""
+        blocks = self.blocks()
+        raises = ['        m17_sio.gain_q15 = m17_probe.gain_q15;\n', '        m17_sio.peak_limit = m17_probe.peak_limit;\n']
+        drops = ['    m17_sio.gain_q15 = M19_STREAM_GAIN_Q15;\n', '    m17_sio.peak_limit = M19_STREAM_PEAK;\n']
+        for line in raises + drops:
+            self.assertEqual(blocks.count(line), 1, line)
+        self.assertEqual(blocks.count('gain_q15 ='), 2)
+        self.assertEqual(blocks.count('peak_limit ='), 2)
+        guard = blocks.index('    if (m17_backstop_valid(&m17_probe)) {\n')
+        self.assertTrue(all(guard < blocks.index(line) < blocks.index('    }\n', guard) for line in raises))
+        self.assertEqual(blocks.count('s->sio = &m17_sio;'), 1)
+        self.assertEqual(blocks.count('s->sio ='), 1)
+        self.assertGreater(blocks.index('s->sio = &m17_sio;'), guard)
+        self.assertEqual(blocks.count('m17_louder = 1;'), 1)
+        # a drop records why; a failed probe or log while louder drops
+        self.assertIn('if (why) m17_drop_gain(s, why);', blocks)
+        self.assertIn('if (m17_louder && !m17_state.dropped) m17_drop_gain(s, M17_DROP_PROBE);', blocks)
+        self.assertEqual(blocks.count('m17_drop_gain(s, '), 2)
+
+    def test_entry_values(self):
+        """G5c's entry: probe every 2 s, unity gain, T = 45, Re 3000 to 12000 mOhm, 10 references while -20 dBFS."""
+        text = (ROOT / 'scripts/m17/sink-main.c').read_text(encoding='utf-8')
+        for want in ('.period_ms = 2000u', '.gain_q15 = 32768', '.peak_limit = 32767', '.te_limit = 45', '.re_min = 3000',
+                     '.re_max = 12000', '.ref_limit = 10', '.loud_peak = 3277', '.log = "/var/lib/m19/m17-aw.log"'):
+            self.assertEqual(text.count(want), 1, want)
 
 
 if __name__ == '__main__':

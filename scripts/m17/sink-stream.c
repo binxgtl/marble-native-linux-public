@@ -1,8 +1,13 @@
 /* M17 PROBE BEGIN */
-/* M17 G5b: M19 R6's stream.c (scripts/m19/run6/stream.c), byte for byte outside these marked blocks, with the
- * speaker protection probe (awprobe.h, docs/m17-speaker-protection.md): while the amplifiers are on, every
- * m17_probe.period_ms, the AW protection module's live status is read through the custodian and written to
- * m17_probe.log. A probe that fails is recorded once and never sent again; it never ends the stream. */
+/* M17 G5b/G5c: M19 R6's stream.c (scripts/m19/run6/stream.c), byte for byte outside these marked blocks, with the
+ * speaker protection probe and the loudness backstop (awprobe.h, docs/m17-loudness-plan.md):
+ *  - while the amplifiers are on, every m17_probe.period_ms, the AW protection module's live status is read through
+ *    the custodian and written to m17_probe.log;
+ *  - G5b (no louder gain configured): a probe that fails is recorded once and never sent again; it never ends the
+ *    stream;
+ *  - G5c (m17_backstop_valid): after the chord the stream plays at m17_probe's gain and clamp instead of M19's, until
+ *    the backstop drops them back to M19's for the rest of the boot (a failed probe or log, a live temperature or Re
+ *    out of bounds, or no live reply for too long while the sound is loud). Nothing raises them again. */
 /* M17 PROBE END */
 /* M19 R6: the desktop speaker stream (stream.h). Generated from M11 Run31's speaker_session_native.c: steps 1 to 7
  * and the teardown are that file's, unchanged; stream_loop, amp_set and stream_fill are new, and run() calls the
@@ -14,6 +19,12 @@
 #include "stream.h"
 /* M17 PROBE BEGIN */
 #include "awprobe.h"
+/* G5c: the io the stream uses while louder (stream_loop points the session at it), the backstop's state, and the
+ * output peak since the last probe */
+static m19_stream_io m17_sio;
+static struct m17_backstop_state m17_state;
+static int32_t m17_recent_peak;
+static int m17_louder;
 /* M17 PROBE END */
 #include "../qualification/runtime-repair/m11_apm_protocol.h"
 #include <errno.h>
@@ -278,6 +289,12 @@ static int stream_fill(sess *s, unsigned i, uint32_t chunk, uint32_t stride, uin
     }
     st->bytes_in += got;
     const int loud = m19_stream_scale((int16_t *)(void *)scratch, chunk / 2u, sio->gain_q15, sio->peak_limit, &st->peak_in, &st->peak_out);
+/* M17 PROBE BEGIN */
+    for (size_t k = 0; k < chunk / 2u; k++) {
+        const int32_t v = ((const int16_t *)(const void *)scratch)[k], m = v < 0 ? -v : v;
+        if (m > m17_recent_peak) m17_recent_peak = m;
+    }
+/* M17 PROBE END */
     const uint64_t t = now(s);
     int rc;
     if (loud) {
@@ -302,7 +319,15 @@ static int probe_round(sess *s, uint32_t op, const uint8_t *pkt, size_t len, voi
     return rc;
 }
 
-/* one probe: logged whatever it returns; a failure turns the probe off for the rest of the stream */
+/* G5c: M19's gain and clamp back, for the rest of the boot */
+static void m17_drop_gain(sess *s, enum m17_drop why) {
+    m17_state.dropped = why;
+    m17_sio.gain_q15 = M19_STREAM_GAIN_Q15;
+    m17_sio.peak_limit = M19_STREAM_PEAK;
+    rec(s, "phase=stream m17_backstop drop=%s gain=%d limit=%d", m17_drop_name(why), m17_sio.gain_q15, m17_sio.peak_limit);
+}
+
+/* one probe, logged whatever it returns; a failed probe or log turns the probe off, and while louder also drops the gain */
 static void aw_probe(sess *s, int *off) {
     uint8_t cmd[M17_AW_CMD_BYTES], req[M17_AW_REQ_BYTES], rsp[128];
     size_t got = 0;
@@ -312,9 +337,17 @@ static void aw_probe(sess *s, int *off) {
     int rc = probe_round(s, M11_APM_CMD_SET_CFG, cmd, m17_aw_status_cmd(cmd), NULL, 0, NULL, &status);
     if (!rc) rc = probe_round(s, M11_APM_CMD_GET_CFG, req, m17_aw_status_req(req), rsp, sizeof rsp, &got, &status);
     if (!rc) rc = m17_aw_status_parse(rsp, got, &st);
-    int lrc = m17_aw_status_log(m17_probe.log, m17_probe.log_limit, &st, s->sst->amp_on, s->sst->peak_out, rc, status);
+    const int live = !rc && !m17_aw_status_is_reference(&st);
+    if (m17_louder) {
+        const enum m17_drop why = m17_backstop_step(&m17_probe.backstop, &m17_state, rc, &st, m17_recent_peak);
+        if (why) m17_drop_gain(s, why);
+    }
+    m17_recent_peak = 0;
+    int lrc = m17_aw_status_log(m17_probe.log, m17_probe.log_limit, &st, s->sst->amp_on, s->sst->peak_out, rc, status,
+                                s->sio->gain_q15, live, m17_state.dropped);
     if (rc || lrc) {
         *off = 1;
+        if (m17_louder && !m17_state.dropped) m17_drop_gain(s, M17_DROP_PROBE);
         rec(s, "phase=stream aw_probe rc=%d status=%08x log=%d off", rc, status, lrc);
     }
 }
@@ -322,6 +355,18 @@ static void aw_probe(sess *s, int *off) {
 /* M19 R6: after the chord, the server's PCM through the same write buffers until stop_fn; the buffers in flight
  * complete before the return, so the teardown starts from a quiet graph */
 static int stream_loop(sess *s, uint32_t chunk, uint32_t stride) {
+/* M17 PROBE BEGIN */
+    /* G5c: louder only with the probe and every backstop limit configured; M19's io otherwise */
+    if (m17_backstop_valid(&m17_probe)) {
+        m17_sio = *s->sio;
+        m17_sio.gain_q15 = m17_probe.gain_q15;
+        m17_sio.peak_limit = m17_probe.peak_limit;
+        memset(&m17_state, 0, sizeof m17_state);
+        m17_recent_peak = 0;
+        m17_louder = 1;
+        s->sio = &m17_sio;
+    }
+/* M17 PROBE END */
     const m11_speaker_io *io = s->io;
     const m19_stream_io *sio = s->sio;
     m19_stream_status *st = s->sst;

@@ -1,4 +1,4 @@
-/* M17 G5b: the speaker protection probe (awprobe.h). */
+/* M17 G5b/G5c: the speaker protection probe and the loudness backstop (awprobe.h). */
 #define _GNU_SOURCE
 #include "awprobe.h"
 
@@ -59,16 +59,63 @@ int m17_aw_status_parse(const void *rsp, size_t len, struct m17_aw_status *out) 
     return 0;
 }
 
+int m17_aw_status_is_reference(const struct m17_aw_status *st) {
+    return st->raw[0] == st->raw[1] && st->raw[4] == st->raw[5] && st->te[0] == M17_AW_REF_TE && st->te[1] == M17_AW_REF_TE;
+}
+
+int m17_backstop_valid(const struct m17_probe_config *cfg) {
+    const struct m17_backstop *b = &cfg->backstop;
+    return cfg->log && cfg->period_ms && cfg->period_ms <= 5000u && cfg->gain_q15 > 0 && cfg->gain_q15 <= 32768 &&
+           cfg->peak_limit > 0 && cfg->peak_limit <= 32767 && b->te_limit > M17_AW_REF_TE && b->te_limit <= 80 &&
+           b->re_min > 0 && b->re_min < b->re_max && b->ref_limit > 0 && b->loud_peak > 0;
+}
+
+enum m17_drop m17_backstop_step(const struct m17_backstop *cfg, struct m17_backstop_state *state, int probe_rc,
+                                const struct m17_aw_status *st, int32_t recent_peak) {
+    if (state->dropped)
+        return M17_DROP_NONE;
+    enum m17_drop why = M17_DROP_NONE;
+    if (probe_rc) {
+        why = M17_DROP_PROBE;
+    } else if (m17_aw_status_is_reference(st)) {
+        /* a reference while the sound was quiet is expected and changes nothing */
+        if (recent_peak >= cfg->loud_peak && ++state->ref_streak >= cfg->ref_limit)
+            why = M17_DROP_BLIND;
+    } else {
+        state->ref_streak = 0;
+        for (unsigned ch = 0; ch < 2 && !why; ch++) {
+            if (st->te[ch] >= cfg->te_limit)
+                why = M17_DROP_TEMP;
+            else if (st->re_mohm[ch] < cfg->re_min || st->re_mohm[ch] > cfg->re_max)
+                why = M17_DROP_RE;
+        }
+    }
+    state->dropped = why;
+    return why;
+}
+
+const char *m17_drop_name(enum m17_drop why) {
+    switch (why) {
+    case M17_DROP_NONE: return "none";
+    case M17_DROP_PROBE: return "probe";
+    case M17_DROP_TEMP: return "temp";
+    case M17_DROP_RE: return "re";
+    case M17_DROP_BLIND: return "blind";
+    }
+    return "unknown";
+}
+
 int m17_aw_status_log(const char *path, unsigned limit, const struct m17_aw_status *st, int amp_on, int32_t peak_out, int rc,
-                      uint32_t dsp_status) {
+                      uint32_t dsp_status, int32_t gain_q15, int live, enum m17_drop dropped) {
     struct timespec t;
     clock_gettime(CLOCK_BOOTTIME, &t);
-    char line[320];
+    char line[360];
     int n = snprintf(line, sizeof(line),
-                     "%lld.%03ld re=%d,%d te=%d,%d raw=%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x amp=%d peak=%d rc=%d status=%08x\n",
+                     "%lld.%03ld re=%d,%d te=%d,%d raw=%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x amp=%d peak=%d rc=%d status=%08x "
+                     "gain=%d live=%d drop=%s\n",
                      (long long)t.tv_sec, t.tv_nsec / 1000000, st->re_mohm[0], st->re_mohm[1], st->te[0], st->te[1], st->raw[0],
                      st->raw[1], st->raw[2], st->raw[3], st->raw[4], st->raw[5], st->raw[6], st->raw[7], amp_on, peak_out, rc,
-                     dsp_status);
+                     dsp_status, gain_q15, live, m17_drop_name(dropped));
     if (n < 0 || (size_t)n >= sizeof(line))
         return -EOVERFLOW;
     struct stat s;
