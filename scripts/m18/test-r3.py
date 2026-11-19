@@ -78,7 +78,7 @@ class Plan(unittest.TestCase):
                          {plan_r3b.PERF, plan_r3b.BYE, plan_r3b.SPINNER})
         perf = result[plan_r3b.PERF].decode()
         self.assertIn('Before=shutdown.target\nConflicts=shutdown.target\n', perf)
-        self.assertIn('ExecStop=/bin/sh /run/m19/etc/m18-mark shutdown-begins\n', perf)
+        self.assertIn("ExecStop=/bin/sh -c 'umask 077; exec /bin/sh /run/m19/etc/m18-mark shutdown-begins'\n", perf)
         bye = result[plan_r3b.BYE].decode()
         self.assertIn('After=marble-xorg.service marble-xorg-fallback.service marble-xfce.service m18-perf.service\n', bye)
         self.assertIn('ExecStart=@/run/m19/m18-bye @m18-bye\n', bye)
