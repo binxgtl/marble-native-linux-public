@@ -278,9 +278,11 @@ class Recorder(unittest.TestCase):
         (Path(env['M18_SYS']) / 'class/kgsl/kgsl-3d0/gpuclk').unlink()
         r = sh('perf-recorder', {**env, 'M18_LIMIT': '100', 'M18_COUNT': '3'})
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn(' gpu=- ', (d / 'perf.log').read_text())
-        self.assertTrue((d / 'perf.log.1').exists())
-        self.assertLess(len((d / 'perf.log').read_text()), 400)
+        for name in ('perf.log', 'perf.log.1'):
+            text = (d / name).read_text()
+            self.assertIn(' zones=cpu-0-0,battery,\n', text.splitlines(keepends=True)[0])
+            self.assertIn(' gpu=- ', text)
+            self.assertLess(len(text), 400)
 
     def test_reads_only(self):
         text = (M18 / 'perf-recorder').read_text()
@@ -290,6 +292,12 @@ class Recorder(unittest.TestCase):
 
 
 class Analyze(unittest.TestCase):
+    def mock_sleep(self, directory):
+        sleep = directory / 'sleep'
+        sleep.write_text('#!/bin/sh\nprintf "%s\\n" "$1" >>"$M18_TEST_SLEEPS"\n')
+        sleep.chmod(0o755)
+        return {'PATH': f'{directory}{os.pathsep}{os.environ["PATH"]}', 'M18_TEST_SLEEPS': str(directory / 'sleeps')}
+
     def test_log(self):
         d = Path(tempfile.mkdtemp())
         (d / 'systemctl').write_text('#!/bin/sh\necho running\n')
@@ -297,12 +305,14 @@ class Analyze(unittest.TestCase):
         for f in ('systemctl', 'analyze'):
             (d / f).chmod(0o755)
         (d / 'a.log').write_text('older\n')
-        env = {'M18_LOG': str(d / 'a.log'), 'M18_ANALYZE': str(d / 'analyze'), 'M18_SYSTEMCTL': str(d / 'systemctl'), 'M18_LIMIT': '3'}
+        env = {**self.mock_sleep(d), 'M18_LOG': str(d / 'a.log'), 'M18_ANALYZE': str(d / 'analyze'),
+               'M18_SYSTEMCTL': str(d / 'systemctl'), 'M18_LIMIT': '3'}
         self.assertEqual(sh('boot-analyze', env).returncode, 0)
         text = (d / 'a.log').read_text()
         self.assertRegex(text, r'^M18 analyze v1 boot=\S+ state=running waited=0\n== time\nanalyze time\n== blame\n'
                                r'analyze blame --no-pager\n== critical-chain\nanalyze critical-chain --no-pager\n$')
         self.assertEqual((d / 'a.log.1').read_text(), 'older\n')
+        self.assertFalse((d / 'sleeps').exists())
 
     def test_gives_up_waiting(self):
         d = Path(tempfile.mkdtemp())
@@ -310,9 +320,11 @@ class Analyze(unittest.TestCase):
         (d / 'analyze').write_text('#!/bin/sh\nexit 1\n')
         for f in ('systemctl', 'analyze'):
             (d / f).chmod(0o755)
-        env = {'M18_LOG': str(d / 'a.log'), 'M18_ANALYZE': str(d / 'analyze'), 'M18_SYSTEMCTL': str(d / 'systemctl'), 'M18_LIMIT': '2'}
+        env = {**self.mock_sleep(d), 'M18_LOG': str(d / 'a.log'), 'M18_ANALYZE': str(d / 'analyze'),
+               'M18_SYSTEMCTL': str(d / 'systemctl'), 'M18_LIMIT': '2'}
         self.assertEqual(sh('boot-analyze', env).returncode, 0)
         self.assertIn('state=starting waited=2\n', (d / 'a.log').read_text())
+        self.assertEqual((d / 'sleeps').read_text().splitlines(), ['1', '1'])
 
 
 if __name__ == '__main__':

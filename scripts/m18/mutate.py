@@ -44,10 +44,11 @@ MUTANTS = [
     ('ce-done', " | tr -cd 'A-Za-z0-9_=. -')", ')'),
     ('ce-done', '>>"$LIB/m18-ce.log"', '>"$LIB/m18-ce.log"'),
     # perf-recorder: what each line holds, the rotation, the count
-    ('perf-recorder', '$(value "$p/scaling_governor")', '-'),
-    ('perf-recorder', '$(value "$z/temp")', '0'),
+    ('perf-recorder', 'read_value "$p/scaling_governor"', 'v=-'),
+    ('perf-recorder', 'read_value "$z/temp"', 'v=0'),
     ('perf-recorder', '$(value "$b/current_now")', '$(value "$b/voltage_now")'),
     ('perf-recorder', '"$(wc -c <"$LOG")" -ge "$LIMIT"', '"$(wc -c <"$LOG")" -ge 999999999'),
+    ('perf-recorder', 'then write_header "$stamp"; fi', 'then :; fi'),
     ('perf-recorder', '[ "$n" -ge "$COUNT" ]', '[ "$n" -gt "$COUNT" ]'),
     ('perf-recorder', "grep -m 1 '^MemAvailable:'", "grep -m 1 '^MemFree:'"),
     # R2 governor: walt first, then schedutil, never anything else; the read-back decides; walt's tunables recorded
@@ -55,6 +56,7 @@ MUTANTS = [
     ('governor', '  for g in walt schedutil; do', '  for g in walt schedutil performance; do'),
     ('governor', '  [ "$now" = "$want" ] || rc=1', '  :'),
     ('governor', '    rc=1\n    continue', '    continue'),
+    ('governor', '[ "$policies" -eq 0 ]', '[ "$policies" -lt 0 ]'),
     ('governor', 'for f in hispeed_freq hispeed_load target_load_thresh', 'for f in hispeed_freq target_load_thresh'),
     # R2 thermal: load once, a failed load fails the unit, only numbers count as readable
     ('thermal', "if ! grep -q '^qcom_tsens ' \"$PROC/modules\" 2>/dev/null; then", 'if true; then'),

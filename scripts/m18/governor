@@ -8,8 +8,10 @@ SYS=${M18_SYS:-/sys}
 LIB=${M18_LIB:-/var/lib/m19}
 up=$(cut -d ' ' -f 1 /proc/uptime 2>/dev/null || echo 0)
 rc=0
+policies=0
 for p in "$SYS"/devices/system/cpu/cpufreq/policy*; do
   [ -f "$p/scaling_available_governors" ] || continue
+  policies=$((policies + 1))
   offered=$(cat "$p/scaling_available_governors" 2>/dev/null || :)
   want=
   for g in walt schedutil; do
@@ -37,4 +39,8 @@ for p in "$SYS"/devices/system/cpu/cpufreq/policy*; do
     printf '%s M18 walt %s%s\n' "$up" "${p##*/}" "$tun" >>"$LIB/m18-tune.log"
   fi
 done
+if [ "$policies" -eq 0 ]; then
+  printf '%s M18 governor policies=0 set=none\n' "$up" >>"$LIB/m18-tune.log"
+  rc=1
+fi
 exit "$rc"

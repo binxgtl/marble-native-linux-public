@@ -13,18 +13,25 @@ PERIOD=${M18_PERIOD:-5}
 COUNT=${M18_COUNT:-0}
 LIMIT=${M18_LIMIT:-1048576}
 
-value() {
+read_value() {
   v=
   if [ -r "$1" ]; then
     read -r v <"$1" 2>/dev/null || :
   fi
-  printf '%s' "${v:--}"
+  v=${v:--}
+}
+
+value() {
+  read_value "$1"
+  printf '%s' "$v"
 }
 
 rotate() {
-  if [ -f "$LOG" ] && [ "$(wc -c <"$LOG")" -ge "$LIMIT" ]; then
-    mv -f "$LOG" "$LOG.1"
-  fi
+  [ -f "$LOG" ] && [ "$(wc -c <"$LOG")" -ge "$LIMIT" ] && mv -f "$LOG" "$LOG.1"
+}
+
+write_header() {
+  printf '%s %s\n' "$1" "$header" >>"$LOG"
 }
 
 policies=$(ls -d "$SYS"/devices/system/cpu/cpufreq/policy* 2>/dev/null || :)
@@ -32,22 +39,31 @@ zones=$(ls -d "$SYS"/class/thermal/thermal_zone* 2>/dev/null || :)
 header="M18 perf v1 period=$PERIOD policies="
 for p in $policies; do header="$header${p##*/}($(value "$p/related_cpus" | tr ' ' '.')),"; done
 header="$header zones="
-for z in $zones; do header="$header$(value "$z/type"),"; done
-rotate
-printf '%s %s\n' "$(value "$PROC/uptime" | cut -d ' ' -f 1)" "$header" >>"$LOG"
+for z in $zones; do read_value "$z/type"; header="$header$v,"; done
+rotate || :
+read_value "$PROC/uptime"
+write_header "${v%% *}"
 
 n=0
 while :; do
-  line="$(value "$PROC/uptime" | cut -d ' ' -f 1) cpu="
-  for p in $policies; do line="$line$(value "$p/scaling_cur_freq")/$(value "$p/scaling_governor"),"; done
-  line="$line gpu=$(value "$SYS/class/kgsl/kgsl-3d0/gpuclk")"
+  read_value "$PROC/uptime"
+  stamp=${v%% *}
+  line="$stamp cpu="
+  for p in $policies; do
+    read_value "$p/scaling_cur_freq"
+    line="$line$v/"
+    read_value "$p/scaling_governor"
+    line="$line$v,"
+  done
+  read_value "$SYS/class/kgsl/kgsl-3d0/gpuclk"
+  line="$line gpu=$v"
   line="$line tz="
-  for z in $zones; do line="$line$(value "$z/temp"),"; done
+  for z in $zones; do read_value "$z/temp"; line="$line$v,"; done
   b=$SYS/class/power_supply/battery
   line="$line bat=$(value "$b/voltage_now"),$(value "$b/current_now"),$(value "$b/capacity"),$(value "$b/temp")"
   line="$line load=$(value "$PROC/loadavg" | cut -d ' ' -f 1-3 | tr ' ' ',')"
   line="$line mem=$(grep -m 1 '^MemAvailable:' "$PROC/meminfo" 2>/dev/null | tr -s ' ' | cut -d ' ' -f 2)"
-  rotate
+  if rotate; then write_header "$stamp"; fi
   printf '%s\n' "$line" >>"$LOG"
   n=$((n + 1))
   if [ "$COUNT" -gt 0 ] && [ "$n" -ge "$COUNT" ]; then

@@ -116,6 +116,12 @@ class Governor(unittest.TestCase):
         self.assertEqual(r.returncode, 1)
         self.assertIn(' set=walt now=performance ', (d / 'lib/m18-tune.log').read_text())
 
+    def test_no_policies_fails(self):
+        d, env = self.tree([])
+        r = sh('governor', env)
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertIn(' M18 governor policies=0 set=none\n', (d / 'lib/m18-tune.log').read_text())
+
 
 class Thermal(unittest.TestCase):
     def tree(self, temps, loaded=False):
