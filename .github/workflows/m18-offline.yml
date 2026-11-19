@@ -19,8 +19,10 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - name: M18 R1 copies against M17, M17's native-path and session tests on M18's copies (normal and ASan/UBSan), the plan on M19 R9's own plan, the scripts on synthetic trees, then static binaries twice (no device)
+      - name: M18 regression and sanitizer tests, plus reproducible static binaries on ARM64
         timeout-minutes: 10
+        env:
+          M18_STATIC: ${{ runner.arch == 'ARM64' && '1' || '0' }}
         run: bash scripts/m18/test.sh artifacts/m18/${{ runner.arch }}
       - name: Upload the reviewable static binaries (ARM64 only, no boot image)
         if: runner.arch == 'ARM64'
@@ -46,6 +48,6 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - name: Mutants of M18's copies and scripts (no device)
+      - name: Test each M18 mutant against its owning suite
         timeout-minutes: 25
         run: python3 scripts/m18/mutate.py

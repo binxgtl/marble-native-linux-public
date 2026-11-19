@@ -1,8 +1,5 @@
 #!/usr/bin/env python3
-"""M18 R1: every mutant of M18's own logic must fail test.sh (normal build, no static binaries, the copies check off
-because the mutants change the copies on purpose). The daily values themselves (blue_ms 0, no CE unit, the plain tar)
-are pinned by the copies' substitutions and test-r1.py, not by mutants."""
-import os
+"""Require each M18 mutant to fail the test suite that exercises its changed code."""
 import subprocess
 import sys
 import tempfile
@@ -10,6 +7,18 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 M18 = ROOT / 'scripts/m18'
+
+C_SUITES = {'native.c': 'native', 'session.c': 'native', 'bye.c': 'spinner', 'shutdown-trace.c': 'shutdown-trace'}
+PYTHON_CASES = {
+    'ce-ready': ('test-r1.py', 'CeReady'),
+    'ce-done': ('test-r1.py', 'CeDone'),
+    'perf-recorder': ('test-r1.py', 'Recorder'),
+    'boot-analyze': ('test-r1.py', 'Analyze'),
+    'governor': ('test-r2.py', 'Governor'),
+    'thermal': ('test-r2.py', 'Thermal'),
+    'mark': ('test-r3.py', 'Mark'),
+    'plan_r3b.py': ('test-r3.py', 'Plan.test_r3b_only_changes_shutdown_observation'),
+}
 
 MUTANTS = [
     # native.c: no blue when blue_ms is 0; colour on failure only
@@ -69,6 +78,11 @@ MUTANTS = [
     ('mark', "| tr -cd 'A-Za-z0-9-')", ')'),
     ('mark', '>>"$LIB/m18-shutdown.log" 2>/dev/null || :', '>"$LIB/m18-shutdown.log" 2>/dev/null || :'),
     ('mark', '"${word:-none}"', '"$word"'),
+    # R3b: shutdown orders a stop, keeps the first log private, and filters the process list.
+    ('plan_r3b.py', 'Conflicts=shutdown.target', 'Conflicts=unused.target'),
+    ('plan_r3b.py', 'umask 077', 'umask 022'),
+    ('shutdown-trace.c', '#define PF_KTHREAD 0x00200000u', '#define PF_KTHREAD 0u'),
+    ('shutdown-trace.c', 'pid <= 1 || pid == spinner', 'pid <= 1 || pid == spinner + 1'),
     # boot-analyze: waits for the start, keeps the previous boot's account
     ('boot-analyze', 'running|degraded) break;;', 'nothing) break;;'),
     ('boot-analyze', '  mv -f "$LOG" "$LOG.1"', '  rm -f "$LOG"'),
@@ -76,13 +90,22 @@ MUTANTS = [
 ]
 
 
+def test_command(name, out):
+    if name in C_SUITES:
+        return ('bash', str(M18 / 'test.sh'), out, 'normal', C_SUITES[name])
+    script, test_case = PYTHON_CASES[name]
+    # Equal-length source mutations can otherwise reuse an imported module's baseline bytecode.
+    return (sys.executable, '-B', '-X', f'pycache_prefix={Path(out) / "pycache"}', str(M18 / script), test_case)
+
+
 def main():
     survived = []
     with tempfile.TemporaryDirectory() as out:
-        env = {**os.environ, 'M18_STATIC': '0', 'M18_COPIES': '0'}
-        base = subprocess.run(['bash', str(M18 / 'test.sh'), out, 'normal'], env=env, capture_output=True, text=True)
-        if base.returncode:
-            sys.exit('the unmutated tests fail:\n' + base.stdout[-3000:] + base.stderr[-3000:])
+        commands = {name: test_command(name, out) for name, _, _ in MUTANTS}
+        for command in sorted(set(commands.values())):
+            base = subprocess.run(command, capture_output=True, text=True, timeout=90)
+            if base.returncode:
+                sys.exit(f'unmutated test failed: {command}\n' + base.stdout[-3000:] + base.stderr[-3000:])
         for i, (name, old, new) in enumerate(MUTANTS, 1):
             path = M18 / name
             text = path.read_text(encoding='utf-8')
@@ -90,7 +113,7 @@ def main():
                 sys.exit(f'mutant {i} ({name}): {old[:50]!r} found {text.count(old)} times')
             path.write_text(text.replace(old, new), encoding='utf-8', newline='\n')
             try:
-                r = subprocess.run(['bash', str(M18 / 'test.sh'), out, 'normal'], env=env, capture_output=True, text=True, timeout=600)
+                r = subprocess.run(commands[name], capture_output=True, text=True, timeout=90)
             finally:
                 path.write_text(text, encoding='utf-8', newline='\n')
             if r.returncode == 0:

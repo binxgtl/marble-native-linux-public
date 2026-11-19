@@ -2,36 +2,52 @@
 # M18 R1 (docs/m18-performance-polish.md): the copies against M17 (copies.py), M17's native-path and session tests on
 # M18's copies, normal and ASan/UBSan, the plan and the scripts on synthetic trees (test-r1.py); then, unless
 # M18_STATIC=0, the phone's static binaries twice, which must match. No device. Usage: test.sh OUTDIR [normal]
-# M18_COPIES=0 skips the copies check (the mutants change the copies on purpose).
+# Mutation tests can select one C suite with OUTDIR normal native|spinner|shutdown-trace.
 set -euo pipefail
 out=${1:?output}; mkdir -p "$out"
-only=${2:-}
 src=$(cd "$(dirname "$0")" && pwd)
 m17=$src/../m17
 m19=$src/../m19
+
+run_c_test() (
+  local suite=$1 variant=$2 binary="$out/test-$1-$2" scratch
+  local flags=(-std=c11 -O2 -Wall -Wextra -Werror -I"$m17")
+  if [[ $variant == sanitize ]]; then
+    flags+=(-O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer)
+  fi
+  case $suite in
+    native)
+      gcc "${flags[@]}" "$m17/select.c" "$m17/load.c" "$src/native.c" "$m17/cmd.c" "$src/session.c" \
+        "$m17/volkeys.c" "$src/test-r1.c" -o "$binary" || return
+      ;;
+    spinner) gcc "${flags[@]}" "$src/bye.c" "$src/test-r3.c" -lm -o "$binary" || return ;;
+    shutdown-trace) gcc "${flags[@]}" "$src/shutdown-trace.c" "$src/test-r3b.c" -o "$binary" || return ;;
+    *) echo "Unknown M18 test suite: $suite" >&2; return 2 ;;
+  esac
+  scratch=$(mktemp -d) || return
+  trap 'rm -r -- "$scratch"' EXIT
+  if [[ $suite == shutdown-trace ]]; then
+    "$binary" "$scratch"
+  else
+    TMPDIR="$scratch" "$binary"
+  fi
+)
+
+if [[ -n ${3:-} ]]; then
+  [[ ${2:-} == normal ]] || exit 2
+  run_c_test "$3" normal
+  exit
+fi
 if [[ ${M18_COPIES:-1} == 1 ]]; then
   python3 "$src/copies.py" check
 fi
 variants=(normal sanitize)
-[[ -n $only ]] && variants=("$only")
-for variant in "${variants[@]}"; do
-  flags=(-std=c11 -O2 -Wall -Wextra -Werror -I"$m17")
-  if [[ $variant == sanitize ]]; then
-    flags+=(-O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer)
-  fi
-  gcc "${flags[@]}" "$m17/select.c" "$m17/load.c" "$src/native.c" "$m17/cmd.c" "$src/session.c" "$m17/volkeys.c" "$src/test-r1.c" \
-    -o "$out/test-r1-$variant"
-  gcc "${flags[@]}" "$src/bye.c" "$src/test-r3.c" -lm -o "$out/test-r3-$variant"
-  gcc "${flags[@]}" "$src/shutdown-trace.c" "$src/test-r3b.c" -o "$out/test-r3b-$variant"
-done
+[[ -n ${2:-} ]] && variants=("$2")
 rc=0
 for variant in "${variants[@]}"; do
-  TMPDIR=$(mktemp -d) "$out/test-r1-$variant" >"$out/test-r1-$variant.txt" 2>&1 || rc=1
-  cat "$out/test-r1-$variant.txt"
-  TMPDIR=$(mktemp -d) "$out/test-r3-$variant" || rc=1
-  scratch=$(mktemp -d)
-  "$out/test-r3b-$variant" "$scratch" || rc=1
-  rm -r -- "$scratch"
+  for suite in native spinner shutdown-trace; do
+    run_c_test "$suite" "$variant" || rc=1
+  done
 done
 python3 "$src/test-r1.py" || rc=1
 python3 "$src/test-r2.py" || rc=1
