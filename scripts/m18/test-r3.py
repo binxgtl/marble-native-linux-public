@@ -16,11 +16,13 @@ sys.path.insert(0, str(ROOT / 'scripts/m19/run2'))
 import dailyplan  # noqa: E402
 import plan_r2  # noqa: E402
 import plan_r3  # noqa: E402
+import plan_r3b  # noqa: E402
 import r1plan  # noqa: E402
 import r9plan  # noqa: E402
 
 MODULE = b'\x7fELF' + b'\0' * 60 + b'name=qcom_tsens\0'
 BYE = b'\x7fELF\x02\x01' + b'\0' * 58 + b'%lld.%02ld M18 bye %s\n'
+TRACE = BYE + b'M18 procs count='
 
 
 def sources(names):
@@ -68,6 +70,21 @@ class Plan(unittest.TestCase):
     def test_refuses_a_bad_binary(self):
         with self.assertRaises(AssertionError):
             plan_r3.plan(self.r2, sources(set(plan_r3.SOURCES.values())), b'#!/bin/sh\n')
+
+    def test_r3b_only_changes_shutdown_observation(self):
+        result = plan_r3b.plan(self.r3, TRACE)
+        self.assertEqual(set(result), set(self.r3))
+        self.assertEqual({key for key in result if result[key] != self.r3[key]},
+                         {plan_r3b.PERF, plan_r3b.BYE, plan_r3b.SPINNER})
+        perf = result[plan_r3b.PERF].decode()
+        self.assertIn('Before=shutdown.target\nConflicts=shutdown.target\n', perf)
+        self.assertIn('ExecStop=/bin/sh /run/m19/etc/m18-mark shutdown-begins\n', perf)
+        bye = result[plan_r3b.BYE].decode()
+        self.assertIn('After=marble-xorg.service marble-xorg-fallback.service marble-xfce.service m18-perf.service\n', bye)
+        self.assertIn('ExecStart=@/run/m19/m18-bye @m18-bye\n', bye)
+        self.assertEqual(result[plan_r3b.SPINNER], TRACE)
+        with self.assertRaises(AssertionError):
+            plan_r3b.plan(self.r3, BYE)
 
 
 class Mark(unittest.TestCase):

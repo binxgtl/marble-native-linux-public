@@ -22,12 +22,16 @@ for variant in "${variants[@]}"; do
   gcc "${flags[@]}" "$m17/select.c" "$m17/load.c" "$src/native.c" "$m17/cmd.c" "$src/session.c" "$m17/volkeys.c" "$src/test-r1.c" \
     -o "$out/test-r1-$variant"
   gcc "${flags[@]}" "$src/bye.c" "$src/test-r3.c" -lm -o "$out/test-r3-$variant"
+  gcc "${flags[@]}" "$src/shutdown-trace.c" "$src/test-r3b.c" -o "$out/test-r3b-$variant"
 done
 rc=0
 for variant in "${variants[@]}"; do
   TMPDIR=$(mktemp -d) "$out/test-r1-$variant" >"$out/test-r1-$variant.txt" 2>&1 || rc=1
   cat "$out/test-r1-$variant.txt"
   TMPDIR=$(mktemp -d) "$out/test-r3-$variant" || rc=1
+  scratch=$(mktemp -d)
+  "$out/test-r3b-$variant" "$scratch" || rc=1
+  rm -r -- "$scratch"
 done
 python3 "$src/test-r1.py" || rc=1
 python3 "$src/test-r2.py" || rc=1
@@ -48,8 +52,9 @@ for copy in a b; do
     "$m17/selector-main.c" -o "$out/m17-selector-native-$copy"
   # R3: the shutdown's spinner, with the selector's KMS code
   gcc "${flags[@]}" -I"$m17" "$src/bye.c" "$src/bye-main.c" "$m17/kms.c" -lm -o "$out/m18-bye-$copy"
+  gcc "${flags[@]}" -DM18_R3B -I"$m17" "$src/bye.c" "$src/bye-main.c" "$src/shutdown-trace.c" "$m17/kms.c" -lm -o "$out/m18-bye-r3b-$copy"
 done
-for name in m18-native m17-native m17-selector-native m18-bye; do
+for name in m18-native m17-native m17-selector-native m18-bye m18-bye-r3b; do
   cmp "$out/$name-a" "$out/$name-b"
   sha256sum "$out/$name-a"
 done | tee "$out/m18-binaries.txt"

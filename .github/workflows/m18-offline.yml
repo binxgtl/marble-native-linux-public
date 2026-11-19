@@ -36,6 +36,8 @@ jobs:
             artifacts/m18/ARM64/m17-selector-native-b
             artifacts/m18/ARM64/m18-bye-a
             artifacts/m18/ARM64/m18-bye-b
+            artifacts/m18/ARM64/m18-bye-r3b-a
+            artifacts/m18/ARM64/m18-bye-r3b-b
             artifacts/m18/ARM64/m18-binaries.txt
           if-no-files-found: error
           retention-days: 30

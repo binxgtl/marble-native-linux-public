@@ -6,6 +6,9 @@
 #define _GNU_SOURCE
 #include "bye.h"
 #include "kms.h"
+#ifdef M18_R3B
+#include "shutdown-trace.h"
+#endif
 
 #include <time.h>
 #include <unistd.h>
@@ -31,8 +34,13 @@ int main(int argc, char **argv) {
                 (void)m18_bye_log(LOG, "kms=lost");
             }
         }
-        if (frame % 30u == 0u)
+        if (frame % 30u == 0u) {
             (void)m18_bye_log(LOG, "alive");
+#ifdef M18_R3B
+            if (frame / 30u < 12u && m18_shutdown_snapshot("/proc", LOG, getpid()) < 0)
+                (void)m18_bye_log(LOG, "procs=unavailable");
+#endif
+        }
         nanosleep(&pause, NULL);
     }
 }
